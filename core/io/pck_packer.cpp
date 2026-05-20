@@ -136,6 +136,7 @@ Error PCKPacker::add_file_removal(const String &p_target_path) {
 	pf.path = p_target_path.simplify_path().trim_prefix("res://");
 	pf.ofs = file->get_position();
 	pf.size = 0;
+	pf.stored_size = 0;
 	pf.removal = true;
 
 	pf.md5.resize_initialized(16);
@@ -190,6 +191,7 @@ Error PCKPacker::add_file(const String &p_target_path, const String &p_source_pa
 		ftmp.unref();
 		fae.unref();
 	}
+	pf.stored_size = file->get_position() - pf.ofs;
 
 	int pad = _get_pad(alignment, file->get_position());
 	for (int j = 0; j < pad; j++) {
@@ -244,6 +246,7 @@ Error PCKPacker::flush(bool p_verbose) {
 
 		fhead->store_64(files[i].ofs - file_base);
 		fhead->store_64(files[i].size);
+		fhead->store_64(files[i].stored_size);
 		fhead->store_buffer(files[i].md5.ptr(), 16);
 
 		uint32_t flags = 0;
@@ -252,6 +255,9 @@ Error PCKPacker::flush(bool p_verbose) {
 		}
 		if (files[i].removal) {
 			flags |= PACK_FILE_REMOVAL;
+		}
+		if (files[i].lzma2) {
+			flags |= PACK_FILE_LZMA2;
 		}
 		fhead->store_32(flags);
 
