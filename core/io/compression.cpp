@@ -30,12 +30,12 @@
 
 #include "compression.h"
 
-#include "core/config/project_settings.h"
 #include "core/io/pck_lzma.h"
 #include "core/io/zip_io.h"
 
 #include "thirdparty/misc/fastlz.h"
 
+#include <string.h>
 #include <zstd.h>
 
 #ifdef BROTLI_ENABLED
@@ -120,7 +120,9 @@ int64_t Compression::compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_sr
 			}
 			Vector<uint8_t> src_data;
 			src_data.resize((int)p_src_size);
-			memcpy(src_data.ptrw(), p_src, p_src_size);
+			if (p_src_size > 0) {
+				memcpy(src_data.ptrw(), p_src, p_src_size);
+			}
 
 			Vector<uint8_t> compressed_data;
 			const Error err = compress_lzma2(src_data, compressed_data, _get_default_lzma2_options());
@@ -172,6 +174,7 @@ int64_t Compression::get_max_compressed_buffer_size(int64_t p_src_size, Mode p_m
 		case MODE_LZMA2: {
 			ERR_FAIL_COND_V_MSG(p_src_size < 0, -1, "Invalid source size.");
 			ERR_FAIL_COND_V_MSG(p_src_size > (INT64_MAX - 1024) / 2, -1, "LZMA2 source size is too large.");
+			// Conservative buffer to avoid overflow in callers that preallocate.
 			return (p_src_size * 2) + 1024;
 		} break;
 	}
