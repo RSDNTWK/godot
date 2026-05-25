@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  compression.h                                                         */
+/*  texture_loader_webp.h                                                 */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,31 +30,15 @@
 
 #pragma once
 
-#include "core/templates/vector.h"
-#include "core/typedefs.h"
+#include "core/io/resource_loader.h"
 
-#include <zlib.h>
+class ResourceFormatWebP : public ResourceFormatLoader {
+	GDSOFTCLASS(ResourceFormatWebP, ResourceFormatLoader);
 
-class Compression {
 public:
-	static inline int zlib_level = Z_DEFAULT_COMPRESSION;
-	static inline int gzip_level = Z_DEFAULT_COMPRESSION;
-	static inline int zstd_level = 3;
-	static inline bool zstd_long_distance_matching = false;
-	static inline int zstd_window_log_size = 27; // ZSTD_WINDOWLOG_LIMIT_DEFAULT
-	static inline int gzip_chunk = 16384;
-
-	enum Mode : int32_t {
-		MODE_FASTLZ,
-		MODE_DEFLATE,
-		MODE_ZSTD,
-		MODE_GZIP,
-		MODE_BROTLI,
-		MODE_LZMA2
-	};
-
-	static int64_t compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_src_size, Mode p_mode = MODE_ZSTD);
-	static int64_t get_max_compressed_buffer_size(int64_t p_src_size, Mode p_mode = MODE_ZSTD);
-	static int64_t decompress(uint8_t *p_dst, int64_t p_dst_max_size, const uint8_t *p_src, int64_t p_src_size, Mode p_mode = MODE_ZSTD);
-	static int decompress_dynamic(Vector<uint8_t> *p_dst_vect, int64_t p_max_dst_size, const uint8_t *p_src, int64_t p_src_size, Mode p_mode);
+	virtual Ref<Resource> load(const String &p_path, const String &p_original_path = "", Error *r_error = nullptr, bool p_use_sub_threads = false, float *r_progress = nullptr, CacheMode p_cache_mode = CACHE_MODE_REUSE) override;
+	virtual void get_recognized_extensions(List<String> *p_extensions) const override;
+	virtual bool handles_type(const String &p_type) const override;
+	virtual String get_resource_type(const String &p_path) const override;
 };
+

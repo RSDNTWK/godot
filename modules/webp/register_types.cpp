@@ -32,9 +32,11 @@
 
 #include "image_loader_webp.h"
 #include "resource_saver_webp.h"
+#include "texture_loader_webp.h"
 
 static Ref<ImageLoaderWebP> image_loader_webp;
 static Ref<ResourceSaverWebP> resource_saver_webp;
+static Ref<ResourceFormatWebP> resource_loader_webp;
 
 void initialize_webp_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
@@ -46,6 +48,9 @@ void initialize_webp_module(ModuleInitializationLevel p_level) {
 
 	resource_saver_webp.instantiate();
 	ResourceSaver::add_resource_format_saver(resource_saver_webp);
+
+	resource_loader_webp.instantiate();
+	ResourceLoader::add_resource_format_loader(resource_loader_webp);
 }
 
 void uninitialize_webp_module(ModuleInitializationLevel p_level) {
@@ -58,4 +63,7 @@ void uninitialize_webp_module(ModuleInitializationLevel p_level) {
 
 	ResourceSaver::remove_resource_format_saver(resource_saver_webp);
 	resource_saver_webp.unref();
+
+	ResourceLoader::remove_resource_format_loader(resource_loader_webp);
+	resource_loader_webp.unref();
 }
