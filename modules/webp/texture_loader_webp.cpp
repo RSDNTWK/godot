@@ -93,7 +93,10 @@ static Ref<Resource> _load_animated_webp_texture(const uint8_t *p_data, size_t p
 	Ref<AnimatedTexture> animated_texture;
 	animated_texture.instantiate();
 	animated_texture->set_frames(frame_count);
-	animated_texture->set_one_shot(info.loop_count == 1);
+	// WebP loop_count == 0 means infinite looping; any non-zero value is finite.
+	// AnimatedTexture currently supports one-shot vs looping, so finite WebP loops
+	// are mapped to one-shot playback.
+	animated_texture->set_one_shot(info.loop_count != 0);
 
 	const int image_data_size = info.canvas_width * info.canvas_height * 4;
 	int prev_timestamp_msec = 0;
