@@ -169,7 +169,7 @@ void AnimatedTexture::set_frame_texture(int p_frame, const Ref<Texture2D> &p_tex
 
 	RWLockWrite w(rw_lock);
 
-	frames[p_frame].texture = p_texture;
+	frames.write[p_frame].texture = p_texture;
 }
 
 Ref<Texture2D> AnimatedTexture::get_frame_texture(int p_frame) const {
@@ -185,7 +185,7 @@ void AnimatedTexture::set_frame_duration(int p_frame, float p_duration) {
 
 	RWLockWrite r(rw_lock);
 
-	frames[p_frame].duration = p_duration;
+	frames.write[p_frame].duration = p_duration;
 }
 
 float AnimatedTexture::get_frame_duration(int p_frame) const {
