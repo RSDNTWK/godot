@@ -318,7 +318,8 @@ Error EditorExportPlatform::_save_pack_file(const Ref<EditorExportPreset> &p_pre
 	sd.size = p_data.size();
 	sd.delta = p_delta;
 
-	const bool pck_7zip_enabled = bool(_preset_get_or_default(p_preset, "pck_7zip/enabled", true));
+	const bool has_pck_7zip_option = p_preset->has("pck_7zip/enabled");
+	const bool pck_7zip_enabled = has_pck_7zip_option && bool(_preset_get_or_default(p_preset, "pck_7zip/enabled", true));
 	const String pck_7zip_archive_format = String(_preset_get_or_default(p_preset, "pck_7zip/archive_format", "7z")).to_lower();
 	const String pck_7zip_method = String(_preset_get_or_default(p_preset, "pck_7zip/compression_method", "LZMA2")).to_upper();
 	const int logical_threads = MAX(1, OS::get_singleton()->get_processor_count());
@@ -329,7 +330,7 @@ Error EditorExportPlatform::_save_pack_file(const Ref<EditorExportPreset> &p_pre
 	int pck_7zip_word_size = CLAMP(int(_preset_get_or_default(p_preset, "pck_7zip/word_size", 64)), 5, 273);
 	const String pck_7zip_solid = String(_preset_get_or_default(p_preset, "pck_7zip/solid_block_size", "16GB"));
 
-	if (pck_7zip_archive_format != "7z" || pck_7zip_method != "LZMA2") {
+	if (pck_7zip_enabled && ((pck_7zip_archive_format != "7z" && pck_7zip_archive_format != "pck") || (pck_7zip_archive_format == "7z" && pck_7zip_method != "LZMA2"))) {
 		if (!pd->warned_pck_7zip_format) {
 			WARN_PRINT(vformat("Unsupported pck_7zip/archive_format or pck_7zip/compression_method. Falling back to raw payload for \"%s\".", simplified_path));
 			pd->warned_pck_7zip_format = true;

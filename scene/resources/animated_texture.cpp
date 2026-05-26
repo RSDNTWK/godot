@@ -33,6 +33,29 @@
 #include "core/os/os.h"
 #include "servers/rendering/rendering_server.h"
 
+namespace {
+bool _parse_frame_property(const StringName &p_name, int &r_frame, String &r_prop_name) {
+	const String property = p_name;
+	if (!property.begins_with("frame_")) {
+		return false;
+	}
+
+	const int slash_pos = property.find_char('/');
+	if (slash_pos == -1) {
+		return false;
+	}
+
+	const String frame_str = property.substr(6, slash_pos - 6);
+	if (frame_str.is_empty()) {
+		return false;
+	}
+
+	r_frame = frame_str.to_int();
+	r_prop_name = property.substr(slash_pos + 1);
+	return true;
+}
+} // namespace
+
 void AnimatedTexture::_update_proxy() {
 	RWLockRead r(rw_lock);
 
@@ -87,11 +110,22 @@ void AnimatedTexture::_update_proxy() {
 }
 
 void AnimatedTexture::set_frames(int p_frames) {
-	ERR_FAIL_COND(p_frames < 1 || p_frames > MAX_FRAMES);
+	ERR_FAIL_COND(p_frames < 1);
 
 	RWLockWrite r(rw_lock);
 
+	const int old_count = frame_count;
 	frame_count = p_frames;
+	frames.resize(frame_count);
+	if (current_frame >= frame_count) {
+		current_frame = frame_count - 1;
+	}
+	if (current_frame < 0) {
+		current_frame = 0;
+	}
+	if (old_count != frame_count) {
+		notify_property_list_changed();
+	}
 }
 
 int AnimatedTexture::get_frames() const {
@@ -131,7 +165,7 @@ bool AnimatedTexture::get_one_shot() const {
 
 void AnimatedTexture::set_frame_texture(int p_frame, const Ref<Texture2D> &p_texture) {
 	ERR_FAIL_COND(p_texture == this);
-	ERR_FAIL_INDEX(p_frame, MAX_FRAMES);
+	ERR_FAIL_INDEX(p_frame, frame_count);
 
 	RWLockWrite w(rw_lock);
 
@@ -139,7 +173,7 @@ void AnimatedTexture::set_frame_texture(int p_frame, const Ref<Texture2D> &p_tex
 }
 
 Ref<Texture2D> AnimatedTexture::get_frame_texture(int p_frame) const {
-	ERR_FAIL_INDEX_V(p_frame, MAX_FRAMES, Ref<Texture2D>());
+	ERR_FAIL_INDEX_V(p_frame, frame_count, Ref<Texture2D>());
 
 	RWLockRead r(rw_lock);
 
@@ -147,7 +181,7 @@ Ref<Texture2D> AnimatedTexture::get_frame_texture(int p_frame) const {
 }
 
 void AnimatedTexture::set_frame_duration(int p_frame, float p_duration) {
-	ERR_FAIL_INDEX(p_frame, MAX_FRAMES);
+	ERR_FAIL_INDEX(p_frame, frame_count);
 
 	RWLockWrite r(rw_lock);
 
@@ -155,7 +189,7 @@ void AnimatedTexture::set_frame_duration(int p_frame, float p_duration) {
 }
 
 float AnimatedTexture::get_frame_duration(int p_frame) const {
-	ERR_FAIL_INDEX_V(p_frame, MAX_FRAMES, 0);
+	ERR_FAIL_INDEX_V(p_frame, frame_count, 0);
 
 	RWLockRead r(rw_lock);
 
@@ -228,12 +262,54 @@ bool AnimatedTexture::is_pixel_opaque(int p_x, int p_y) const {
 }
 
 void AnimatedTexture::_validate_property(PropertyInfo &p_property) const {
-	String prop = p_property.name;
-	if (prop.begins_with("frame_")) {
-		int frame = prop.get_slicec('/', 0).get_slicec('_', 1).to_int();
-		if (frame >= frame_count) {
-			p_property.usage = PROPERTY_USAGE_NONE;
-		}
+}
+
+bool AnimatedTexture::_set(const StringName &p_name, const Variant &p_value) {
+	int frame = 0;
+	String prop_name;
+	if (!_parse_frame_property(p_name, frame, prop_name)) {
+		return false;
+	}
+	if (frame < 0 || frame >= frame_count) {
+		return false;
+	}
+
+	if (prop_name == "texture") {
+		set_frame_texture(frame, p_value);
+		return true;
+	}
+	if (prop_name == "duration") {
+		set_frame_duration(frame, p_value);
+		return true;
+	}
+	return false;
+}
+
+bool AnimatedTexture::_get(const StringName &p_name, Variant &r_ret) const {
+	int frame = 0;
+	String prop_name;
+	if (!_parse_frame_property(p_name, frame, prop_name)) {
+		return false;
+	}
+	if (frame < 0 || frame >= frame_count) {
+		return false;
+	}
+
+	if (prop_name == "texture") {
+		r_ret = get_frame_texture(frame);
+		return true;
+	}
+	if (prop_name == "duration") {
+		r_ret = get_frame_duration(frame);
+		return true;
+	}
+	return false;
+}
+
+void AnimatedTexture::_get_property_list(List<PropertyInfo> *p_list) const {
+	for (int i = 0; i < frame_count; i++) {
+		p_list->push_back(PropertyInfo(Variant::OBJECT, "frame_" + itos(i) + "/texture", PROPERTY_HINT_RESOURCE_TYPE, "Texture2D", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_INTERNAL));
+		p_list->push_back(PropertyInfo(Variant::FLOAT, "frame_" + itos(i) + "/duration", PROPERTY_HINT_RANGE, "0.0,16.0,0.01,or_greater,suffix:s", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_INTERNAL));
 	}
 }
 
@@ -259,16 +335,11 @@ void AnimatedTexture::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_frame_duration", "frame", "duration"), &AnimatedTexture::set_frame_duration);
 	ClassDB::bind_method(D_METHOD("get_frame_duration", "frame"), &AnimatedTexture::get_frame_duration);
 
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "frames", PROPERTY_HINT_RANGE, "1," + itos(MAX_FRAMES), PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), "set_frames", "get_frames");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "frames", PROPERTY_HINT_RANGE, "1,2147483647", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), "set_frames", "get_frames");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "current_frame", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_current_frame", "get_current_frame");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "pause"), "set_pause", "get_pause");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "one_shot"), "set_one_shot", "get_one_shot");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "speed_scale", PROPERTY_HINT_RANGE, "-60,60,0.1,or_less,or_greater"), "set_speed_scale", "get_speed_scale");
-
-	for (int i = 0; i < MAX_FRAMES; i++) {
-		ADD_PROPERTYI(PropertyInfo(Variant::OBJECT, "frame_" + itos(i) + "/texture", PROPERTY_HINT_RESOURCE_TYPE, "Texture2D", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_INTERNAL), "set_frame_texture", "get_frame_texture", i);
-		ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "frame_" + itos(i) + "/duration", PROPERTY_HINT_RANGE, "0.0,16.0,0.01,or_greater,suffix:s", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_INTERNAL), "set_frame_duration", "get_frame_duration", i);
-	}
 
 	BIND_CONSTANT(MAX_FRAMES);
 }
@@ -283,6 +354,8 @@ AnimatedTexture::AnimatedTexture() {
 	proxy = RS::get_singleton()->texture_proxy_create(proxy_ph);
 
 	RenderingServer::get_singleton()->texture_set_force_redraw_if_visible(proxy, true);
+
+	frames.resize(1);
 
 	MessageQueue::get_main_singleton()->push_callable(callable_mp(this, &AnimatedTexture::_finish_non_thread_safe_setup));
 }

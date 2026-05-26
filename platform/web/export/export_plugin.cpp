@@ -373,6 +373,16 @@ void EditorExportPlatformWeb::get_export_options(List<ExportOption> *r_options) 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "vram_texture_compression/for_desktop"), true)); // S3TC
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "vram_texture_compression/for_mobile"), false)); // ETC or ETC2, depending on renderer
 
+	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "pck_7zip/enabled"), true));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "pck_7zip/archive_format", PROPERTY_HINT_ENUM, "pck,7z"), "7z"));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "pck_7zip/compression_level", PROPERTY_HINT_ENUM, "0 - Store,1 - Fastest,3 - Fast,5 - Normal,7 - Maximum,9 - Ultra"), 9));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "pck_7zip/compression_method", PROPERTY_HINT_ENUM, "LZMA2"), "LZMA2"));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "pck_7zip/dictionary_size_mb", PROPERTY_HINT_ENUM, "64,128,256"), 256));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "pck_7zip/word_size", PROPERTY_HINT_ENUM, "32,64"), 64));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "pck_7zip/solid_block_size", PROPERTY_HINT_ENUM, "Non-solid,1GB,2GB,4GB,16GB"), "16GB"));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "pck_7zip/threads", PROPERTY_HINT_RANGE, "1,1024,1"), 16));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "pck_7zip/memory_usage_percent", PROPERTY_HINT_RANGE, "10,90,1"), 80));
+
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "html/export_icon"), true));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "html/custom_html_shell", PROPERTY_HINT_FILE, "*.html"), ""));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "html/head_include", PROPERTY_HINT_MULTILINE_TEXT, "monospace,no_wrap"), ""));

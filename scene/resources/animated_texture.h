@@ -40,7 +40,7 @@ class AnimatedTexture : public Texture2D {
 
 public:
 	enum {
-		MAX_FRAMES = 256
+		MAX_FRAMES = 2147483647
 	};
 
 private:
@@ -52,7 +52,7 @@ private:
 		float duration = 1.0;
 	};
 
-	Frame frames[MAX_FRAMES];
+	Vector<Frame> frames;
 	int frame_count = 1.0;
 	int current_frame = 0;
 	bool pause = false;
@@ -69,6 +69,9 @@ private:
 protected:
 	static void _bind_methods();
 	void _validate_property(PropertyInfo &p_property) const;
+	bool _set(const StringName &p_name, const Variant &p_value) override;
+	bool _get(const StringName &p_name, Variant &r_ret) const override;
+	void _get_property_list(List<PropertyInfo> *p_list) const override;
 
 public:
 	void set_frames(int p_frames);

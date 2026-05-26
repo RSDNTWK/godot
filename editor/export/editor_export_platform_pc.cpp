@@ -62,7 +62,7 @@ void EditorExportPlatformPC::get_export_options(List<ExportOption> *r_options) c
 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "binary_format/embed_pck"), false));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "pck_7zip/enabled"), true));
-	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "pck_7zip/archive_format", PROPERTY_HINT_ENUM, "7z"), "7z"));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "pck_7zip/archive_format", PROPERTY_HINT_ENUM, "pck,7z"), "7z"));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "pck_7zip/compression_level", PROPERTY_HINT_ENUM, "0 - Store,1 - Fastest,3 - Fast,5 - Normal,7 - Maximum,9 - Ultra"), 9));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, "pck_7zip/compression_method", PROPERTY_HINT_ENUM, "LZMA2"), "LZMA2"));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "pck_7zip/dictionary_size_mb", PROPERTY_HINT_ENUM, "64,128,256"), 256));

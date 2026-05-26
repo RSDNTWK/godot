@@ -36,9 +36,9 @@
 #include "scene/resources/animated_texture.h"
 #include "scene/resources/image_texture.h"
 
+#include <webp/demux.h>
 #include <cstring>
 #include <limits>
-#include <webp/demux.h>
 
 static Ref<Resource> _load_static_webp_texture(const uint8_t *p_data, int p_size, Error *r_error) {
 	Ref<Image> image;
@@ -88,10 +88,7 @@ static Ref<Resource> _load_animated_webp_texture(const uint8_t *p_data, size_t p
 		return Ref<Resource>();
 	}
 
-	const int frame_count = MIN(int(info.frame_count), AnimatedTexture::MAX_FRAMES);
-	if (frame_count < int(info.frame_count)) {
-		WARN_PRINT(vformat("Animated WebP frame count (%d) exceeds AnimatedTexture::MAX_FRAMES (%d). Extra frames were ignored.", info.frame_count, AnimatedTexture::MAX_FRAMES));
-	}
+	const int frame_count = int(info.frame_count);
 
 	Ref<AnimatedTexture> animated_texture;
 	animated_texture.instantiate();
