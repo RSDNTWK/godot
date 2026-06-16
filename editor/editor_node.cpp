@@ -131,6 +131,7 @@
 #include "editor/import/resource_importer_shader_file.h"
 #include "editor/import/resource_importer_svg.h"
 #include "editor/import/resource_importer_texture.h"
+#include "editor/import/resource_importer_webp_texture.h"
 #include "editor/import/resource_importer_texture_atlas.h"
 #include "editor/import/resource_importer_wav.h"
 #include "editor/inspector/editor_inspector.h"
@@ -8339,6 +8340,10 @@ EditorNode::EditorNode() {
 
 	{
 		// Register importers at the beginning, so dialogs are created with the right extensions.
+		Ref<ResourceImporterWebPTexture> import_webp_texture;
+		import_webp_texture.instantiate();
+		ResourceFormatImporter::get_singleton()->add_importer(import_webp_texture);
+
 		Ref<ResourceImporterTexture> import_texture = memnew(ResourceImporterTexture(true));
 		ResourceFormatImporter::get_singleton()->add_importer(import_texture);
 

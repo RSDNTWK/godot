@@ -490,6 +490,9 @@ void ResourceFormatImporter::add_importer(const Ref<ResourceImporter> &p_importe
 
 void ResourceFormatImporter::get_importers_for_file(const String &p_file, List<Ref<ResourceImporter>> *r_importers) {
 	for (int i = 0; i < importers.size(); i++) {
+		if (!importers[i]->can_import(p_file)) {
+			continue;
+		}
 		List<String> local_exts;
 		importers[i]->get_recognized_extensions(&local_exts);
 		for (const String &F : local_exts) {
@@ -512,6 +515,9 @@ Ref<ResourceImporter> ResourceFormatImporter::get_importer_by_file(const String 
 	float priority = 0;
 
 	for (int i = 0; i < importers.size(); i++) {
+		if (!importers[i]->can_import(p_file)) {
+			continue;
+		}
 		List<String> local_exts;
 		importers[i]->get_recognized_extensions(&local_exts);
 		for (const String &F : local_exts) {
