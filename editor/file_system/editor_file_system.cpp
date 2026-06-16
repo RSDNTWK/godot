@@ -606,6 +606,7 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 	String dest_md5 = "";
 	int version = 0;
 	bool found_uid = false;
+	bool import_marked_invalid = false;
 	Variant meta;
 
 	while (true) {
@@ -624,8 +625,8 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 
 		if (!assign.is_empty()) {
 			if (assign == "valid" && value.operator bool() == false) {
-				// Invalid import (failed previous import), skip and let user attempt manual reimport to avoid reimport loop.
-				return false;
+				import_marked_invalid = true;
+				continue;
 			}
 			if (assign.begins_with("path")) {
 				to_check.push_back(value);
@@ -676,6 +677,10 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 
 	if (preferred_importer.is_valid() && preferred_importer->get_importer_name() != importer_name) {
 		return true; // Importer selection changed, reimport.
+	}
+
+	if (import_marked_invalid) {
+		return false; // Keep invalid imports idle unless importer selection changed above.
 	}
 
 	if (importer.is_null()) {
