@@ -669,6 +669,14 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 	}
 
 	Ref<ResourceImporter> importer = ResourceFormatImporter::get_singleton()->get_importer_by_name(importer_name);
+	Ref<ResourceImporter> preferred_importer;
+	if (!importer_name.is_empty()) {
+		preferred_importer = ResourceFormatImporter::get_singleton()->get_importer_by_file(p_path);
+	}
+
+	if (preferred_importer.is_valid() && preferred_importer->get_importer_name() != importer_name) {
+		return true; // Importer selection changed, reimport.
+	}
 
 	if (importer.is_null()) {
 		return true; // The importer has possibly changed, try to reimport.
@@ -2864,6 +2872,14 @@ Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<Strin
 	}
 	Ref<ResourceImporter> importer;
 	bool load_default = false;
+	if (p_custom_importer.is_empty()) {
+		Ref<ResourceImporter> preferred_importer = ResourceFormatImporter::get_singleton()->get_importer_by_file(p_file);
+		if (preferred_importer.is_valid() && preferred_importer->get_importer_name() != importer_name) {
+			print_verbose(vformat("EditorFileSystem: Updating importer for '%s' from '%s' to '%s'.", p_file, importer_name, preferred_importer->get_importer_name()));
+			importer_name = preferred_importer->get_importer_name();
+			load_default = true;
+		}
+	}
 	//find the importer
 	if (!importer_name.is_empty()) {
 		importer = ResourceFormatImporter::get_singleton()->get_importer_by_name(importer_name);

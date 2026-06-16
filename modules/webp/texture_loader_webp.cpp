@@ -183,6 +183,18 @@ Error ResourceFormatWebP::get_webp_frame_count(const String &p_path, uint32_t &r
 	return OK;
 }
 
+Error ResourceFormatWebP::is_animated_webp(const String &p_path, bool &r_is_animated) {
+	uint32_t frame_count = 0;
+	Error err = get_webp_frame_count(p_path, frame_count);
+	if (err != OK) {
+		r_is_animated = false;
+		return err;
+	}
+
+	r_is_animated = frame_count > 1;
+	return OK;
+}
+
 Ref<Resource> ResourceFormatWebP::load_texture(const String &p_path, Error *r_error) {
 	if (r_error) {
 		*r_error = ERR_CANT_OPEN;

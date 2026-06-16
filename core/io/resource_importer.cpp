@@ -545,6 +545,13 @@ bool ResourceFormatImporter::are_import_settings_valid(const String &p_path) con
 		return false;
 	}
 
+	if (!pat.importer.is_empty() && pat.importer != "keep" && pat.importer != "skip") {
+		Ref<ResourceImporter> preferred_importer = get_importer_by_file(p_path);
+		if (preferred_importer.is_valid() && preferred_importer->get_importer_name() != pat.importer) {
+			return false;
+		}
+	}
+
 	for (int i = 0; i < importers.size(); i++) {
 		if (importers[i]->get_importer_name() == pat.importer) {
 			if (!importers[i]->are_import_settings_valid(p_path, pat.metadata)) { //importer thinks this is not valid
