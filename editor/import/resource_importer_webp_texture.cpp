@@ -67,6 +67,10 @@ float ResourceImporterWebPTexture::get_priority() const {
 	return 2.0;
 }
 
+int ResourceImporterWebPTexture::get_format_version() const {
+	return 1;
+}
+
 void ResourceImporterWebPTexture::get_import_options(const String &p_path, List<ImportOption> *r_options, int p_preset) const {
 }
 
@@ -82,5 +86,24 @@ Error ResourceImporterWebPTexture::import(ResourceUID::ID p_source_id, const Str
 	Ref<Texture2D> texture = resource;
 	ERR_FAIL_COND_V_MSG(texture.is_null(), ERR_FILE_CORRUPT, vformat("Imported WebP resource at '%s' is not a Texture2D.", p_source_file));
 
+	if (r_metadata) {
+		Dictionary meta;
+		meta["animated_webp"] = true;
+		*r_metadata = meta;
+	}
+
 	return ResourceSaver::save(texture, p_save_path + ".res");
+}
+
+bool ResourceImporterWebPTexture::are_import_settings_valid(const String &p_path, const Dictionary &p_meta) const {
+	if (!p_meta.has("animated_webp") || !bool(p_meta["animated_webp"])) {
+		return false;
+	}
+
+	bool is_animated = false;
+	if (ResourceFormatWebP::is_animated_webp(p_path, is_animated) != OK) {
+		return false;
+	}
+
+	return is_animated;
 }

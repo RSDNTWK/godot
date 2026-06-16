@@ -38,6 +38,7 @@
 #include "editor/settings/editor_settings.h"
 #include "editor/themes/editor_scale.h"
 #include "editor/themes/editor_theme_manager.h"
+#include "modules/webp/texture_loader_webp.h"
 #include "scene/resources/compressed_texture.h"
 
 void ResourceImporterTexture::_texture_reimport_roughness(const Ref<CompressedTexture2D> &p_tex, const String &p_normal_path, RSE::TextureDetectRoughnessChannel p_channel) {
@@ -997,6 +998,13 @@ Error ResourceImporterTexture::import(ResourceUID::ID p_source_id, const String 
 			meta["has_editor_variant"] = true;
 		}
 
+		if (p_source_file.get_extension().nocasecmp_to("webp") == 0) {
+			bool is_animated = false;
+			if (ResourceFormatWebP::is_animated_webp(p_source_file, is_animated) == OK) {
+				meta["animated_webp"] = is_animated;
+			}
+		}
+
 		*r_metadata = meta;
 	}
 
@@ -1026,6 +1034,21 @@ String ResourceImporterTexture::get_import_settings_string() const {
 }
 
 bool ResourceImporterTexture::are_import_settings_valid(const String &p_path, const Dictionary &p_meta) const {
+	if (p_path.get_extension().nocasecmp_to("webp") == 0) {
+		if (!p_meta.has("animated_webp")) {
+			return false;
+		}
+
+		bool is_animated = false;
+		if (ResourceFormatWebP::is_animated_webp(p_path, is_animated) != OK) {
+			return false;
+		}
+
+		if (is_animated != bool(p_meta["animated_webp"]) || is_animated) {
+			return false;
+		}
+	}
+
 	if (p_meta.has("has_editor_variant")) {
 		String imported_path = ResourceFormatImporter::get_singleton()->get_internal_resource_path(p_path);
 		if (!FileAccess::exists(imported_path)) {
