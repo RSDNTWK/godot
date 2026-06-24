@@ -103,6 +103,7 @@ public:
 	virtual void get_recognized_extensions(List<String> *p_extensions) const override;
 	virtual String get_save_extension() const override;
 	virtual String get_resource_type() const override;
+	virtual int get_format_version() const override;
 
 	enum Preset {
 		PRESET_DETECT,

@@ -180,6 +180,10 @@ String ResourceImporterTexture::get_resource_type() const {
 	return "CompressedTexture2D";
 }
 
+int ResourceImporterTexture::get_format_version() const {
+	return 1;
+}
+
 bool ResourceImporterTexture::get_option_visibility(const String &p_path, const String &p_option, const HashMap<StringName, Variant> &p_options) const {
 	if (p_option == "compress/high_quality" || p_option == "compress/hdr_compression") {
 		int compress_mode = int(p_options["compress/mode"]);

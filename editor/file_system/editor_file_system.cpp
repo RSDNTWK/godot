@@ -587,6 +587,10 @@ bool EditorFileSystem::_is_test_for_reimport_needed(const String &p_path, uint64
 	return false;
 }
 
+static bool _should_retry_invalid_import(const String &p_path) {
+	return p_path.get_extension().nocasecmp_to("webp") == 0;
+}
+
 bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_expected_import_md5) {
 	if (p_expected_import_md5.is_empty()) {
 		// Marked as reimportation needed.
@@ -696,16 +700,16 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 		return true; // Importer selection changed, reimport.
 	}
 
-	if (import_marked_invalid) {
-		return false; // Keep invalid imports idle unless importer selection changed above.
-	}
-
 	if (importer.is_null()) {
 		return true; // The importer has possibly changed, try to reimport.
 	}
 
 	if (importer->get_format_version() > version) {
 		return true; // Version changed, reimport.
+	}
+
+	if (import_marked_invalid) {
+		return false; // Keep invalid imports idle unless importer selection changed or importer version advanced above.
 	}
 
 	if (!importer->are_import_settings_valid(p_path, meta)) {
@@ -1299,6 +1303,7 @@ void EditorFileSystem::_process_file_system(const ScannedDirectory *p_scan_dir, 
 				// If something is different, we will queue a test for reimportation that will check
 				// the md5 of all files and import settings and, if necessary, execute a reimportation.
 				if (_is_test_for_reimport_needed(path, fc->modification_time, mt, fc->import_modification_time, import_mt, fi->import_dest_paths) ||
+						(!fc->import_valid && _should_retry_invalid_import(path)) ||
 						(revalidate_import_files && !ResourceFormatImporter::get_singleton()->are_import_settings_valid(path))) {
 					ItemAction ia;
 					ia.action = ItemAction::ACTION_FILE_TEST_REIMPORT;

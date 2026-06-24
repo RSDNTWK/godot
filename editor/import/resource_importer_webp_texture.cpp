@@ -68,7 +68,7 @@ float ResourceImporterWebPTexture::get_priority() const {
 }
 
 int ResourceImporterWebPTexture::get_format_version() const {
-	return 1;
+	return 2;
 }
 
 void ResourceImporterWebPTexture::get_import_options(const String &p_path, List<ImportOption> *r_options, int p_preset) const {
