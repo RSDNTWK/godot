@@ -33,6 +33,7 @@
 #include "webp_common.h"
 
 #include "core/io/file_access.h"
+#include "core/object/class_db.h"
 #include "scene/resources/animated_texture.h"
 #include "scene/resources/image_texture.h"
 
