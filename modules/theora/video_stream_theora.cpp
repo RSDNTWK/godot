@@ -35,6 +35,7 @@
 #include "core/object/class_db.h"
 #include "scene/resources/image_texture.h"
 
+#ifndef MODULE_FFMPEG_ENABLED
 #include <thirdparty/misc/yuv2rgb.h>
 
 int VideoStreamPlaybackTheora::buffer_data() {
@@ -796,6 +797,8 @@ VideoStreamPlaybackTheora::VideoStreamPlaybackTheora() {
 VideoStreamPlaybackTheora::~VideoStreamPlaybackTheora() {
 	clear();
 }
+
+#endif
 
 void VideoStreamTheora::_bind_methods() {}
 

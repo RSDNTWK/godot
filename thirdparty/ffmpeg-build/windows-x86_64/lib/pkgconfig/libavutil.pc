@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/thirdparty/ffmpeg-build/windows-x86_64
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/thirdparty/ffmpeg-build/windows-x86_64/lib
+includedir=/mnt/c/godot/thirdparty/ffmpeg-build/windows-x86_64/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 61.5.100
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil -lm -luser32 -lbcrypt -latomic
+Libs.private: 
+Cflags: -I${includedir}

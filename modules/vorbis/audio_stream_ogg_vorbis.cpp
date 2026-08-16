@@ -29,6 +29,9 @@
 /**************************************************************************/
 
 #include "audio_stream_ogg_vorbis.h"
+#include "modules/modules_enabled.gen.h"
+
+#include "modules/ffmpeg/video_stream_media.h"
 
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
@@ -36,6 +39,11 @@
 
 #include <ogg/ogg.h>
 
+#ifndef MODULE_FFMPEG_ENABLED
+#include <vorbis/codec.h>
+#endif
+
+#ifndef MODULE_FFMPEG_ENABLED
 int AudioStreamPlaybackOggVorbis::_mix_internal(AudioFrame *p_buffer, int p_frames) {
 	ERR_FAIL_COND_V(!ready, 0);
 
@@ -409,8 +417,13 @@ AudioStreamPlaybackOggVorbis::~AudioStreamPlaybackOggVorbis() {
 		vorbis_info_clear(&info);
 	}
 }
+#endif
 
 Ref<AudioStreamPlayback> AudioStreamOggVorbis::instantiate_playback() {
+	// Preserve the legacy packet resource while using FFmpeg for decoding.
+	return ffmpeg_audio_playback_from_ogg_packets(packet_sequence);
+
+#ifndef MODULE_FFMPEG_ENABLED
 	Ref<AudioStreamPlaybackOggVorbis> ovs;
 
 	ERR_FAIL_COND_V(packet_sequence.is_null(), nullptr);
@@ -422,10 +435,11 @@ Ref<AudioStreamPlayback> AudioStreamOggVorbis::instantiate_playback() {
 	ovs->active = false;
 	ovs->loops = 0;
 	if (ovs->_alloc_vorbis()) {
-		return ovs;
-	}
+	return ovs;
+}
 	// Failed to allocate data structures.
 	return nullptr;
+#endif
 }
 
 String AudioStreamOggVorbis::get_stream_name() const {
@@ -435,6 +449,17 @@ String AudioStreamOggVorbis::get_stream_name() const {
 void AudioStreamOggVorbis::maybe_update_info() {
 	ERR_FAIL_COND(packet_sequence.is_null());
 
+#ifdef MODULE_FFMPEG_ENABLED
+	Ref<OggPacketSequencePlayback> playback = packet_sequence->instantiate_playback();
+	ogg_packet *packet = nullptr;
+	if (!playback->next_ogg_packet(&packet) || packet->bytes < 16 || packet->packet[0] != 1 || memcmp(packet->packet + 1, "vorbis", 6) != 0) {
+		WARN_PRINT("Failed to read Ogg Vorbis identification header");
+		return;
+	}
+	uint32_t rate = uint32_t(packet->packet[12]) | (uint32_t(packet->packet[13]) << 8) | (uint32_t(packet->packet[14]) << 16) | (uint32_t(packet->packet[15]) << 24);
+	packet_sequence->set_sampling_rate(rate);
+	return;
+#else
 	vorbis_info info;
 	vorbis_comment comment;
 	int err;
@@ -486,6 +511,7 @@ void AudioStreamOggVorbis::maybe_update_info() {
 
 	vorbis_comment_clear(&comment);
 	vorbis_info_clear(&info);
+#endif
 }
 
 void AudioStreamOggVorbis::set_packet_sequence(Ref<OggPacketSequence> p_packet_sequence) {
@@ -653,7 +679,7 @@ Ref<AudioStreamOggVorbis> AudioStreamOggVorbis::load_from_buffer(const Vector<ui
 				// Not enough data to fully reconstruct a packet. Go on to the next page.
 				break;
 			}
-			if (packet_count == 0 && vorbis_synthesis_idheader(&packet) == 0) {
+			if (packet_count == 0 && (packet.bytes < 7 || packet.packet[0] != 1 || memcmp(packet.packet + 1, "vorbis", 6) != 0)) {
 				print_verbose("Found a non-vorbis-header packet in a header position");
 				// Clearly this logical stream is not a vorbis stream, so destroy it and try again with the next page.
 				if (initialized_stream) {

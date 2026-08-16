@@ -6,7 +6,7 @@ Import("env_modules")
 
 env_mp3 = env_modules.Clone()
 
-if not env["mp3_extra_formats"]:
+if not env["mp3_extra_formats"] and not env["module_ffmpeg_enabled"]:
     env_mp3.Append(CPPDEFINES=["DR_MP3_ONLY_MP3"])
 
 # Godot source files

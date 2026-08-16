@@ -33,6 +33,7 @@
 #include "celt_lpc.h"
 #include "pitch.h"
 #include "pitch_sse.h"
+#include "vq.h"
 
 #if defined(OPUS_HAVE_RTCD)
 
@@ -46,7 +47,6 @@ void (*const CELT_FIR_IMPL[OPUS_ARCHMASK + 1])(
          opus_val16       *y,
          int              N,
          int              ord,
-         opus_val16       *mem,
          int              arch
 ) = {
   celt_fir_c,                /* non-sse */
@@ -89,6 +89,26 @@ opus_val32 (*const CELT_INNER_PROD_IMPL[OPUS_ARCHMASK + 1])(
 #endif
 
 # else
+
+#if defined(OPUS_X86_MAY_HAVE_AVX2) && !defined(OPUS_X86_PRESUME_AVX2)
+
+void (*const PITCH_XCORR_IMPL[OPUS_ARCHMASK + 1])(
+         const float *_x,
+         const float *_y,
+         float *xcorr,
+         int len,
+         int max_pitch,
+         int arch
+) = {
+  celt_pitch_xcorr_c,                /* non-sse */
+  celt_pitch_xcorr_c,
+  celt_pitch_xcorr_c,
+  celt_pitch_xcorr_c,
+  MAY_HAVE_AVX2(celt_pitch_xcorr)
+};
+
+#endif
+
 
 #if defined(OPUS_X86_MAY_HAVE_SSE) && !defined(OPUS_X86_PRESUME_SSE)
 
@@ -149,6 +169,18 @@ void (*const COMB_FILTER_CONST_IMPL[OPUS_ARCHMASK + 1])(
 };
 
 
+#endif
+
+#if defined(OPUS_X86_MAY_HAVE_SSE2) && !defined(OPUS_X86_PRESUME_SSE2)
+opus_val16 (*const OP_PVQ_SEARCH_IMPL[OPUS_ARCHMASK + 1])(
+      celt_norm *_X, int *iy, int K, int N, int arch
+) = {
+  op_pvq_search_c,                /* non-sse */
+  op_pvq_search_c,
+  MAY_HAVE_SSE2(op_pvq_search),
+  MAY_HAVE_SSE2(op_pvq_search),
+  MAY_HAVE_SSE2(op_pvq_search)
+};
 #endif
 
 #endif

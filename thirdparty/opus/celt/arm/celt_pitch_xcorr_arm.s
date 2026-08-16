@@ -78,7 +78,7 @@ xcorr_kernel_neon_process8
   ;
   ; Load x[0...7]
   VLD1.16      {d6, d7}, [r4]!
-  ; Unlike VMOV, VAND is a data processsing instruction (and doesn't get
+  ; Unlike VMOV, VAND is a data processing instruction (and doesn't get
   ; assembled to VMOV, like VORR would), so it dual-issues with the prior VLD1.
   VAND         d3, d5, d5
   SUBS         r12, r12, #8
@@ -153,7 +153,7 @@ xcorr_kernel_neon_process1
   ENDP
 
 ; opus_val32 celt_pitch_xcorr_neon(opus_val16 *_x, opus_val16 *_y,
-;  opus_val32 *xcorr, int len, int max_pitch)
+;  opus_val32 *xcorr, int len, int max_pitch, int arch)
 celt_pitch_xcorr_neon PROC
   ; input:
   ;   r0  = opus_val16 *_x
@@ -168,6 +168,8 @@ celt_pitch_xcorr_neon PROC
   ;   r6  = int         max_pitch
   ;   r12 = int         j
   ;   q15 = int         maxcorr[4] (q15 is not used by xcorr_kernel_neon())
+  ; ignored:
+  ;         int         arch
   STMFD        sp!, {r4-r6, lr}
   LDR          r6, [sp, #16]
   VMOV.S32     q15, #1
@@ -358,6 +360,8 @@ celt_pitch_xcorr_edsp PROC
   ;   r9  = opus_val32  sum3
   ;   r1  = int         max_pitch
   ;   r12 = int         j
+  ; ignored:
+  ;         int         arch
   STMFD        sp!, {r4-r11, lr}
   MOV          r5, r1
   LDR          r1, [sp, #36]

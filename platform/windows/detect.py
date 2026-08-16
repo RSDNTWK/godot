@@ -539,7 +539,7 @@ def configure_msvc(env: "SConsEnvironment"):
                 angle_path = env["angle_libs"]
             if os.path.exists(angle_path):
                 env.Prepend(CPPPATH=["#thirdparty/angle/include"])
-                env.AppendUnique(CPPDEFINES=["ANGLE_ENABLED", "EGL_STATIC"])
+                env.AppendUnique(CPPDEFINES=["ANGLE_ENABLED", "EGL_ENABLED", "EGL_STATIC"])
                 env.Append(LIBPATH=[angle_path])
                 LIBS += [
                     "libANGLE.windows." + env["arch"] + prebuilt_lib_extra_suffix,
@@ -976,7 +976,7 @@ def configure_mingw(env: "SConsEnvironment"):
                 angle_path = env["angle_libs"]
             if os.path.exists(angle_path):
                 env.Prepend(CPPPATH=["#thirdparty/angle/include"])
-                env.AppendUnique(CPPDEFINES=["ANGLE_ENABLED", "EGL_STATIC"])
+                env.AppendUnique(CPPDEFINES=["ANGLE_ENABLED", "EGL_ENABLED", "EGL_STATIC"])
                 env.Append(LIBPATH=[angle_path])
                 env.Append(
                     LIBS=[

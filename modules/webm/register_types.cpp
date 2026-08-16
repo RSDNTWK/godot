@@ -38,13 +38,22 @@
 static Ref<ResourceFormatLoaderWebm> resource_loader_webm;
 
 void initialize_webm_module(ModuleInitializationLevel p_level) {
-	resource_loader_webm.instantiate();
-	ResourceLoader::add_resource_format_loader(resource_loader_webm, true);
-
-	GDREGISTER_CLASS(VideoStreamWebm);
+	switch (p_level) {
+		case MODULE_INITIALIZATION_LEVEL_SCENE: {
+			resource_loader_webm.instantiate();
+            // FFmpeg owns raw WebM loading; retain this loader only as a fallback
+            // for builds where the FFmpeg module is unavailable.
+            ResourceLoader::add_resource_format_loader(resource_loader_webm, false);
+			GDREGISTER_CLASS(VideoStreamWebm);
+		} break;
+		default:
+			break;
+	}
 }
 
 void uninitialize_webm_module(ModuleInitializationLevel p_level) {
-	ResourceLoader::remove_resource_format_loader(resource_loader_webm);
-	resource_loader_webm.unref();
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		ResourceLoader::remove_resource_format_loader(resource_loader_webm);
+		resource_loader_webm.unref();
+	}
 }

@@ -28,17 +28,25 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
+#ifndef MODULE_FFMPEG_ENABLED
 #define DR_MP3_FLOAT_OUTPUT
 #define DR_MP3_IMPLEMENTATION
 #define DR_MP3_NO_STDIO
+#endif
 
 #include "audio_stream_mp3.h"
+#include "modules/modules_enabled.gen.h"
+
+#include "modules/ffmpeg/video_stream_media.h"
 
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
 
+#ifndef MODULE_FFMPEG_ENABLED
 #include <thirdparty/dr_libs/dr_bridge.h>
+#endif
 
+#ifndef MODULE_FFMPEG_ENABLED
 int AudioStreamPlaybackMP3::_mix_internal(AudioFrame *p_buffer, int p_frames) {
 	if (!active) {
 		return 0;
@@ -188,8 +196,13 @@ Variant AudioStreamPlaybackMP3::get_parameter(const StringName &p_name) const {
 AudioStreamPlaybackMP3::~AudioStreamPlaybackMP3() {
 	drmp3_uninit(&mp3d);
 }
+#endif
 
 Ref<AudioStreamPlayback> AudioStreamMP3::instantiate_playback() {
+	// Keep the serialized AudioStreamMP3 resource, but use FFmpeg for decoding.
+	return ffmpeg_audio_playback_from_buffer(get_data());
+
+#ifndef MODULE_FFMPEG_ENABLED
 	Ref<AudioStreamPlaybackMP3> mp3s;
 
 	ERR_FAIL_COND_V_MSG(data.is_empty(), mp3s,
@@ -209,6 +222,7 @@ Ref<AudioStreamPlayback> AudioStreamMP3::instantiate_playback() {
 	ERR_FAIL_COND_V(!success, Ref<AudioStreamPlaybackMP3>());
 
 	return mp3s;
+#endif
 }
 
 String AudioStreamMP3::get_stream_name() const {
@@ -222,6 +236,13 @@ void AudioStreamMP3::clear_data() {
 void AudioStreamMP3::set_data(const Vector<uint8_t> &p_data) {
 	int src_data_len = p_data.size();
 
+#ifdef MODULE_FFMPEG_ENABLED
+	FFmpegAudioMetadata audio_metadata;
+	ERR_FAIL_COND_MSG(!ffmpeg_probe_audio_buffer(p_data, audio_metadata), "Failed to decode mp3 file. Make sure it is a valid mp3 audio file.");
+	channels = audio_metadata.channels;
+	sample_rate = audio_metadata.sample_rate;
+	length = audio_metadata.length;
+#else
 	drmp3 *mp3d = memnew(drmp3);
 	int success = drmp3_init_memory(mp3d, p_data.ptr(), src_data_len, (drmp3_allocation_callbacks *)&dr_alloc_calls);
 	if (!success || mp3d->sampleRate == 0) {
@@ -235,6 +256,7 @@ void AudioStreamMP3::set_data(const Vector<uint8_t> &p_data) {
 
 	drmp3_uninit(mp3d);
 	memdelete(mp3d);
+#endif
 
 	data = p_data;
 	data_len = src_data_len;

@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm32
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm32/lib
+includedir=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm32/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 61.5.100
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil -lm -latomic -landroid -lmediandk -pthread
+Libs.private: 
+Cflags: -I${includedir}

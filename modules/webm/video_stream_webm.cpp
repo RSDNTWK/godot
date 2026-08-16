@@ -29,6 +29,9 @@
 /**************************************************************************/
 
 #include "video_stream_webm.h"
+#include "modules/modules_enabled.gen.h"
+
+#include "modules/ffmpeg/video_stream_media.h"
 
 #include "core/object/class_db.h"
 
@@ -37,6 +40,7 @@
 #include "core/config/project_settings.h"
 #include "servers/audio/audio_server.h"
 
+#ifndef MODULE_FFMPEG_ENABLED
 #include "thirdparty/misc/yuv2rgb.h"
 
 // libsimplewebm
@@ -410,6 +414,7 @@ void VideoStreamPlaybackWebm::delete_pointers() {
 		memdelete(webm);
 	}
 }
+#endif
 
 /**/
 
@@ -417,27 +422,14 @@ VideoStreamWebm::VideoStreamWebm() :
 		audio_track(0) {}
 
 Ref<VideoStreamPlayback> VideoStreamWebm::instantiate_playback() {
-	Ref<VideoStreamPlaybackWebm> pb = memnew(VideoStreamPlaybackWebm);
-	pb->set_audio_track(audio_track);
-	if (pb->open_file(file)) {
-		return pb;
-	}
-	return nullptr;
+	Ref<VideoStreamMedia> media;
+	media.instantiate();
+	media->set_file(file);
+	media->set_audio_track(audio_track);
+	return media->instantiate_playback();
 }
 
-void VideoStreamWebm::set_file(const String &p_file) {
-	file = p_file;
-}
-String VideoStreamWebm::get_file() {
-	return file;
-}
-
-void VideoStreamWebm::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("set_file", "file"), &VideoStreamWebm::set_file);
-	ClassDB::bind_method(D_METHOD("get_file"), &VideoStreamWebm::get_file);
-
-	ADD_PROPERTY(PropertyInfo(Variant::STRING, "file", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_file", "get_file");
-}
+void VideoStreamWebm::_bind_methods() {}
 
 void VideoStreamWebm::set_audio_track(int p_track) {
 	audio_track = p_track;

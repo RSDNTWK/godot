@@ -4,7 +4,7 @@ def can_build(env, platform):
 
 
 def configure(env):
-    pass
+    env.module_add_dependencies("vorbis", ["ogg", "ffmpeg"])
 
 
 def get_doc_classes():

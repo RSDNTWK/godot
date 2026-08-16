@@ -34,8 +34,9 @@
 
 #include "core/io/resource_importer.h"
 #include "core/object/class_db.h"
+#include "modules/modules_enabled.gen.h"
 
-#ifdef TOOLS_ENABLED
+#if defined(TOOLS_ENABLED) && !defined(MODULE_FFMPEG_ENABLED)
 #include "resource_importer_ogg_vorbis.h"
 
 #include "editor/editor_node.h"
@@ -50,10 +51,12 @@ static void _editor_init() {
 void initialize_vorbis_module(ModuleInitializationLevel p_level) {
 	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		GDREGISTER_CLASS(AudioStreamOggVorbis);
+#ifndef MODULE_FFMPEG_ENABLED
 		GDREGISTER_CLASS(AudioStreamPlaybackOggVorbis);
+#endif
 	}
 
-#ifdef TOOLS_ENABLED
+#if defined(TOOLS_ENABLED) && !defined(MODULE_FFMPEG_ENABLED)
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
 		GDREGISTER_CLASS(ResourceImporterOggVorbis);
 

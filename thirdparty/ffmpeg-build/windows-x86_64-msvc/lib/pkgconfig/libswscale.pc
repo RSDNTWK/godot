@@ -1,0 +1,14 @@
+prefix=/c/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc
+exec_prefix=${prefix}
+libdir=/c/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc/lib
+includedir=/c/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc/include
+
+Name: libswscale
+Description: FFmpeg image rescaling library
+Version: 10.2.100
+Requires: libavutil >= 61.5.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lswscale 
+Libs.private: 
+Cflags: -I${includedir}

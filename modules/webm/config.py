@@ -11,7 +11,7 @@ def can_build(env, platform):
 
 
 def configure(env):
-    pass
+    env.module_add_dependencies("webm", ["opus", "ffmpeg"])
 
 
 def get_doc_classes():

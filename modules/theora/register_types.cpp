@@ -31,33 +31,51 @@
 #include "register_types.h"
 
 #include "video_stream_theora.h"
+#include "modules/modules_enabled.gen.h"
 
 #include "core/io/resource_loader.h"
 #include "core/object/class_db.h"
 
 #ifdef TOOLS_ENABLED
+#ifndef MODULE_FFMPEG_ENABLED
 #include "editor/movie_writer_ogv.h"
+#else
+#include "modules/ffmpeg/movie_writer_ogv_ffmpeg.h"
+#endif
 #endif
 
 static Ref<ResourceFormatLoaderTheora> resource_loader_theora;
 #ifdef TOOLS_ENABLED
+#ifndef MODULE_FFMPEG_ENABLED
 static MovieWriterOGV *writer_ogv = nullptr;
+#else
+static MovieWriterOGVFFmpeg *writer_ogv = nullptr;
+#endif
 #endif
 
 void initialize_theora_module(ModuleInitializationLevel p_level) {
 	switch (p_level) {
 		case MODULE_INITIALIZATION_LEVEL_SERVERS: {
 #ifdef TOOLS_ENABLED
+#ifndef MODULE_FFMPEG_ENABLED
 			if constexpr (GD_IS_CLASS_ENABLED(MovieWriterOGV)) {
 				writer_ogv = memnew(MovieWriterOGV);
 				MovieWriter::add_writer(writer_ogv);
 			}
+#else
+			if constexpr (GD_IS_CLASS_ENABLED(MovieWriterOGVFFmpeg)) {
+				writer_ogv = memnew(MovieWriterOGVFFmpeg);
+				MovieWriter::add_writer(writer_ogv);
+			}
+#endif
 #endif
 		} break;
 
 		case MODULE_INITIALIZATION_LEVEL_SCENE: {
 			resource_loader_theora.instantiate();
+			#ifndef MODULE_FFMPEG_ENABLED
 			ResourceLoader::add_resource_format_loader(resource_loader_theora, true);
+			#endif
 			GDREGISTER_CLASS(VideoStreamTheora);
 		} break;
 		default:
@@ -68,13 +86,19 @@ void initialize_theora_module(ModuleInitializationLevel p_level) {
 void uninitialize_theora_module(ModuleInitializationLevel p_level) {
 	switch (p_level) {
 		case MODULE_INITIALIZATION_LEVEL_SCENE: {
+			#ifndef MODULE_FFMPEG_ENABLED
 			ResourceLoader::remove_resource_format_loader(resource_loader_theora);
+			#endif
 			resource_loader_theora.unref();
 		} break;
 
 		case MODULE_INITIALIZATION_LEVEL_SERVERS: {
 #ifdef TOOLS_ENABLED
+			#ifndef MODULE_FFMPEG_ENABLED
 			if constexpr (GD_IS_CLASS_ENABLED(MovieWriterOGV)) {
+			#else
+			if constexpr (GD_IS_CLASS_ENABLED(MovieWriterOGVFFmpeg)) {
+			#endif
 				memdelete(writer_ogv);
 			}
 #endif

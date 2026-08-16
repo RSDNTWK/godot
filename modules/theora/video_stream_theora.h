@@ -34,12 +34,17 @@
 #include "core/io/resource_loader.h"
 #include "core/os/thread.h"
 #include "scene/resources/video_stream.h"
+#include "modules/modules_enabled.gen.h"
+#include "modules/ffmpeg/video_stream_media.h"
 
+#ifndef MODULE_FFMPEG_ENABLED
 #include <theora/theoradec.h>
 #include <vorbis/codec.h>
+#endif
 
 class ImageTexture;
 
+#ifndef MODULE_FFMPEG_ENABLED
 class VideoStreamPlaybackTheora : public VideoStreamPlayback {
 	GDCLASS(VideoStreamPlaybackTheora, VideoStreamPlayback);
 
@@ -152,6 +157,7 @@ public:
 	VideoStreamPlaybackTheora();
 	~VideoStreamPlaybackTheora();
 };
+#endif
 
 class VideoStreamTheora : public VideoStream {
 	GDCLASS(VideoStreamTheora, VideoStream);
@@ -161,10 +167,19 @@ protected:
 
 public:
 	Ref<VideoStreamPlayback> instantiate_playback() override {
+		Ref<VideoStreamMedia> media;
+		media.instantiate();
+		media->set_file(file);
+		media->set_audio_track(audio_track);
+		return media->instantiate_playback();
+
+		// Legacy Theora/Vorbis playback is retained below for builds without FFmpeg.
+		#ifndef MODULE_FFMPEG_ENABLED
 		Ref<VideoStreamPlaybackTheora> pb = memnew(VideoStreamPlaybackTheora);
 		pb->set_audio_track(audio_track);
 		pb->set_file(file);
 		return pb;
+		#endif
 	}
 
 	void set_audio_track(int p_track) override { audio_track = p_track; }

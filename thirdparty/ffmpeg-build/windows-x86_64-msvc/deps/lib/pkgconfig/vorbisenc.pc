@@ -1,0 +1,11 @@
+prefix=C:/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc/deps
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: vorbisenc
+Description: Vorbis encoder
+Version: 1.3.7
+Requires: ogg
+Libs: -L${libdir} -lvorbisenc -lvorbis -logg
+Cflags: -I${includedir}

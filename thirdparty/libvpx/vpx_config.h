@@ -67,7 +67,7 @@
 
 #define CONFIG_BIG_ENDIAN 0 //TODO: Autodetect
 
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(WEBM_ENABLE_THREADS)
 #define CONFIG_MULTITHREAD 0
 #else
 #define CONFIG_MULTITHREAD 1

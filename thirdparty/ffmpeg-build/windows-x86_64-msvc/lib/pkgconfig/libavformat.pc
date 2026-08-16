@@ -1,0 +1,14 @@
+prefix=/c/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc
+exec_prefix=${prefix}
+libdir=/c/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc/lib
+includedir=/c/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc/include
+
+Name: libavformat
+Description: FFmpeg container format library
+Version: 63.6.100
+Requires: libavcodec >= 63.7.100, libswresample >= 7.2.100, libavutil >= 61.5.100
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavformat ws2_32.lib
+Libs.private: 
+Cflags: -I${includedir}

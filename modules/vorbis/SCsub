@@ -10,6 +10,9 @@ env_vorbis = env_modules.Clone()
 
 thirdparty_obj = []
 
+if env["builtin_libogg"]:
+    env_vorbis.Prepend(CPPPATH=["#thirdparty/libogg"])
+
 if env["builtin_libvorbis"]:
     thirdparty_dir = "#thirdparty/libvorbis/"
     thirdparty_sources = [

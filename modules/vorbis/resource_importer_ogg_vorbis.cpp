@@ -38,7 +38,6 @@
 #endif
 
 #include <ogg/ogg.h>
-#include <vorbis/codec.h>
 
 String ResourceImporterOggVorbis::get_importer_name() const {
 	return "oggvorbisstr";

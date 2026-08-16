@@ -31,11 +31,15 @@
 #pragma once
 
 #include "servers/audio/audio_stream.h"
+#include "modules/modules_enabled.gen.h"
 
+#ifndef MODULE_FFMPEG_ENABLED
 #include <thirdparty/dr_libs/dr_mp3.h>
+#endif
 
 class AudioStreamMP3;
 
+#ifndef MODULE_FFMPEG_ENABLED
 class AudioStreamPlaybackMP3 : public AudioStreamPlaybackResampled {
 	GDCLASS(AudioStreamPlaybackMP3, AudioStreamPlaybackResampled);
 
@@ -86,13 +90,16 @@ public:
 	AudioStreamPlaybackMP3() {}
 	~AudioStreamPlaybackMP3();
 };
+#endif
 
 class AudioStreamMP3 : public AudioStream {
 	GDCLASS(AudioStreamMP3, AudioStream);
 	OBJ_SAVE_TYPE(AudioStream) //children are all saved as AudioStream, so they can be exchanged
 	RES_BASE_EXTENSION("mp3str");
 
+#ifndef MODULE_FFMPEG_ENABLED
 	friend class AudioStreamPlaybackMP3;
+#endif
 
 	TightLocalVector<uint8_t> data;
 	uint32_t data_len = 0;

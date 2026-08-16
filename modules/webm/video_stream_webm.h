@@ -32,6 +32,7 @@
 #define VIDEO_STREAM_WEBM_H
 
 #include "core/io/resource_loader.h"
+#include "modules/modules_enabled.gen.h"
 #include "scene/resources/image_texture.h"
 #include "scene/resources/texture.h"
 #include "scene/resources/video_stream.h"
@@ -43,6 +44,7 @@ class WebMDemuxer;
 class VPXDecoder;
 class OpusVorbisDecoder;
 
+#ifndef MODULE_FFMPEG_ENABLED
 class VideoStreamPlaybackWebm : public VideoStreamPlayback {
 	GDCLASS(VideoStreamPlaybackWebm, VideoStreamPlayback);
 
@@ -106,13 +108,12 @@ private:
 
 	void delete_pointers();
 };
+#endif
 
 /**/
 
 class VideoStreamWebm : public VideoStream {
 	GDCLASS(VideoStreamWebm, VideoStream);
-
-	String file;
 	int audio_track;
 
 protected:
@@ -122,9 +123,6 @@ public:
 	VideoStreamWebm();
 
 	virtual Ref<VideoStreamPlayback> instantiate_playback() override;
-
-	virtual void set_file(const String &p_file);
-	String get_file();
 	virtual void set_audio_track(int p_track);
 };
 

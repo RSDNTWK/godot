@@ -31,14 +31,18 @@
 #pragma once
 
 #include "core/variant/variant.h"
+#include "modules/modules_enabled.gen.h"
 #include "servers/audio/audio_stream.h"
 
 #include "modules/ogg/ogg_packet_sequence.h"
 
+#ifndef MODULE_FFMPEG_ENABLED
 #include <vorbis/codec.h>
+#endif
 
 class AudioStreamOggVorbis;
 
+#ifndef MODULE_FFMPEG_ENABLED
 class AudioStreamPlaybackOggVorbis : public AudioStreamPlaybackResampled {
 	GDCLASS(AudioStreamPlaybackOggVorbis, AudioStreamPlaybackResampled);
 
@@ -111,13 +115,16 @@ public:
 	AudioStreamPlaybackOggVorbis() {}
 	~AudioStreamPlaybackOggVorbis();
 };
+#endif
 
 class AudioStreamOggVorbis : public AudioStream {
 	GDCLASS(AudioStreamOggVorbis, AudioStream);
 	OBJ_SAVE_TYPE(AudioStream); // Saves derived classes with common type so they can be interchanged.
 	RES_BASE_EXTENSION("oggvorbisstr");
 
+#ifndef MODULE_FFMPEG_ENABLED
 	friend class AudioStreamPlaybackOggVorbis;
+#endif
 
 	int channels = 1;
 	double length = 0.0;

@@ -1,0 +1,32 @@
+#!/usr/bin/env python
+import os
+
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+
+# The FFmpeg libraries are built per target platform and consumed by the
+# private playback implementation. Keep this module boundary separate from
+# the legacy WebM/libvpx module during the migration.
+env_ffmpeg = env_modules.Clone()
+env_ffmpeg.Prepend(CPPPATH=["#thirdparty/libogg/"])
+
+ffmpeg_dir = env["ffmpeg_dir"]
+if not ffmpeg_dir:
+    print("WARNING: FFmpeg module enabled without ffmpeg_dir; media playback will not be linked.")
+else:
+	env_ffmpeg.Prepend(CPPPATH=[ffmpeg_dir + "/include"])
+	lib_prefix = "" if env["platform"] == "windows" else "lib"
+	lib_suffix = ".lib" if env["platform"] == "windows" else ".a"
+	ffmpeg_libs = [env.File(ffmpeg_dir + "/lib/" + lib_prefix + name + lib_suffix) for name in ["avformat", "avcodec", "swscale", "avutil", "swresample"]]
+	env_ffmpeg.Append(LIBS=ffmpeg_libs)
+	env.Append(LIBS=ffmpeg_libs)
+	dav1d_lib = ffmpeg_dir + "/deps/lib/libdav1d.a"
+	if os.path.isfile(dav1d_lib):
+		env_ffmpeg.Append(LIBS=[env.File(dav1d_lib)])
+		env.Append(LIBS=[env.File(dav1d_lib)])
+
+module_obj = []
+env_ffmpeg.add_source_files(module_obj, "*.cpp")
+env.modules_sources += module_obj

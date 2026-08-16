@@ -26,7 +26,7 @@ if env["builtin_libtheora"]:
         "state.c",
     ]
 
-    if env.editor_build:
+    if env.editor_build or env["module_ffmpeg_enabled"]:
         thirdparty_sources += [
             "analyze.c",
             "encfrag.c",
@@ -50,7 +50,7 @@ if env["builtin_libtheora"]:
         "x86/x86state.c",
     ]
 
-    if env.editor_build:
+    if env.editor_build or env["module_ffmpeg_enabled"]:
         thirdparty_sources_x86 += [
             "x86/mmxencfrag.c",
             "x86/mmxfdct.c",
@@ -68,7 +68,7 @@ if env["builtin_libtheora"]:
         "x86_vc/x86state.c",
     ]
 
-    if env.editor_build:
+    if env.editor_build or env["module_ffmpeg_enabled"]:
         thirdparty_sources_x86_vc += [
             "x86_vc/mmxencfrag.c",
             "x86_vc/mmxfdct.c",
@@ -106,8 +106,8 @@ module_obj = []
 
 env_theora.add_source_files(module_obj, "*.cpp")
 
-if env.editor_build:
-    env_theora.add_source_files(module_obj, "editor/*.cpp")
+if env.editor_build and not env["module_ffmpeg_enabled"]:
+	env_theora.add_source_files(module_obj, "editor/*.cpp")
 
 env.modules_sources += module_obj
 

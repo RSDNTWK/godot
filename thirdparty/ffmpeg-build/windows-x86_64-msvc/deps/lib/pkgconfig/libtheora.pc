@@ -1,0 +1,11 @@
+prefix=C:/godot/thirdparty/ffmpeg-build/windows-x86_64-msvc/deps
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libtheora
+Description: Theora video codec
+Version: 1.1.1
+Requires: ogg
+Libs: -L${libdir} -ltheoraenc -ltheoradec -logg
+Cflags: -I${includedir}

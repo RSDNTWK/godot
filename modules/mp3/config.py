@@ -11,7 +11,7 @@ def get_opts(platform):
 
 
 def configure(env):
-    pass
+    env.module_add_dependencies("mp3", ["ffmpeg"])
 
 
 def get_doc_classes():

@@ -34,8 +34,9 @@
 
 #include "core/io/resource_importer.h"
 #include "core/object/class_db.h"
+#include "modules/modules_enabled.gen.h"
 
-#ifdef TOOLS_ENABLED
+#if defined(TOOLS_ENABLED) && !defined(MODULE_FFMPEG_ENABLED)
 #include "resource_importer_mp3.h"
 
 #include "editor/editor_node.h"
@@ -52,7 +53,7 @@ void initialize_mp3_module(ModuleInitializationLevel p_level) {
 		GDREGISTER_CLASS(AudioStreamMP3);
 	}
 
-#ifdef TOOLS_ENABLED
+#if defined(TOOLS_ENABLED) && !defined(MODULE_FFMPEG_ENABLED)
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
 		GDREGISTER_CLASS(ResourceImporterMP3);
 
