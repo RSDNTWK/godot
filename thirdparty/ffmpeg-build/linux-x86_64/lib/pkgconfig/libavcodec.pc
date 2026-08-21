@@ -9,6 +9,6 @@ Version: 63.7.100
 Requires: libswresample >= 7.2.100, libavutil >= 61.5.100
 Requires.private: 
 Conflicts:
-Libs: -L${libdir}  -lavcodec -pthread -lm -latomic
+Libs: -L${libdir}  -lavcodec -pthread -lm -latomic -ldav1d
 Libs.private: 
 Cflags: -I${includedir}

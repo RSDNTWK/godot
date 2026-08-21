@@ -9,6 +9,6 @@ Version: 61.5.100
 Requires: 
 Requires.private: 
 Conflicts:
-Libs: -L${libdir}  -lavutil -lm -latomic -pthread
+Libs: -L${libdir}  -lavutil -lva-drm -lva -lm -L/usr/lib/pkgconfig/../ -lvpl -ldl -lva -latomic -pthread
 Libs.private: 
 Cflags: -I${includedir}

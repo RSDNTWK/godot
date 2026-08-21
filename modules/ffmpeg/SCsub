@@ -15,17 +15,37 @@ env_ffmpeg.Prepend(CPPPATH=["#thirdparty/libogg/"])
 ffmpeg_dir = env["ffmpeg_dir"]
 if not ffmpeg_dir:
     print("WARNING: FFmpeg module enabled without ffmpeg_dir; media playback will not be linked.")
+    pass
+
 else:
-	env_ffmpeg.Prepend(CPPPATH=[ffmpeg_dir + "/include"])
-	lib_prefix = "" if env["platform"] == "windows" else "lib"
-	lib_suffix = ".lib" if env["platform"] == "windows" else ".a"
-	ffmpeg_libs = [env.File(ffmpeg_dir + "/lib/" + lib_prefix + name + lib_suffix) for name in ["avformat", "avcodec", "swscale", "avutil", "swresample"]]
-	env_ffmpeg.Append(LIBS=ffmpeg_libs)
-	env.Append(LIBS=ffmpeg_libs)
-	dav1d_lib = ffmpeg_dir + "/deps/lib/libdav1d.a"
-	if os.path.isfile(dav1d_lib):
-		env_ffmpeg.Append(LIBS=[env.File(dav1d_lib)])
-		env.Append(LIBS=[env.File(dav1d_lib)])
+    env_ffmpeg.Prepend(CPPPATH=[ffmpeg_dir + "/include"])
+    env_modules.Prepend(CPPPATH=[ffmpeg_dir + "/include"])
+    env.Append(CPPPATH=[ffmpeg_dir + "/include"])
+    lib_prefix = "" if env["platform"] == "windows" else "lib"
+    lib_suffix = ".lib" if env["platform"] == "windows" else ".a"
+    ffmpeg_libs = [env.File(ffmpeg_dir + "/lib/" + lib_prefix + name + lib_suffix) for name in ["avformat", "avcodec", "swscale", "avutil", "swresample"]]
+    env_ffmpeg.Append(LIBS=ffmpeg_libs)
+    env.Append(LIBS=ffmpeg_libs)
+    if env["platform"] == "windows":
+        hw_linkflags = ["d3d11.lib", "d3d12.lib", "dxva2.lib", "ole32.lib", "user32.lib"]
+        env_ffmpeg.Append(LINKFLAGS=hw_linkflags)
+        env.Append(LINKFLAGS=hw_linkflags)
+    elif env["platform"] == "linuxbsd":
+        hw_libs = ["va", "va-drm", "vulkan", "dav1d"]
+        env_ffmpeg.Append(LIBS=hw_libs)
+        env.Append(LIBS=hw_libs)
+    elif env["platform"] == "android":
+        hw_libs = ["mediandk", "android", "atomic"]
+        env_ffmpeg.Append(LIBS=hw_libs)
+        env.Append(LIBS=hw_libs)
+    elif env["platform"] in ["macos", "ios", "visionos"]:
+        hw_linkflags = ["-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo"]
+        env_ffmpeg.Append(LINKFLAGS=hw_linkflags)
+        env.Append(LINKFLAGS=hw_linkflags)
+    dav1d_lib = ffmpeg_dir + "/deps/lib/libdav1d.a"
+    if os.path.isfile(dav1d_lib):
+        env_ffmpeg.Append(LIBS=[env.File(dav1d_lib)])
+        env.Append(LIBS=[env.File(dav1d_lib)])
 
 module_obj = []
 env_ffmpeg.add_source_files(module_obj, "*.cpp")

@@ -9,6 +9,6 @@ Version: 63.7.100
 Requires: libswresample >= 7.2.100, libavutil >= 61.5.100
 Requires.private: 
 Conflicts:
-Libs: -L${libdir}  -lavcodec C:/godot/build/dav1d-install/lib/libdav1d.a ucrt.lib vcruntime.lib msvcrt.lib ole32.lib user32.lib
+Libs: -L${libdir}  -lavcodec ole32.lib user32.lib
 Libs.private: 
 Cflags: -I${includedir}
