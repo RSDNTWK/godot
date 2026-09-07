@@ -4,6 +4,7 @@
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
+#include "core/os/os.h"
 #include "core/config/project_settings.h"
 #include "scene/resources/image_texture.h"
 #include "servers/audio/audio_server.h"
@@ -32,6 +33,12 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
     double position = 0.0;
     double length = 0.0;
     double playback_clock = 0.0;
+    double audio_frames_due = 0.0;
+    Vector<float> pending_audio;
+    int pending_audio_offset = 0;
+    bool packet_pending = false;
+    bool demux_eof = false;
+    bool decoder_draining = false;
     Ref<ImageTexture> texture;
     Ref<AudioStreamPlayback> audio_playback;
 
@@ -101,23 +108,39 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
         if (!audio_playback.is_valid() || !mix_callback) {
             return;
         }
-        const int mix_frames = MAX(1, int(MAX(p_delta, 1.0 / 60.0) * AudioServer::get_singleton()->get_mix_rate()));
-        Vector<AudioFrame> samples;
-        samples.resize(mix_frames);
-        const int mixed = audio_playback->mix(samples.ptrw(), 1.0, mix_frames);
-        if (mixed <= 0) {
-            return;
+        audio_frames_due += MAX(p_delta, 0.0) * AudioServer::get_singleton()->get_mix_rate();
+        // Preserve rejected samples and fractional durations; bound work after stalls.
+        for (int batch = 0; batch < 16; batch++) {
+            if (pending_audio_offset < pending_audio.size() / 2) {
+                const int remaining = pending_audio.size() / 2 - pending_audio_offset;
+                const int accepted = mix_callback(mix_udata, pending_audio.ptr() + pending_audio_offset * 2, remaining);
+                pending_audio_offset += accepted;
+                audio_frames_due -= accepted;
+                if (accepted < remaining) {
+                    return;
+                }
+            }
+            pending_audio.clear();
+            pending_audio_offset = 0;
+            const int mix_frames = int(MIN(audio_frames_due, 1024.0));
+            if (mix_frames <= 0) {
+                return;
+            }
+            Vector<AudioFrame> samples;
+            samples.resize(mix_frames);
+            const int mixed = audio_playback->mix(samples.ptrw(), 1.0, mix_frames);
+            if (mixed <= 0) {
+                audio_frames_due = 0.0;
+                return;
+            }
+            pending_audio.resize(mixed * 2);
+            float *pcm = pending_audio.ptrw();
+            for (int i = 0; i < mixed; i++) {
+                pcm[i * 2] = samples[i].left;
+                pcm[i * 2 + 1] = samples[i].right;
+            }
         }
-        Vector<float> pcm;
-        pcm.resize(mixed * 2);
-        float *pcm_ptr = pcm.ptrw();
-        for (int i = 0; i < mixed; i++) {
-            pcm_ptr[i * 2] = samples[i].left;
-            pcm_ptr[i * 2 + 1] = samples[i].right;
-        }
-        mix_callback(mix_udata, pcm.ptrw(), mixed);
     }
-
     void close() {
         if (scale) {
             sws_freeContext(scale);
@@ -147,6 +170,13 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
         video_stream = -1;
         playing = false;
         playback_clock = 0.0;
+        audio_frames_due = 0.0;
+        pending_audio.clear();
+        pending_audio_offset = 0;
+        packet_pending = false;
+        demux_eof = false;
+        decoder_draining = false;
+        audio_playback.unref();
     }
 
 public:
@@ -212,13 +242,15 @@ public:
         if (!playing || !format || !codec) {
             return;
         }
-        playback_clock += p_delta;
+        playback_clock += MAX(p_delta, 0.0);
         _mix_audio(p_delta);
+        const double target_clock = playback_clock - (audio_playback.is_valid() ? audio_frames_due / AudioServer::get_singleton()->get_mix_rate() : 0.0);
+        const uint64_t decode_start = OS::get_singleton()->get_ticks_usec();
         bool frame_ready = false;
         double frame_position = position;
         if (queued_frame->format >= 0) {
             const double queued_position = queued_frame->best_effort_timestamp == AV_NOPTS_VALUE ? position : queued_frame->best_effort_timestamp * av_q2d(format->streams[video_stream]->time_base);
-            if (queued_position > playback_clock) {
+            if (queued_position > target_clock) {
                 return;
             }
             av_frame_unref(frame);
@@ -226,30 +258,65 @@ public:
             frame_position = queued_position;
             frame_ready = true;
         }
-        while (!frame_ready && av_read_frame(format, packet) >= 0) {
-            if (packet->stream_index != video_stream) {
-                av_packet_unref(packet);
-                continue;
+        while (!frame_ready || frame_position < target_clock - 0.1) {
+            // Decode reference frames, but avoid uploading stale frames. Limit catch-up work.
+            if (OS::get_singleton()->get_ticks_usec() - decode_start >= 8000) {
+                break;
             }
-            const int send_error = avcodec_send_packet(codec, packet);
-            if (send_error < 0) {
-                av_packet_unref(packet);
-                continue;
+            if (frame_ready) {
+                av_frame_unref(frame);
+                frame_ready = false;
             }
-            av_packet_unref(packet);
             const int receive_error = avcodec_receive_frame(codec, frame);
-            if (receive_error < 0) {
+            if (receive_error == AVERROR_EOF) {
+                playing = false;
+                return;
+            }
+            if (receive_error == AVERROR(EAGAIN)) {
+                if (!packet_pending && !demux_eof) {
+                    const int read_error = av_read_frame(format, packet);
+                    if (read_error == AVERROR(EAGAIN)) {
+                        return;
+                    }
+                    if (read_error < 0) {
+                        demux_eof = true;
+                    } else if (packet->stream_index != video_stream) {
+                        av_packet_unref(packet);
+                        continue;
+                    } else {
+                        packet_pending = true;
+                    }
+                }
+                if (decoder_draining) {
+                    return;
+                }
+                const int send_error = avcodec_send_packet(codec, packet_pending ? packet : nullptr);
+                if (send_error == AVERROR(EAGAIN)) {
+                    continue;
+                }
+                if (send_error < 0) {
+                    ERR_PRINT("FFmpeg: video packet decoding failed.");
+                    playing = false;
+                    return;
+                }
+                decoder_draining = !packet_pending;
+                av_packet_unref(packet);
+                packet_pending = false;
                 continue;
+            }
+            if (receive_error < 0) {
+                ERR_PRINT("FFmpeg: video frame decoding failed.");
+                playing = false;
+                return;
             }
             frame_position = frame->best_effort_timestamp == AV_NOPTS_VALUE ? position : frame->best_effort_timestamp * av_q2d(format->streams[video_stream]->time_base);
-            if (frame_position > playback_clock) {
+            if (frame_position > target_clock) {
                 av_frame_ref(queued_frame, frame);
                 return;
             }
             frame_ready = true;
         }
         if (!frame_ready) {
-            playing = false;
             return;
         }
         AVFrame *display_frame = frame;
@@ -280,6 +347,7 @@ public:
     }
 
     void play() override {
+        seek(position);
         playing = true;
         playback_clock = position;
         if (audio_playback.is_valid()) {
@@ -294,23 +362,29 @@ public:
     }
     bool is_playing() const override { return playing; }
     void set_paused(bool p_paused) override {
+        // update() is paused too; preserve the audio cursor and rejected samples.
         playing = !p_paused;
-        if (audio_playback.is_valid()) {
-            if (p_paused) {
-                audio_playback->stop_playback();
-            } else if (playing) {
-                audio_playback->start_playback(position);
-            }
-        }
     }
     bool is_paused() const override { return !playing; }
     double get_length() const override { return length; }
     double get_playback_position() const override { return position; }
     void seek(double p_time) override {
         if (format && video_stream >= 0) {
-            av_seek_frame(format, video_stream, int64_t(p_time / av_q2d(format->streams[video_stream]->time_base)), AVSEEK_FLAG_BACKWARD);
+            if (av_seek_frame(format, video_stream, int64_t(p_time / av_q2d(format->streams[video_stream]->time_base)), AVSEEK_FLAG_BACKWARD) < 0) {
+                return;
+            }
             avcodec_flush_buffers(codec);
             av_frame_unref(queued_frame);
+            av_packet_unref(packet);
+            packet_pending = false;
+            demux_eof = false;
+            decoder_draining = false;
+            pending_audio.clear();
+            pending_audio_offset = 0;
+            audio_frames_due = 0.0;
+            if (audio_playback.is_valid()) {
+                audio_playback->seek(p_time);
+            }
             position = p_time;
             playback_clock = p_time;
         }
