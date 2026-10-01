@@ -1,6 +1,6 @@
 #include "video_stream_media.h"
 
-#include "core/config/project_settings.h"
+#include "ffmpeg_file_io.h"
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
 #include "modules/ogg/ogg_packet_sequence.h"
@@ -88,20 +88,20 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 			av_packet_free(&aac_packet);
 			return false;
 		}
-		AVChannelLayout output_layout;
-		av_channel_layout_default(&output_layout, 2);
-		bool ok = swr_alloc_set_opts2(&aac_resampler, &output_layout, AV_SAMPLE_FMT_FLT, output_sample_rate, &aac_codec->ch_layout, AV_SAMPLE_FMT_FLTP, 48000, 0, nullptr) >= 0 && aac_resampler && swr_init(aac_resampler) >= 0;
-		av_channel_layout_uninit(&output_layout);
-		if (!ok) {
-			avcodec_free_context(&aac_codec);
-			av_parser_close(parser);
-			av_frame_free(&aac_frame);
-			av_packet_free(&aac_packet);
-			if (aac_resampler) swr_free(&aac_resampler);
-			return false;
-		}
+		bool decode_ok = true;
 		auto receive = [&]() {
 			while (avcodec_receive_frame(aac_codec, aac_frame) >= 0) {
+				// ADTS supplies the actual layout/rate only after decoding starts.
+				if (!aac_resampler) {
+					AVChannelLayout output_layout;
+					av_channel_layout_default(&output_layout, 2);
+					const int setup = swr_alloc_set_opts2(&aac_resampler, &output_layout, AV_SAMPLE_FMT_FLT, output_sample_rate, &aac_frame->ch_layout, static_cast<AVSampleFormat>(aac_frame->format), aac_frame->sample_rate, 0, nullptr);
+					av_channel_layout_uninit(&output_layout);
+					if (setup < 0 || !aac_resampler || swr_init(aac_resampler) < 0) {
+						decode_ok = false;
+						return;
+					}
+				}
 				int output_frames = swr_get_out_samples(aac_resampler, aac_frame->nb_samples);
 				Vector<float> output;
 				output.resize(output_frames * 2);
@@ -115,9 +115,12 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 				}
 			}
 		};
-		const uint8_t *input = p_data.ptr();
+		Vector<uint8_t> padded_data = p_data;
+		padded_data.resize(p_data.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+		memset(padded_data.ptrw() + p_data.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+		const uint8_t *input = padded_data.ptr();
 		int remaining = p_data.size();
-		while (remaining > 0) {
+		while (remaining > 0 && decode_ok) {
 			uint8_t *packet_data = nullptr;
 			int packet_size = 0;
 			int consumed = av_parser_parse2(parser, aac_codec, &packet_data, &packet_size, input, remaining, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
@@ -138,7 +141,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 		av_parser_close(parser);
 		avcodec_free_context(&aac_codec);
 		swr_free(&aac_resampler);
-		return !samples.is_empty();
+		return decode_ok && !samples.is_empty();
 	}
 
 	public:
@@ -148,6 +151,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 		if (p_format_name && strcmp(p_format_name, "aac") == 0) {
 			return open_raw_aac(p_data);
 		}
+		FFmpegFileIO file_io;
 		AVFormatContext *format = nullptr;
 		AVIOContext *io_context = nullptr;
 		AVCodecContext *codec = nullptr;
@@ -177,14 +181,14 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 				avformat_close_input(&format);
 			}
 			if (io_context) {
+				av_freep(&io_context->buffer);
 				avio_context_free(&io_context);
 			}
 		};
 
 		const AVInputFormat *input_format = p_format_name ? av_find_input_format(p_format_name) : nullptr;
 		if (!p_path.is_empty()) {
-			String path = ProjectSettings::get_singleton()->globalize_path(p_path);
-			if (avformat_open_input(&format, path.utf8().get_data(), input_format, nullptr) < 0) {
+			if (file_io.open(&format, p_path, input_format) < 0) {
 				cleanup();
 				return false;
 			}
@@ -298,9 +302,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	}
 
 	bool open_file(const String &p_path) {
-		String path = ProjectSettings::get_singleton()->globalize_path(p_path);
-		Vector<uint8_t> data = FileAccess::get_file_as_bytes(path);
-		return !data.is_empty() && open_buffer(data, nullptr, p_path);
+		return open_buffer(Vector<uint8_t>(), nullptr, p_path);
 	}
 
 	void start(double p_from_pos = 0.0) override {
@@ -336,12 +338,13 @@ String AudioStreamMedia::get_file() const {
 }
 
 Ref<AudioStreamPlayback> AudioStreamMedia::instantiate_playback() {
-	String path = ProjectSettings::get_singleton()->globalize_path(file);
-	Vector<uint8_t> data = FileAccess::get_file_as_bytes(path);
-	const char *format = file.get_extension().to_lower() == "aac" ? "aac" : nullptr;
-	return ffmpeg_audio_playback_from_buffer(data, format, format ? String() : file);
+    if (file.get_extension().to_lower() == "aac") {
+        Vector<uint8_t> data = FileAccess::get_file_as_bytes(file);
+        ERR_FAIL_COND_V(data.is_empty(), Ref<AudioStreamPlayback>());
+        return ffmpeg_audio_playback_from_buffer(data, "aac");
+    }
+    return ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, file);
 }
-
 Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path) {
 	Ref<AudioStreamPlaybackFFmpeg> playback;
 	playback.instantiate();

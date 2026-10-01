@@ -5,7 +5,7 @@
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
 #include "core/os/os.h"
-#include "core/config/project_settings.h"
+#include "ffmpeg_file_io.h"
 #include "scene/resources/image_texture.h"
 #include "servers/audio/audio_server.h"
 
@@ -20,6 +20,7 @@ extern "C" {
 class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
     GDCLASS(VideoStreamPlaybackFFmpeg, VideoStreamPlayback);
 
+    FFmpegFileIO file_io;
     AVFormatContext *format = nullptr;
     AVCodecContext *codec = nullptr;
     AVPacket *packet = nullptr;
@@ -152,6 +153,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
         if (format) {
             avformat_close_input(&format);
         }
+        file_io.close();
         if (packet) {
             av_packet_free(&packet);
         }
@@ -184,8 +186,7 @@ public:
 
     bool open_file(const String &p_path) {
         close();
-        String path = ProjectSettings::get_singleton()->globalize_path(p_path);
-        if (avformat_open_input(&format, path.utf8().get_data(), nullptr, nullptr) < 0 || avformat_find_stream_info(format, nullptr) < 0) {
+        if (file_io.open(&format, p_path) < 0 || avformat_find_stream_info(format, nullptr) < 0) {
             close();
             return false;
         }
@@ -233,7 +234,7 @@ public:
             Ref<Image> image = Image::create_empty(codec->width, codec->height, false, Image::FORMAT_RGBA8);
             texture = ImageTexture::create_from_image(image);
         }
-        audio_playback = ffmpeg_audio_playback_from_buffer(FileAccess::get_file_as_bytes(path));
+        audio_playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, p_path);
         length = format->duration > 0 ? double(format->duration) / AV_TIME_BASE : 0.0;
         return packet && frame && queued_frame && software_frame;
     }

@@ -49,7 +49,10 @@ agility_sdk_folder = os.path.join(deps_folder, "agility_sdk")
 
 # Create dependencies folder
 if not os.path.exists(deps_folder):
-    os.makedirs(deps_folder)
+    try:
+        os.makedirs(deps_folder)
+    except FileExistsError:
+        pass
 
 # Mesa NIR
 color_print(f"{Ansi.BOLD}[1/3] Mesa NIR")
