@@ -668,18 +668,18 @@ Patches:
 See `linuxbsd_headers/README.md`.
 
 
-## lzma2602
+## lzma2603
 
 - Upstream: https://www.7-zip.org/sdk.html
-- Version: 26.02 (2026-06-25)
+- Version: 26.03 (2026-09-03)
 - License: Public Domain
 
 Files extracted from upstream source:
 
-- From the SDK root to `thirdparty/lzma2602/`:
+- From the SDK root to `thirdparty/lzma2603/`:
   - Keep only `C/` and `DOC/`
   - Except top-level folders `Asm/`, `CPP/`, `CS/`, `Java/`
-- From `C/` to `thirdparty/lzma2602/C/`:
+- From `C/` to `thirdparty/lzma2603/C/`:
   - `7zAlloc.c`, `7zAlloc.h`, `7zStream.c`, `7zTypes.h`, `7zWindows.h`,
     `Compiler.h`, `CpuArch.c`, `CpuArch.h`, `LzFind.c`, `LzFind.h`,
     `LzFindMt.c`, `LzFindMt.h`, `LzFindOpt.c`, `LzHash.h`,
@@ -687,7 +687,7 @@ Files extracted from upstream source:
     `LzmaDec.c`, `LzmaDec.h`, `LzmaEnc.c`, `LzmaEnc.h`, `MtCoder.c`,
     `MtCoder.h`, `MtDec.c`, `MtDec.h`, `Precomp.h`, `Threads.c`,
     `Threads.h`
-- From `DOC/` to `thirdparty/lzma2602/DOC/`:
+- From `DOC/` to `thirdparty/lzma2603/DOC/`:
   - `lzma-sdk.txt`
 
 

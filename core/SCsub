@@ -114,7 +114,7 @@ thirdparty_minizip_sources = [thirdparty_minizip_dir + file for file in thirdpar
 env_thirdparty.add_source_files(thirdparty_obj, thirdparty_minizip_sources)
 
 # LZMA2 (7-Zip SDK) library used by PCK payload compression.
-thirdparty_lzma_dir = "#thirdparty/lzma2602/C/"
+thirdparty_lzma_dir = "#thirdparty/lzma2603/C/"
 thirdparty_lzma_sources = [
     "7zAlloc.c",
     "7zStream.c",
