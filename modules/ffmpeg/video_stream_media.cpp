@@ -2,6 +2,7 @@
 
 #include "core/error/error_macros.h"
 #include "core/io/file_access.h"
+#include "core/io/resource_importer.h"
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
 #include "core/os/os.h"
@@ -31,6 +32,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
     SwsContext *scale = nullptr;
     int video_stream = -1;
     bool playing = false;
+    bool paused = false;
     double position = 0.0;
     double length = 0.0;
     double playback_clock = 0.0;
@@ -206,6 +208,10 @@ public:
             close();
             return false;
         }
+#if defined(WEB_ENABLED) && !defined(THREADS_ENABLED)
+        // Software decoders must not create workers in the no-thread Web template.
+        codec->thread_count = 1;
+#endif
         if (_try_create_hardware_device(&hardware_device)) {
             codec->hw_device_ctx = av_buffer_ref(hardware_device);
             codec->get_format = _get_format;
@@ -240,7 +246,7 @@ public:
     }
 
     void update(double p_delta) override {
-        if (!playing || !format || !codec) {
+        if (!playing || paused || !format || !codec) {
             return;
         }
         playback_clock += MAX(p_delta, 0.0);
@@ -348,7 +354,7 @@ public:
     }
 
     void play() override {
-        seek(position);
+        seek(0.0);
         playing = true;
         playback_clock = position;
         if (audio_playback.is_valid()) {
@@ -360,13 +366,14 @@ public:
         if (audio_playback.is_valid()) {
             audio_playback->stop_playback();
         }
+        seek(0.0);
     }
     bool is_playing() const override { return playing; }
     void set_paused(bool p_paused) override {
         // update() is paused too; preserve the audio cursor and rejected samples.
-        playing = !p_paused;
+        paused = p_paused;
     }
-    bool is_paused() const override { return !playing; }
+    bool is_paused() const override { return paused; }
     double get_length() const override { return length; }
     double get_playback_position() const override { return position; }
     void seek(double p_time) override {
@@ -384,7 +391,13 @@ public:
             pending_audio_offset = 0;
             audio_frames_due = 0.0;
             if (audio_playback.is_valid()) {
-                audio_playback->seek(p_time);
+                // A shorter soundtrack may already have reached EOF. A seek in
+                // an active video must reactivate it, without unpausing output.
+                if (playing) {
+                    audio_playback->start_playback(p_time);
+                } else {
+                    audio_playback->seek(p_time);
+                }
             }
             position = p_time;
             playback_clock = p_time;
@@ -442,14 +455,26 @@ void ResourceFormatLoaderMedia::get_recognized_extensions(List<String> *p_extens
 	p_extensions->push_back("wav");
 }
 
+static bool _media_has_imported_resource(const String &p_path) {
+	ResourceFormatImporter *importer = ResourceFormatImporter::get_singleton();
+	// Keep/Skip sidecars have no imported resource type; raw loading still applies.
+	return importer && FileAccess::exists(p_path + ".import") && !importer->get_resource_type(p_path).is_empty();
+}
+
+bool ResourceFormatLoaderMedia::recognize_path(const String &p_path, const String &p_for_type) const {
+	// Imported resources may contain the only copy shipped in an exported PCK.
+	// Let ResourceFormatImporter load them instead of opening the missing source.
+	return ResourceFormatLoader::recognize_path(p_path, p_for_type) && !_media_has_imported_resource(p_path);
+}
+
 bool ResourceFormatLoaderMedia::handles_type(const String &p_type) const { return p_type == "VideoStreamMedia" || p_type == "AudioStreamMedia"; }
 String ResourceFormatLoaderMedia::get_resource_type(const String &p_path) const {
 	String extension = p_path.get_extension().to_lower();
 	if (extension == "mp4" || extension == "m4v" || extension == "mov" || extension == "mkv" || extension == "webm" || extension == "ogv") {
-		return "VideoStreamMedia";
+		return _media_has_imported_resource(p_path) ? String() : String("VideoStreamMedia");
 	}
 	if (extension == "mp3" || extension == "m4a" || extension == "aac" || extension == "flac" || extension == "ogg" || extension == "opus" || extension == "wav") {
-		return "AudioStreamMedia";
+		return _media_has_imported_resource(p_path) ? String() : String("AudioStreamMedia");
 	}
 	return String();
 }

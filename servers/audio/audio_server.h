@@ -441,6 +441,7 @@ public:
 	void set_playback_all_bus_volumes_linear(Ref<AudioStreamPlayback> p_playback, Vector<AudioFrame> p_volumes);
 	void set_playback_pitch_scale(Ref<AudioStreamPlayback> p_playback, float p_pitch_scale);
 	void set_playback_paused(Ref<AudioStreamPlayback> p_playback, bool p_paused);
+	void seek_paused_playback_stream(Ref<AudioStreamPlayback> p_playback, float p_seconds);
 	void set_playback_highshelf_params(Ref<AudioStreamPlayback> p_playback, float p_gain, float p_attenuation_cutoff_hz);
 
 	bool is_playback_active(Ref<AudioStreamPlayback> p_playback);

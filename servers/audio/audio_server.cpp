@@ -1428,6 +1428,28 @@ void AudioServer::set_playback_paused(Ref<AudioStreamPlayback> p_playback, bool 
 	} while (!playback_node->state.compare_exchange_strong(old_state, new_state));
 }
 
+void AudioServer::seek_paused_playback_stream(Ref<AudioStreamPlayback> p_playback, float p_seconds) {
+	ERR_FAIL_COND(p_playback.is_null());
+	lock();
+	AudioStreamPlaybackListNode *playback_node = _find_playback_list_node(p_playback);
+	if (playback_node && is_playback_paused(p_playback)) {
+		// Reset decoder/resampler history while the mixer cannot advance the cursor.
+		p_playback->start(MAX(0.0f, p_seconds));
+		for (AudioFrame &frame : playback_node->lookahead) {
+			frame = AudioFrame(0, 0);
+		}
+		playback_node->state.store(AudioStreamPlaybackListNode::PAUSED);
+		if (p_playback->get_is_sample() && p_playback->get_sample_playback().is_valid()) {
+			Ref<AudioSamplePlayback> sample = p_playback->get_sample_playback();
+			AudioDriver::get_singleton()->stop_sample_playback(sample);
+			sample->offset = MAX(0.0f, p_seconds);
+			AudioDriver::get_singleton()->start_sample_playback(sample);
+			AudioDriver::get_singleton()->set_sample_playback_pause(sample, true);
+		}
+	}
+	unlock();
+}
+
 void AudioServer::set_playback_highshelf_params(Ref<AudioStreamPlayback> p_playback, float p_gain, float p_attenuation_cutoff_hz) {
 	ERR_FAIL_COND(p_playback.is_null());
 

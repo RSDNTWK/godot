@@ -365,14 +365,15 @@ class SampleNode {
 	/**
 	 * Stops a `SampleNode` by id.
 	 * @param {string} id Id of the `SampleNode` to stop.
+	 * @param {boolean} [notify=true] Whether to report completion to the engine.
 	 * @returns {void}
 	 */
-	static stopSampleNode(id) {
+	static stopSampleNode(id, notify = true) {
 		const sampleNode = GodotAudio.SampleNode.getSampleNodeOrNull(id);
 		if (sampleNode == null) {
 			return;
 		}
-		sampleNode.stop();
+		sampleNode.stop(notify);
 	}
 
 	/**
@@ -405,10 +406,11 @@ class SampleNode {
 	/**
 	 * Deletes a `SampleNode` based on the id.
 	 * @param {string} id Id of the `SampleNode` to delete.
+	 * @param {boolean} [notify=true] Whether to report completion to the engine.
 	 * @returns {void}
 	 */
-	static delete(id) {
-		GodotAudio.deleteSampleNode(id);
+	static delete(id, notify = true) {
+		GodotAudio.deleteSampleNode(id, notify);
 	}
 
 	/**
@@ -532,9 +534,10 @@ class SampleNode {
 	 * @returns {void}
 	 */
 	start() {
-		if (this.isStarted) {
+		if (this.isStarted || this.isPaused) {
 			return;
 		}
+		this._source.connect(this.getPositionWorklet());
 		this._resetSourceStartTime();
 		this._source.start(this.startTime, this.offset);
 		this.isStarted = true;
@@ -542,10 +545,11 @@ class SampleNode {
 
 	/**
 	 * Stops the `SampleNode`.
+	 * @param {boolean} [notify=true] Whether to report completion to the engine.
 	 * @returns {void}
 	 */
-	stop() {
-		this.clear();
+	stop(notify = true) {
+		this.clear(notify);
 	}
 
 	/**
@@ -621,7 +625,7 @@ class SampleNode {
 		if (this.isCanceled) {
 			return;
 		}
-		this._source.connect(this.getPositionWorklet());
+		this.getPositionWorklet();
 		if (start) {
 			this.start();
 		}
@@ -647,7 +651,9 @@ class SampleNode {
 		this._positionWorklet.port.onmessage = (event) => {
 			switch (event.data['type']) {
 			case 'position':
-				this._playbackPosition = (parseInt(event.data.data, 10) / this.getSample().sampleRate) + this.offset;
+				if (this.isStarted && !this.isPaused) {
+					this._playbackPosition = (parseInt(event.data.data, 10) / this.getSample().sampleRate) + this.offset;
+				}
 				break;
 			default:
 				// Do nothing.
@@ -656,16 +662,18 @@ class SampleNode {
 
 		const resetParameter = this._positionWorklet.parameters.get('reset');
 		resetParameter.setValueAtTime(1, GodotAudio.ctx.currentTime);
-		resetParameter.setValueAtTime(0, GodotAudio.ctx.currentTime + 1);
+		// Reset for one rendering quantum, not the first second of playback.
+		resetParameter.setValueAtTime(0, GodotAudio.ctx.currentTime + 128 / GodotAudio.ctx.sampleRate);
 
 		return this._positionWorklet;
 	}
 
 	/**
 	 * Clears the `SampleNode`.
+	 * @param {boolean} [notify=true] Whether to report completion to the engine.
 	 * @returns {void}
 	 */
-	clear() {
+	clear(notify = true) {
 		this.isCanceled = true;
 		this.isPaused = false;
 		this.pauseTime = 0;
@@ -692,7 +700,7 @@ class SampleNode {
 			this._positionWorklet = null;
 		}
 
-		GodotAudio.SampleNode.delete(this.id);
+		GodotAudio.SampleNode.delete(this.id, notify);
 	}
 
 	/**
@@ -745,12 +753,18 @@ class SampleNode {
 	 * @returns {void}
 	 */
 	_pause() {
-		if (!this.isStarted) {
+		if (this.isPaused) {
 			return;
 		}
 		this.isPaused = true;
+		if (!this.isStarted) {
+			return;
+		}
 		this.pauseTime = (GodotAudio.ctx.currentTime - this._sourceStartTime) / this.getPlaybackRate();
 		this._source.stop();
+		if (this._positionWorklet != null) {
+			this._source.disconnect(this._positionWorklet);
+		}
 	}
 
 	/**
@@ -758,6 +772,13 @@ class SampleNode {
 	 * @returns {void}
 	 */
 	_unpause() {
+		if (!this.isStarted) {
+			this.isPaused = false;
+			if (this._positionWorklet != null) {
+				this.start();
+			}
+			return;
+		}
 		this._restart();
 		this.isPaused = false;
 		this.pauseTime = 0;
@@ -1174,9 +1195,9 @@ const _GodotAudio = {
 		 */
 		sampleNodes: null,
 		SampleNode,
-		deleteSampleNode: (pSampleNodeId) => {
+		deleteSampleNode: (pSampleNodeId, notify = true) => {
 			GodotAudio.sampleNodes.delete(pSampleNodeId);
-			if (GodotAudio.sampleFinishedCallback == null) {
+			if (!notify || GodotAudio.sampleFinishedCallback == null) {
 				return;
 			}
 			const sampleNodeIdPtr = GodotRuntime.allocString(pSampleNodeId);
@@ -1372,7 +1393,7 @@ const _GodotAudio = {
 			busIndex,
 			startOptions
 		) {
-			GodotAudio.SampleNode.stopSampleNode(playbackObjectId);
+			GodotAudio.SampleNode.stopSampleNode(playbackObjectId, false);
 			GodotAudio.SampleNode.create(
 				{
 					busIndex,
@@ -1389,7 +1410,8 @@ const _GodotAudio = {
 		 * @returns {void}
 		 */
 		stop_sample: function (playbackObjectId) {
-			GodotAudio.SampleNode.stopSampleNode(playbackObjectId);
+			// The caller owns explicit stops; only natural completion should notify it.
+			GodotAudio.SampleNode.stopSampleNode(playbackObjectId, false);
 		},
 
 		/**

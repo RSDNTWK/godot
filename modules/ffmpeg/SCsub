@@ -38,6 +38,12 @@ else:
         hw_libs = ["mediandk", "android", "atomic"]
         env_ffmpeg.Append(LIBS=hw_libs)
         env.Append(LIBS=hw_libs)
+        # These static libraries are private to Godot. Local binding is required
+        # for FFmpeg's direct ARM assembly references to its internal tables.
+        private_libs = "libavformat.a:libavcodec.a:libswscale.a:libavutil.a:libswresample.a:libdav1d.a"
+        private_linkflags = ["-Wl,--exclude-libs," + private_libs]
+        env_ffmpeg.Append(LINKFLAGS=private_linkflags)
+        env.Append(LINKFLAGS=private_linkflags)
     elif env["platform"] in ["macos", "ios", "visionos"]:
         hw_linkflags = ["-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo"]
         env_ffmpeg.Append(LINKFLAGS=hw_linkflags)

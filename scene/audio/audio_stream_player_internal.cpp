@@ -268,7 +268,11 @@ void AudioStreamPlayerInternal::set_stream(Ref<AudioStream> p_stream) {
 }
 
 void AudioStreamPlayerInternal::seek(float p_seconds) {
-	if (is_playing()) {
+	if (get_stream_paused()) {
+		for (const Ref<AudioStreamPlayback> &playback : stream_playbacks) {
+			AudioServer::get_singleton()->seek_paused_playback_stream(playback, p_seconds);
+		}
+	} else if (is_playing()) {
 		stop_callable.call();
 		play_callable.call(p_seconds);
 	}

@@ -58,9 +58,27 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	GDCLASS(AudioStreamPlaybackFFmpeg, AudioStreamPlayback);
 
 	Vector<AudioFrame> samples;
+	uint64_t decoded_samples = 0;
+	bool store_samples = true;
 	uint64_t frame_position = 0;
 	bool playing = false;
 	int output_sample_rate = 44100;
+
+	void append_samples(const Vector<float> &p_output, int p_frames) {
+		if (p_frames <= 0) {
+			return;
+		}
+		decoded_samples += p_frames;
+		if (!store_samples) {
+			return;
+		}
+		for (int i = 0; i < p_frames; i++) {
+			AudioFrame sample;
+			sample.left = p_output[i * 2];
+			sample.right = p_output[i * 2 + 1];
+			samples.push_back(sample);
+		}
+	}
 
 	bool open_raw_aac(const Vector<uint8_t> &p_data) {
 		const AVCodec *decoder = avcodec_find_decoder(AV_CODEC_ID_AAC);
@@ -107,12 +125,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 				output.resize(output_frames * 2);
 				uint8_t *output_data[] = { reinterpret_cast<uint8_t *>(output.ptrw()) };
 				int converted = swr_convert(aac_resampler, output_data, output_frames, const_cast<const uint8_t **>(aac_frame->extended_data), aac_frame->nb_samples);
-				for (int i = 0; i < converted; i++) {
-					AudioFrame sample;
-					sample.left = output[i * 2];
-					sample.right = output[i * 2 + 1];
-					samples.push_back(sample);
-				}
+				append_samples(output, converted);
 			}
 		};
 		Vector<uint8_t> padded_data = p_data;
@@ -141,12 +154,14 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 		av_parser_close(parser);
 		avcodec_free_context(&aac_codec);
 		swr_free(&aac_resampler);
-		return decode_ok && !samples.is_empty();
+		return decode_ok && decoded_samples > 0;
 	}
 
 	public:
-	bool open_buffer(const Vector<uint8_t> &p_data, const char *p_format_name, const String &p_path) {
+	bool open_buffer(const Vector<uint8_t> &p_data, const char *p_format_name, const String &p_path, bool p_store_samples = true) {
 		samples.clear();
+		decoded_samples = 0;
+		store_samples = p_store_samples;
 		output_sample_rate = MAX(1, int(AudioServer::get_singleton()->get_mix_rate()));
 		if (p_format_name && strcmp(p_format_name, "aac") == 0) {
 			return open_raw_aac(p_data);
@@ -262,12 +277,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 				output.resize(output_frames * 2);
 				uint8_t *output_data[] = { reinterpret_cast<uint8_t *>(output.ptrw()) };
 				int converted = swr_convert(resampler, output_data, output_frames, const_cast<const uint8_t **>(frame->extended_data), frame->nb_samples);
-				for (int i = 0; i < converted; i++) {
-					AudioFrame sample;
-					sample.left = output[i * 2];
-					sample.right = output[i * 2 + 1];
-			samples.push_back(sample);
-				}
+				append_samples(output, converted);
 			}
 		};
 
@@ -288,15 +298,10 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 				output.resize(flush_frames * 2);
 				uint8_t *output_data[] = { reinterpret_cast<uint8_t *>(output.ptrw()) };
 				const int converted = swr_convert(resampler, output_data, flush_frames, nullptr, 0);
-				for (int i = 0; i < converted; i++) {
-					AudioFrame sample;
-					sample.left = output[i * 2];
-					sample.right = output[i * 2 + 1];
-					samples.push_back(sample);
-				}
+				append_samples(output, converted);
 			}
 		}
-		success = !samples.is_empty();
+		success = decoded_samples > 0;
 		cleanup();
 		return success;
 	}
@@ -304,6 +309,8 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	bool open_file(const String &p_path) {
 		return open_buffer(Vector<uint8_t>(), nullptr, p_path);
 	}
+
+	double get_decoded_length() const { return double(decoded_samples) / output_sample_rate; }
 
 	void start(double p_from_pos = 0.0) override {
 		frame_position = MIN(uint64_t(MAX(p_from_pos, 0.0) * output_sample_rate), uint64_t(samples.size()));
@@ -331,6 +338,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 
 void AudioStreamMedia::set_file(const String &p_file) {
 	file = p_file;
+	length = -1.0;
 }
 
 String AudioStreamMedia::get_file() const {
@@ -338,12 +346,18 @@ String AudioStreamMedia::get_file() const {
 }
 
 Ref<AudioStreamPlayback> AudioStreamMedia::instantiate_playback() {
+    Ref<AudioStreamPlaybackFFmpeg> playback;
     if (file.get_extension().to_lower() == "aac") {
         Vector<uint8_t> data = FileAccess::get_file_as_bytes(file);
         ERR_FAIL_COND_V(data.is_empty(), Ref<AudioStreamPlayback>());
-        return ffmpeg_audio_playback_from_buffer(data, "aac");
+        playback = ffmpeg_audio_playback_from_buffer(data, "aac");
+    } else {
+        playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, file);
     }
-    return ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, file);
+    if (playback.is_valid()) {
+        length = playback->get_decoded_length();
+    }
+    return playback;
 }
 Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path) {
 	Ref<AudioStreamPlaybackFFmpeg> playback;
@@ -440,7 +454,49 @@ Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPac
 }
 
 double AudioStreamMedia::get_length() const {
-	return 0.0;
+	if (length >= 0.0) {
+		return length;
+	}
+	length = 0.0;
+	if (file.is_empty()) {
+		return length;
+	}
+	// Use container metadata without decoding or retaining the whole file.
+	// Raw ADTS uses the same parser-based path as playback instead of probing.
+	if (file.get_extension().to_lower() != "aac") {
+		FFmpegFileIO file_io;
+		AVFormatContext *format = nullptr;
+		if (file_io.open(&format, file) >= 0 && avformat_find_stream_info(format, nullptr) >= 0) {
+			const int index = av_find_best_stream(format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+			if (index >= 0) {
+				const AVStream *stream = format->streams[index];
+				if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
+					length = stream->duration * av_q2d(stream->time_base);
+				} else if (format->duration != AV_NOPTS_VALUE && format->duration > 0) {
+					length = double(format->duration) / AV_TIME_BASE;
+				}
+			}
+		}
+		avformat_close_input(&format);
+	}
+	if (length <= 0.0) {
+		Ref<AudioStreamPlaybackFFmpeg> playback;
+		playback.instantiate();
+		bool opened = false;
+		// Count samples without retaining decoded PCM for a duration-only query.
+		if (file.get_extension().to_lower() == "aac") {
+			const Vector<uint8_t> data = FileAccess::get_file_as_bytes(file);
+			if (!data.is_empty()) {
+				opened = playback->open_buffer(data, "aac", String(), false);
+			}
+		} else {
+			opened = playback->open_buffer(Vector<uint8_t>(), nullptr, file, false);
+		}
+		if (opened) {
+			length = playback->get_decoded_length();
+		}
+	}
+	return length;
 }
 
 void AudioStreamMedia::_bind_methods() {

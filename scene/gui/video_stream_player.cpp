@@ -166,7 +166,10 @@ void VideoStreamPlayer::_notification(int p_notification) {
 			playback->update(delta * speed_scale); // playback->is_playing() returns false in the last video frame
 
 			if (!playback->is_playing()) {
+				AudioServer::get_singleton()->lock();
 				resampler.flush();
+				wait_resampler = 0;
+				AudioServer::get_singleton()->unlock();
 				if (loop) {
 					play();
 					return;
@@ -355,7 +358,10 @@ void VideoStreamPlayer::stop() {
 	}
 
 	playback->stop();
+	AudioServer::get_singleton()->lock();
 	resampler.flush();
+	wait_resampler = 0;
+	AudioServer::get_singleton()->unlock();
 	set_process_internal(false);
 }
 
@@ -469,7 +475,11 @@ double VideoStreamPlayer::get_stream_position() const {
 
 void VideoStreamPlayer::set_stream_position(double p_position) {
 	if (playback.is_valid()) {
+		// Reset the read cursor and interpolation offset together, outside the audio callback.
+		AudioServer::get_singleton()->lock();
 		resampler.flush();
+		wait_resampler = 0;
+		AudioServer::get_singleton()->unlock();
 		playback->seek(p_position);
 		first_frame = true;
 	}
