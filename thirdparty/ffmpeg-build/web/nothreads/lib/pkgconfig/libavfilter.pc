@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads/include
+
+Name: libavfilter
+Description: FFmpeg audio/video filtering library
+Version: 12.1.102
+Requires: libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavfilter -lm
+Libs.private: 
+Cflags: -I${includedir}

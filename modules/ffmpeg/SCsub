@@ -18,6 +18,16 @@ if not ffmpeg_dir:
     pass
 
 else:
+    if env["platform"] == "web":
+        variant = "threads" if env["threads"] else "nothreads"
+        variant_dir = os.path.join(ffmpeg_dir, variant)
+        if os.path.isdir(os.path.join(variant_dir, "include")):
+            ffmpeg_dir = variant_dir
+        config_path = os.path.join(ffmpeg_dir, "config.h")
+        if not env["threads"] and os.path.isfile(config_path):
+            with open(config_path, encoding="utf-8") as config:
+                if "#define HAVE_PTHREADS 1" in config.read():
+                    raise RuntimeError("The no-thread Web template requires a no-thread FFmpeg package.")
     env_ffmpeg.Prepend(CPPPATH=[ffmpeg_dir + "/include"])
     env_modules.Prepend(CPPPATH=[ffmpeg_dir + "/include"])
     env.Append(CPPPATH=[ffmpeg_dir + "/include"])
@@ -27,11 +37,13 @@ else:
     env_ffmpeg.Append(LIBS=ffmpeg_libs)
     env.Append(LIBS=ffmpeg_libs)
     if env["platform"] == "windows":
-        hw_linkflags = ["d3d11.lib", "d3d12.lib", "dxva2.lib", "ole32.lib", "user32.lib"]
+        hw_linkflags = ["d3d11.lib", "d3d12.lib", "dxva2.lib", "ole32.lib", "user32.lib", "advapi32.lib"]
         env_ffmpeg.Append(LINKFLAGS=hw_linkflags)
         env.Append(LINKFLAGS=hw_linkflags)
     elif env["platform"] == "linuxbsd":
-        hw_libs = ["va", "va-drm", "vulkan", "dav1d"]
+        hw_libs = ["va", "va-drm", "vulkan"]
+        if not os.path.isfile(ffmpeg_dir + "/deps/lib/libdav1d.a"):
+            hw_libs.append("dav1d")
         env_ffmpeg.Append(LIBS=hw_libs)
         env.Append(LIBS=hw_libs)
     elif env["platform"] == "android":
@@ -52,6 +64,11 @@ else:
     if os.path.isfile(dav1d_lib):
         env_ffmpeg.Append(LIBS=[env.File(dav1d_lib)])
         env.Append(LIBS=[env.File(dav1d_lib)])
+    # Link the static dispatcher, not an import library requiring libvpl.dll.
+    vpl_lib = ffmpeg_dir + "/deps/lib/" + ("vpl_static.lib" if env["platform"] == "windows" else "libvpl.a")
+    if os.path.isfile(vpl_lib):
+        env_ffmpeg.Append(LIBS=[env.File(vpl_lib)])
+        env.Append(LIBS=[env.File(vpl_lib)])
 
 module_obj = []
 env_ffmpeg.add_source_files(module_obj, "*.cpp")

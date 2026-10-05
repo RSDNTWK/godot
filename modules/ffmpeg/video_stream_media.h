@@ -42,8 +42,8 @@ public:
 	double get_length() const override;
 };
 
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String());
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPacketSequence> &p_sequence);
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String(), const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>());
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPacketSequence> &p_sequence, const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>());
 bool ffmpeg_probe_audio_buffer(const Vector<uint8_t> &p_data, FFmpegAudioMetadata &r_metadata);
 
 class ResourceFormatLoaderMedia : public ResourceFormatLoader {

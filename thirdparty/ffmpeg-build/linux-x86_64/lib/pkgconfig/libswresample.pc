@@ -1,12 +1,12 @@
-prefix=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64
+prefix=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64
 exec_prefix=${prefix}
-libdir=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64/lib
-includedir=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64/include
+libdir=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/include
 
 Name: libswresample
 Description: FFmpeg audio resampling library
-Version: 7.2.100
-Requires: libavutil >= 61.5.100
+Version: 7.1.102
+Requires: libavutil >= 61.1.102
 Requires.private: 
 Conflicts:
 Libs: -L${libdir}  -lswresample -lm -latomic

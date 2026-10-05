@@ -1,12 +1,12 @@
-prefix=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64
+prefix=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64
 exec_prefix=${prefix}
-libdir=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64/lib
-includedir=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64/include
+libdir=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/include
 
 Name: libavfilter
 Description: FFmpeg audio/video filtering library
-Version: 12.3.101
-Requires: libavutil >= 61.5.100
+Version: 12.1.102
+Requires: libavutil >= 61.1.102
 Requires.private: 
 Conflicts:
 Libs: -L${libdir}  -lavfilter -pthread -lm -latomic

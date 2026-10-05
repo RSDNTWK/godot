@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 61.1.102
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil -lm
+Libs.private: 
+Cflags: -I${includedir}

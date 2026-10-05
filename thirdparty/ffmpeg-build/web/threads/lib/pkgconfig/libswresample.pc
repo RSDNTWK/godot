@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/build/media-stable-20261005/install/web-threads
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/build/media-stable-20261005/install/web-threads/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/web-threads/include
+
+Name: libswresample
+Description: FFmpeg audio resampling library
+Version: 7.1.102
+Requires: libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lswresample -lm
+Libs.private: 
+Cflags: -I${includedir}

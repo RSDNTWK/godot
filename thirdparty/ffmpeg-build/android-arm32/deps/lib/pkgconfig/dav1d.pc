@@ -1,4 +1,4 @@
-prefix=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm32/deps
+prefix=/mnt/c/godot/build/media-stable-20261005/install/android-arm32/deps
 includedir=${prefix}/include
 libdir=${prefix}/lib
 

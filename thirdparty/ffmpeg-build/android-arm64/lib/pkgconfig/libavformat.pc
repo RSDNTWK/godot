@@ -1,12 +1,12 @@
-prefix=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm64
+prefix=/mnt/c/godot/build/media-stable-20261005/install/android-arm64
 exec_prefix=${prefix}
-libdir=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm64/lib
-includedir=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm64/include
+libdir=/mnt/c/godot/build/media-stable-20261005/install/android-arm64/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/android-arm64/include
 
 Name: libavformat
 Description: FFmpeg container format library
-Version: 63.6.100
-Requires: libavcodec >= 63.7.100, libswresample >= 7.2.100, libavutil >= 61.5.100
+Version: 63.1.102
+Requires: libavcodec >= 63.1.102, libswresample >= 7.1.102, libavutil >= 61.1.102
 Requires.private: 
 Conflicts:
 Libs: -L${libdir}  -lavformat -lm -latomic

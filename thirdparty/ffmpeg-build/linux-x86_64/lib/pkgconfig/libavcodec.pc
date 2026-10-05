@@ -1,14 +1,14 @@
-prefix=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64
+prefix=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64
 exec_prefix=${prefix}
-libdir=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64/lib
-includedir=/mnt/c/godot/thirdparty/ffmpeg-build/linux-x86_64/include
+libdir=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/include
 
 Name: libavcodec
 Description: FFmpeg codec library
-Version: 63.7.100
-Requires: libswresample >= 7.2.100, libavutil >= 61.5.100
+Version: 63.1.102
+Requires: libswresample >= 7.1.102, libavutil >= 61.1.102
 Requires.private: 
 Conflicts:
-Libs: -L${libdir}  -lavcodec -pthread -lm -latomic -ldav1d
+Libs: -L${libdir}  -lavcodec -pthread -lm -latomic -L/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/deps/lib -ldav1d -pthread -ldl -lva
 Libs.private: 
 Cflags: -I${includedir}

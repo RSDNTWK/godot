@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/web-nothreads/include
+
+Name: libavformat
+Description: FFmpeg container format library
+Version: 63.1.102
+Requires: libavcodec >= 63.1.102, libswresample >= 7.1.102, libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavformat -lm
+Libs.private: 
+Cflags: -I${includedir}

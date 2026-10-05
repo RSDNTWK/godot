@@ -1,0 +1,9 @@
+prefix=/mnt/c/godot/build/media-stable-20261005/install/linux-x86_64/deps
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: libdav1d
+Description: AV1 decoding library
+Version: 1.5.4
+Libs: -L${libdir} -ldav1d -pthread -ldl
+Cflags: -I${includedir} -pthread

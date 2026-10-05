@@ -42,6 +42,10 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
     bool packet_pending = false;
     bool demux_eof = false;
     bool decoder_draining = false;
+    bool hardware_decoding = false;
+#ifdef DEV_ENABLED
+    bool test_hardware_failure = false;
+#endif
     Ref<ImageTexture> texture;
     Ref<AudioStreamPlayback> audio_playback;
 
@@ -50,7 +54,60 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
         return descriptor && (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL);
     }
 
-    static bool _try_create_hardware_device(AVBufferRef **r_device) {
+    static AVPixelFormat _get_software_format(AVCodecContext *, const AVPixelFormat *p_formats) {
+        for (const AVPixelFormat *format = p_formats; *format != AV_PIX_FMT_NONE; format++) {
+            if (!_is_hardware_format(*format)) {
+                return *format;
+            }
+        }
+        return AV_PIX_FMT_NONE;
+    }
+
+    bool _open_decoder(const AVCodec *p_decoder, AVBufferRef *p_device, bool p_hardware) {
+        if (!p_decoder) {
+            return false;
+        }
+        AVCodecContext *candidate = avcodec_alloc_context3(p_decoder);
+        if (!candidate) {
+            return false;
+        }
+        if (avcodec_parameters_to_context(candidate, format->streams[video_stream]->codecpar) < 0) {
+            avcodec_free_context(&candidate);
+            return false;
+        }
+        candidate->pkt_timebase = format->streams[video_stream]->time_base;
+        candidate->get_format = p_device ? _get_format : (p_hardware ? avcodec_default_get_format : _get_software_format);
+#if defined(WEB_ENABLED) && !defined(THREADS_ENABLED)
+        candidate->thread_count = 1;
+#endif
+        if (p_device) {
+            candidate->hw_device_ctx = av_buffer_ref(p_device);
+            if (!candidate->hw_device_ctx) {
+                avcodec_free_context(&candidate);
+                return false;
+            }
+        }
+        if (avcodec_open2(candidate, p_decoder, nullptr) < 0) {
+            avcodec_free_context(&candidate);
+            return false;
+        }
+        codec = candidate;
+        hardware_decoding = p_hardware;
+        print_verbose(vformat("FFmpeg: opened %s decoder '%s'.", p_hardware ? "hardware" : "software", p_decoder->name));
+        return true;
+    }
+
+    bool _open_software_decoder() {
+        const AVCodecID id = format->streams[video_stream]->codecpar->codec_id;
+        // FFmpeg's native AV1 decoder has no CPU reconstruction backend.
+        const AVCodec *decoder = id == AV_CODEC_ID_AV1 ? avcodec_find_decoder_by_name("libdav1d") : avcodec_find_decoder(id);
+        if (decoder && !(decoder->capabilities & (AV_CODEC_CAP_HARDWARE | AV_CODEC_CAP_HYBRID))) {
+            return _open_decoder(decoder, nullptr, false);
+        }
+        return false;
+    }
+
+    bool _try_open_hardware_decoder() {
 #if defined(WINDOWS_ENABLED) || defined(ANDROID_ENABLED) || defined(LINUXBSD_ENABLED) || defined(MACOS_ENABLED) || defined(APPLE_EMBEDDED_ENABLED)
         const AVHWDeviceType device_types[] = {
 #if defined(WINDOWS_ENABLED)
@@ -59,6 +116,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
             AV_HWDEVICE_TYPE_DXVA2,
             AV_HWDEVICE_TYPE_CUDA,
             AV_HWDEVICE_TYPE_QSV,
+            AV_HWDEVICE_TYPE_AMF,
 #elif defined(ANDROID_ENABLED)
             AV_HWDEVICE_TYPE_MEDIACODEC,
 #elif defined(LINUXBSD_ENABLED)
@@ -66,19 +124,42 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
             AV_HWDEVICE_TYPE_QSV,
             AV_HWDEVICE_TYPE_VAAPI,
             AV_HWDEVICE_TYPE_VULKAN,
+            AV_HWDEVICE_TYPE_AMF,
 #elif defined(MACOS_ENABLED) || defined(APPLE_EMBEDDED_ENABLED)
             AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
 #endif
         };
 
+        const AVCodecID id = format->streams[video_stream]->codecpar->codec_id;
         for (AVHWDeviceType device_type : device_types) {
-            if (av_hwdevice_ctx_create(r_device, device_type, nullptr, nullptr, 0) >= 0) {
-                print_verbose(vformat("FFmpeg: selected hardware decoder device '%s'.", av_hwdevice_get_type_name(device_type)));
-                return true;
+            void *iterator = nullptr;
+            const AVCodec *decoder = nullptr;
+            while ((decoder = av_codec_iterate(&iterator))) {
+                if (!av_codec_is_decoder(decoder) || decoder->id != id) {
+                    continue;
+                }
+                for (int index = 0; const AVCodecHWConfig *config = avcodec_get_hw_config(decoder, index); index++) {
+                    if (config->device_type != device_type || !(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+                        continue;
+                    }
+                    // MediaCodec without a Surface returns CPU-readable buffers.
+                    // Its opaque Surface frames cannot be transferred with FFmpeg.
+                    if (device_type == AV_HWDEVICE_TYPE_MEDIACODEC) {
+                        if (_open_decoder(decoder, nullptr, true)) {
+                            return true;
+                        }
+                        break;
+                    }
+                    AVBufferRef *device = nullptr;
+                    if (av_hwdevice_ctx_create(&device, device_type, nullptr, nullptr, 0) >= 0 && _open_decoder(decoder, device, true)) {
+                        hardware_device = device;
+                        return true;
+                    }
+                    av_buffer_unref(&device);
+                    break;
+                }
             }
         }
-#else
-        (void)r_device;
 #endif
         return false;
     }
@@ -89,22 +170,41 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
             AVHWDeviceContext *device = reinterpret_cast<AVHWDeviceContext *>(p_codec->hw_device_ctx->data);
             device_type = device->type;
         }
-        for (const AVPixelFormat *format = p_formats; *format != AV_PIX_FMT_NONE; format++) {
-            const bool compatible =
-                    (device_type == AV_HWDEVICE_TYPE_D3D12VA && *format == AV_PIX_FMT_D3D12) ||
-                    (device_type == AV_HWDEVICE_TYPE_D3D11VA && *format == AV_PIX_FMT_D3D11) ||
-                    (device_type == AV_HWDEVICE_TYPE_DXVA2 && *format == AV_PIX_FMT_DXVA2_VLD) ||
-                    (device_type == AV_HWDEVICE_TYPE_MEDIACODEC && *format == AV_PIX_FMT_MEDIACODEC) ||
-                    (device_type == AV_HWDEVICE_TYPE_VAAPI && *format == AV_PIX_FMT_VAAPI) ||
-                    (device_type == AV_HWDEVICE_TYPE_VULKAN && *format == AV_PIX_FMT_VULKAN) ||
-                    (device_type == AV_HWDEVICE_TYPE_VIDEOTOOLBOX && *format == AV_PIX_FMT_VIDEOTOOLBOX) ||
-                    (device_type == AV_HWDEVICE_TYPE_CUDA && *format == AV_PIX_FMT_CUDA) ||
-                    (device_type == AV_HWDEVICE_TYPE_QSV && *format == AV_PIX_FMT_QSV);
-            if (compatible) {
-                return *format;
+        for (int index = 0; const AVCodecHWConfig *config = avcodec_get_hw_config(p_codec->codec, index); index++) {
+            if (config->device_type != device_type) {
+                continue;
+            }
+            for (const AVPixelFormat *format = p_formats; *format != AV_PIX_FMT_NONE; format++) {
+                if (*format == config->pix_fmt) {
+                    return *format;
+                }
             }
         }
-        return avcodec_default_get_format(p_codec, p_formats);
+        return AV_PIX_FMT_NONE;
+    }
+
+    bool _fallback_to_software(const char *p_reason) {
+        if (!hardware_decoding) {
+            return false;
+        }
+        hardware_decoding = false;
+        print_verbose(vformat("FFmpeg: %s; falling back to software at %.3f seconds.", p_reason, position));
+        av_frame_unref(frame);
+        av_frame_unref(queued_frame);
+        av_frame_unref(software_frame);
+        av_packet_unref(packet);
+        avcodec_free_context(&codec);
+        av_buffer_unref(&hardware_device);
+        const AVRational time_base = format->streams[video_stream]->time_base;
+        if (av_seek_frame(format, video_stream, int64_t(position / av_q2d(time_base)), AVSEEK_FLAG_BACKWARD) < 0 || !_open_software_decoder()) {
+            return false;
+        }
+        // Re-decode the preceding keyframe without resetting the audio cursor,
+        // accepted samples, or playback clock. Catch-up discards stale frames.
+        packet_pending = false;
+        demux_eof = false;
+        decoder_draining = false;
+        return true;
     }
 
     void _mix_audio(double p_delta) {
@@ -180,6 +280,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
         packet_pending = false;
         demux_eof = false;
         decoder_draining = false;
+        hardware_decoding = false;
         audio_playback.unref();
     }
 
@@ -197,38 +298,11 @@ public:
             close();
             return false;
         }
-        const AVCodecParameters *params = format->streams[video_stream]->codecpar;
-        const AVCodec *decoder = avcodec_find_decoder(params->codec_id);
-        if (!decoder) {
-            close();
-            return false;
-        }
-        codec = avcodec_alloc_context3(decoder);
-        if (!codec || avcodec_parameters_to_context(codec, params) < 0) {
-            close();
-            return false;
-        }
-#if defined(WEB_ENABLED) && !defined(THREADS_ENABLED)
-        // Software decoders must not create workers in the no-thread Web template.
-        codec->thread_count = 1;
+        const bool force_software = OS::get_singleton()->get_environment("GODOT_FFMPEG_FORCE_SOFTWARE") == "1";
+#ifdef DEV_ENABLED
+        test_hardware_failure = OS::get_singleton()->get_environment("GODOT_FFMPEG_TEST_HW_FAILURE") == "1";
 #endif
-        if (_try_create_hardware_device(&hardware_device)) {
-            codec->hw_device_ctx = av_buffer_ref(hardware_device);
-            codec->get_format = _get_format;
-        } else {
-            print_verbose("FFmpeg: no compatible hardware decoder device found; using software decoding.");
-        }
-        int codec_open_error = avcodec_open2(codec, decoder, nullptr);
-        if (codec_open_error < 0 && hardware_device) {
-            print_verbose("FFmpeg: hardware decoder setup failed; retrying with software decoding.");
-            avcodec_free_context(&codec);
-            av_buffer_unref(&hardware_device);
-            codec = avcodec_alloc_context3(decoder);
-            if (codec && avcodec_parameters_to_context(codec, params) >= 0) {
-                codec_open_error = avcodec_open2(codec, decoder, nullptr);
-            }
-        }
-        if (codec_open_error < 0) {
+        if ((force_software || !_try_open_hardware_decoder()) && !_open_software_decoder()) {
             close();
             return false;
         }
@@ -302,6 +376,9 @@ public:
                     continue;
                 }
                 if (send_error < 0) {
+                    if (_fallback_to_software("hardware packet decoding failed")) {
+                        return;
+                    }
                     ERR_PRINT("FFmpeg: video packet decoding failed.");
                     playing = false;
                     return;
@@ -312,6 +389,9 @@ public:
                 continue;
             }
             if (receive_error < 0) {
+                if (_fallback_to_software("hardware frame decoding failed")) {
+                    return;
+                }
                 ERR_PRINT("FFmpeg: video frame decoding failed.");
                 playing = false;
                 return;
@@ -326,9 +406,23 @@ public:
         if (!frame_ready) {
             return;
         }
+#ifdef DEV_ENABLED
+        // Exercise late hardware failure without disabling the user's GPU.
+        if (hardware_decoding && test_hardware_failure && position >= 0.2) {
+            test_hardware_failure = false;
+            if (!_fallback_to_software("injected hardware decoder failure")) {
+                playing = false;
+            }
+            return;
+        }
+#endif
         AVFrame *display_frame = frame;
         if (_is_hardware_format(static_cast<AVPixelFormat>(frame->format))) {
+            av_frame_unref(software_frame);
             if (av_hwframe_transfer_data(software_frame, frame, 0) < 0) {
+                if (_fallback_to_software("hardware frame transfer failed")) {
+                    return;
+                }
                 playing = false;
                 return;
             }
@@ -377,7 +471,7 @@ public:
     double get_length() const override { return length; }
     double get_playback_position() const override { return position; }
     void seek(double p_time) override {
-        if (format && video_stream >= 0) {
+        if (format && codec && packet && queued_frame && video_stream >= 0) {
             if (av_seek_frame(format, video_stream, int64_t(p_time / av_q2d(format->streams[video_stream]->time_base)), AVSEEK_FLAG_BACKWARD) < 0) {
                 return;
             }

@@ -1,0 +1,14 @@
+prefix=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc
+exec_prefix=${prefix}
+libdir=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc/lib
+includedir=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc/include
+
+Name: libavutil
+Description: FFmpeg utility library
+Version: 61.1.102
+Requires: 
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavutil C:/godot/build/libvpl-install/lib/vpl.lib user32.lib bcrypt.lib
+Libs.private: 
+Cflags: -I${includedir}

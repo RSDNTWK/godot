@@ -421,7 +421,7 @@ AudioStreamPlaybackOggVorbis::~AudioStreamPlaybackOggVorbis() {
 
 Ref<AudioStreamPlayback> AudioStreamOggVorbis::instantiate_playback() {
 	// Preserve the legacy packet resource while using FFmpeg for decoding.
-	return ffmpeg_audio_playback_from_ogg_packets(packet_sequence);
+	return ffmpeg_audio_playback_from_ogg_packets(packet_sequence, Ref<AudioStream>(this));
 
 #ifndef MODULE_FFMPEG_ENABLED
 	Ref<AudioStreamPlaybackOggVorbis> ovs;

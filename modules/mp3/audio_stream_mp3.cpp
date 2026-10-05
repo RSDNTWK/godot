@@ -200,7 +200,7 @@ AudioStreamPlaybackMP3::~AudioStreamPlaybackMP3() {
 
 Ref<AudioStreamPlayback> AudioStreamMP3::instantiate_playback() {
 	// Keep the serialized AudioStreamMP3 resource, but use FFmpeg for decoding.
-	return ffmpeg_audio_playback_from_buffer(get_data());
+	return ffmpeg_audio_playback_from_buffer(get_data(), nullptr, String(), Ref<AudioStream>(this));
 
 #ifndef MODULE_FFMPEG_ENABLED
 	Ref<AudioStreamPlaybackMP3> mp3s;

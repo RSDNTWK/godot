@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/build/media-stable-20261005/install/web-threads
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/build/media-stable-20261005/install/web-threads/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/web-threads/include
+
+Name: libavdevice
+Description: FFmpeg device handling library
+Version: 63.1.102
+Requires: libavformat >= 63.1.102, libavcodec >= 63.1.102, libswresample >= 7.1.102, libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavdevice -lm
+Libs.private: 
+Cflags: -I${includedir}

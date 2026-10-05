@@ -1,0 +1,14 @@
+prefix=/mnt/c/godot/build/media-stable-20261005/install/web-threads
+exec_prefix=${prefix}
+libdir=/mnt/c/godot/build/media-stable-20261005/install/web-threads/lib
+includedir=/mnt/c/godot/build/media-stable-20261005/install/web-threads/include
+
+Name: libavcodec
+Description: FFmpeg codec library
+Version: 63.1.102
+Requires: libswresample >= 7.1.102, libavutil >= 61.1.102
+Requires.private: 
+Conflicts:
+Libs: -L${libdir}  -lavcodec -pthread -lm -L/mnt/c/godot/build/media-stable-20261005/install/web-threads/deps/lib -ldav1d -pthread -sPTHREAD_POOL_SIZE=4
+Libs.private: 
+Cflags: -I${includedir}
