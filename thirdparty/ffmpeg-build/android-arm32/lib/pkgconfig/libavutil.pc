@@ -5,7 +5,7 @@ includedir=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm32/include
 
 Name: libavutil
 Description: FFmpeg utility library
-Version: 61.5.100
+Version: 61.5.100
 Requires: 
 Requires.private: 
 Conflicts:

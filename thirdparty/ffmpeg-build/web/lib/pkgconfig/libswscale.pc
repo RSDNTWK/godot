@@ -5,8 +5,8 @@ includedir=/mnt/c/godot/thirdparty/ffmpeg-build/web/include
 
 Name: libswscale
 Description: FFmpeg image rescaling library
-Version: 10.2.100
-Requires: libavutil >= 61.5.100
+Version: 10.2.100
+Requires: libavutil >= 61.5.100
 Requires.private: 
 Conflicts:
 Libs: -L${libdir}  -lswscale -lm

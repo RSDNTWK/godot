@@ -5,8 +5,8 @@ includedir=/mnt/c/godot/thirdparty/ffmpeg-build/web/include
 
 Name: libswresample
 Description: FFmpeg audio resampling library
-Version: 7.2.100
-Requires: libavutil >= 61.5.100
+Version: 7.2.100
+Requires: libavutil >= 61.5.100
 Requires.private: 
 Conflicts:
 Libs: -L${libdir}  -lswresample -lm

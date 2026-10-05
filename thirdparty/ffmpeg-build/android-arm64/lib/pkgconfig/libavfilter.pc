@@ -5,8 +5,8 @@ includedir=/mnt/c/godot/thirdparty/ffmpeg-build/android-arm64/include
 
 Name: libavfilter
 Description: FFmpeg audio/video filtering library
-Version: 12.3.101
-Requires: libavutil >= 61.5.100
+Version: 12.3.101
+Requires: libavutil >= 61.5.100
 Requires.private: 
 Conflicts:
 Libs: -L${libdir}  -lavfilter -pthread -lm -latomic
