@@ -647,6 +647,18 @@ void ScriptEditorDebugger::_msg_error(uint64_t p_thread_id, const Array &p_data)
 	if (!r) {
 		r = error_tree->create_item();
 	}
+	// Per-second throttling alone still allows an unbounded error tree over time.
+	constexpr int MAX_RETAINED_ERRORS = 1000;
+	if (r->get_child_count() >= MAX_RETAINED_ERRORS) {
+		TreeItem *oldest = r->get_first_child();
+		if (oldest->has_meta("_is_warning")) {
+			warning_count--;
+		} else {
+			error_count--;
+		}
+		memdelete(oldest);
+		errors_tab->set_tooltip_text(TTR("Only the most recent 1000 errors and warnings are retained."));
+	}
 
 	// Also provide the relevant details as tooltip to quickly check without
 	// uncollapsing the tree.
@@ -1894,6 +1906,7 @@ void ScriptEditorDebugger::_vmem_item_menu_id_pressed(int p_option) {
 
 void ScriptEditorDebugger::_clear_errors_list() {
 	error_tree->clear();
+	errors_tab->set_tooltip_text(String());
 	error_count = 0;
 	warning_count = 0;
 	emit_signal(SNAME("errors_cleared"));

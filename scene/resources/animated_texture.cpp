@@ -36,26 +36,22 @@
 #include "core/os/os.h"
 #include "servers/rendering/rendering_server.h"
 
-void AnimatedTexture::_update_proxy() {
-	RWLockRead r(rw_lock);
-
-	float delta;
-	if (prev_ticks == 0) {
-		delta = 0;
-		prev_ticks = OS::get_singleton()->get_ticks_usec();
-	} else {
-		uint64_t ticks = OS::get_singleton()->get_ticks_usec();
-		delta = float(double(ticks - prev_ticks) / 1000000.0);
-		prev_ticks = ticks;
+void AnimatedTexture::_update_time() {
+	const uint64_t ticks = OS::get_singleton()->get_ticks_usec();
+	if (prev_ticks != 0 && !pause && speed_scale != 0) {
+		// Keep frame progress in animation seconds, independent of rendering FPS.
+		time += float(double(ticks - prev_ticks) / 1000000.0) * std::abs(speed_scale);
 	}
+	prev_ticks = ticks;
+}
 
-	time += delta;
-
-	float speed = speed_scale == 0 ? 0 : std::abs(1.0 / speed_scale);
+void AnimatedTexture::_update_proxy() {
+	RWLockWrite r(rw_lock);
+	_update_time();
 
 	int iter_max = frame_count;
-	while (iter_max && !pause) {
-		float frame_limit = frames[current_frame].duration * speed;
+	while (iter_max && !pause && speed_scale != 0) {
+		float frame_limit = frames[current_frame].duration;
 
 		if (time > frame_limit) {
 			if (speed_scale > 0.0) {
@@ -108,6 +104,7 @@ void AnimatedTexture::set_current_frame(int p_frame) {
 
 	current_frame = p_frame;
 	time = 0;
+	prev_ticks = OS::get_singleton()->get_ticks_usec();
 }
 
 int AnimatedTexture::get_current_frame() const {
@@ -116,6 +113,7 @@ int AnimatedTexture::get_current_frame() const {
 
 void AnimatedTexture::set_pause(bool p_pause) {
 	RWLockWrite r(rw_lock);
+	_update_time();
 	pause = p_pause;
 }
 
@@ -170,6 +168,7 @@ void AnimatedTexture::set_speed_scale(float p_scale) {
 
 	RWLockWrite r(rw_lock);
 
+	_update_time();
 	speed_scale = p_scale;
 }
 

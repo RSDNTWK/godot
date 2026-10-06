@@ -214,6 +214,8 @@ Ref<AudioStreamPreview> AudioStreamPreviewGenerator::generate_preview(const Ref<
 	if (preview->playback.is_valid()) {
 		preview->thread = memnew(Thread);
 		preview->thread->start(_preview_thread, preview);
+	} else {
+		preview->generating.clear();
 	}
 
 	return preview->preview;
@@ -238,6 +240,9 @@ void AudioStreamPreviewGenerator::_notification(int p_what) {
 						memdelete(E.value.thread);
 						E.value.thread = nullptr;
 					}
+					// Keep the waveform, not the decoder or the resource it describes.
+					E.value.playback.unref();
+					E.value.base_stream.unref();
 					if (!ObjectDB::get_instance(E.key)) { //no longer in use, get rid of preview
 						to_erase.push_back(E.key);
 					}

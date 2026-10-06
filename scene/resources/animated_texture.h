@@ -64,6 +64,7 @@ private:
 
 	uint64_t prev_ticks = 0;
 
+	void _update_time();
 	void _update_proxy();
 	void _finish_non_thread_safe_setup();
 
