@@ -84,6 +84,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <limits>
 
 #ifndef RTLD_DEEPBIND
 #define RTLD_DEEPBIND 0
@@ -349,6 +350,26 @@ OS::DateTime OS_Unix::get_datetime(bool p_utc) const {
 	ret.dst = lt.tm_isdst;
 
 	return ret;
+}
+
+Error OS_Unix::get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const {
+	if (p_unix_time < std::numeric_limits<time_t>::min() || p_unix_time > std::numeric_limits<time_t>::max()) {
+		return ERR_INVALID_PARAMETER;
+	}
+	const time_t timestamp = static_cast<time_t>(p_unix_time);
+	struct tm local = {};
+	if (localtime_r(&timestamp, &local) == nullptr) {
+		return ERR_INVALID_PARAMETER;
+	}
+	r_datetime.year = int64_t(local.tm_year) + 1900;
+	r_datetime.month = Month(local.tm_mon + 1);
+	r_datetime.day = local.tm_mday;
+	r_datetime.weekday = Weekday(local.tm_wday);
+	r_datetime.hour = local.tm_hour;
+	r_datetime.minute = local.tm_min;
+	r_datetime.second = local.tm_sec;
+	r_datetime.dst = local.tm_isdst > 0;
+	return OK;
 }
 
 OS::TimeZoneInfo OS_Unix::get_time_zone_info() const {

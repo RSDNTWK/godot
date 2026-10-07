@@ -94,6 +94,7 @@ public:
 	String get_executable_path() const override;
 	Error shell_open(const String &p_uri) override;
 	String get_name() const override;
+	Error get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const override;
 
 	// Override default OS implementation which would block the main thread with delay_usec.
 	// Implemented in web_main.cpp loop callback instead.

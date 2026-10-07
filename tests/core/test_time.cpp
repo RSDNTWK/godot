@@ -124,6 +124,41 @@ TEST_CASE("[Time] Datetime dictionary conversion methods") {
 	CHECK_MESSAGE(time->get_datetime_string_from_datetime_dict(time->get_datetime_dict_from_datetime_string("2014-02-09 22:10:30"), true) == "2014-02-09 22:10:30", "Time get_datetime_string_from_dict: The round-trip string to dict to string GODOT IS OPEN SOURCE with spaces works as expected.");
 }
 
+TEST_CASE("[Time] Local Unix time conversion") {
+	const Time *time = Time::get_singleton();
+	const int64_t timestamps[] = { -1, 0, 1705320000, 1721044800, 1711846799, 1711846800, 1729990799, 1729990800 };
+	for (int64_t timestamp : timestamps) {
+		const Dictionary local = time->get_datetime_dict_from_unix_time_local(timestamp);
+		REQUIRE_FALSE(local.is_empty());
+		CHECK(local.size() == 8);
+		CHECK_FALSE(local.has(DST_KEY));
+		const int64_t offset = local["utc_offset"];
+		CHECK(offset > -86400);
+		CHECK(offset < 86400);
+		CHECK(time->get_unix_time_from_datetime_dict(local) - offset == timestamp);
+		const Dictionary shifted_utc = time->get_datetime_dict_from_unix_time(timestamp + offset);
+		for (const char *key : { YEAR_KEY, MONTH_KEY, DAY_KEY, WEEKDAY_KEY, HOUR_KEY, MINUTE_KEY, SECOND_KEY }) {
+			CHECK(local[key] == shifted_utc[key]);
+		}
+	}
+	ERR_PRINT_OFF;
+	CHECK(time->get_datetime_dict_from_unix_time_local(INT64_MIN).is_empty());
+	CHECK(time->get_datetime_dict_from_unix_time_local(INT64_MAX).is_empty());
+	ERR_PRINT_ON;
+}
+
+TEST_CASE("[Time] Android local conversion beyond 32-bit Unix timestamps") {
+#ifdef ANDROID_ENABLED
+	const Time *time = Time::get_singleton();
+	const int64_t timestamps[] = { -2208988800LL, -2147483649LL, 2147483647LL, 2147483648LL, 2208988800LL, 4107542400LL };
+	for (int64_t timestamp : timestamps) {
+		const Dictionary local = time->get_datetime_dict_from_unix_time_local(timestamp);
+		REQUIRE_FALSE(local.is_empty());
+		CHECK(time->get_unix_time_from_datetime_dict(local) - int64_t(local["utc_offset"]) == timestamp);
+	}
+#endif
+}
+
 TEST_CASE("[Time] System time methods") {
 	const Time *time = Time::get_singleton();
 

@@ -109,6 +109,7 @@ public:
 	virtual String get_temp_path() const override;
 
 	virtual DateTime get_datetime(bool p_utc) const override;
+	virtual Error get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const override;
 	virtual TimeZoneInfo get_time_zone_info() const override;
 
 	virtual double get_unix_time() const override;

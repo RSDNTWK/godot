@@ -193,6 +193,25 @@ Error OS_Web::shell_open(const String &p_uri) {
 	return OK;
 }
 
+Error OS_Web::get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const {
+	if (p_unix_time < -62135596800LL || p_unix_time > 253402300799LL) {
+		return ERR_INVALID_PARAMETER;
+	}
+	int32_t fields[7] = {};
+	if (!godot_js_os_local_datetime(double(p_unix_time), fields)) {
+		return FAILED;
+	}
+	r_datetime = {};
+	r_datetime.year = fields[0];
+	r_datetime.month = Month(fields[1]);
+	r_datetime.day = fields[2];
+	r_datetime.weekday = Weekday(fields[3]);
+	r_datetime.hour = fields[4];
+	r_datetime.minute = fields[5];
+	r_datetime.second = fields[6];
+	return OK;
+}
+
 String OS_Web::get_name() const {
 	return "Web";
 }

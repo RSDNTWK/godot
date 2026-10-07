@@ -40,7 +40,7 @@
 //   See: https://en.wikipedia.org/wiki/Proleptic_Gregorian_calendar
 // * As per ISO 8601:2004 3.4.2 and 4.1.2.4, the year before 1 AD (aka 1 BC)
 //   is number "0", with the year before that (2 BC) being "-1", etc.
-// Conversion methods assume "the same timezone", and do not handle DST.
+// Conversion methods assume "the same timezone", except explicit local conversion.
 // Leap seconds are not handled, they must be done manually if desired.
 // Suffixes such as "Z" are not handled, you need to strip them away manually.
 
@@ -54,6 +54,7 @@ public:
 
 	// Methods that convert times.
 	Dictionary get_datetime_dict_from_unix_time(int64_t p_unix_time_val) const;
+	Dictionary get_datetime_dict_from_unix_time_local(int64_t p_unix_time_val) const;
 	Dictionary get_date_dict_from_unix_time(int64_t p_unix_time_val) const;
 	Dictionary get_time_dict_from_unix_time(int64_t p_unix_time_val) const;
 	String get_datetime_string_from_unix_time(int64_t p_unix_time_val, bool p_use_space = false) const;

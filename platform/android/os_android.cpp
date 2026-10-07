@@ -36,6 +36,7 @@
 #include "java_godot_io_wrapper.h"
 #include "java_godot_wrapper.h"
 #include "net_socket_android.h"
+#include "thread_jandroid.h"
 
 #ifndef TOOLS_ENABLED
 #include "file_access_android.h"
@@ -47,6 +48,7 @@
 #include "core/io/xml_parser.h"
 #include "core/os/main_loop.h"
 #include "core/os/os.h"
+#include "core/os/time.h"
 #include "core/profiling/profiling.h"
 #include "drivers/unix/dir_access_unix.h"
 #include "drivers/unix/file_access_unix.h"
@@ -266,6 +268,58 @@ Error OS_Android::open_dynamic_library(const String &p_path, void *&p_library_ha
 		*p_data->r_resolved_path = path;
 	}
 
+	return OK;
+}
+
+Error OS_Android::get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const {
+	if (p_unix_time < -62135596800LL || p_unix_time > 253402300799LL) {
+		return ERR_INVALID_PARAMETER;
+	}
+	JNIEnv *env = get_jni_env();
+	if (env == nullptr || env->ExceptionCheck() || Time::get_singleton() == nullptr) {
+		return ERR_UNAVAILABLE;
+	}
+	if (env->PushLocalFrame(2) < 0) {
+		env->ExceptionClear();
+		return ERR_OUT_OF_MEMORY;
+	}
+	const auto fail = [env]() {
+		env->ExceptionClear();
+		env->PopLocalFrame(nullptr);
+		return FAILED;
+	};
+	// ICU keeps recurring timezone rules beyond the legacy Android 2038 table.
+	const jclass timezone_class = env->FindClass("android/icu/util/TimeZone");
+	if (env->ExceptionCheck() || timezone_class == nullptr) {
+		return fail();
+	}
+	const jmethodID get_default = env->GetStaticMethodID(timezone_class, "getDefault", "()Landroid/icu/util/TimeZone;");
+	if (env->ExceptionCheck() || get_default == nullptr) {
+		return fail();
+	}
+	const jmethodID get_offset = env->GetMethodID(timezone_class, "getOffset", "(J)I");
+	if (env->ExceptionCheck() || get_offset == nullptr) {
+		return fail();
+	}
+	const jobject timezone = env->CallStaticObjectMethod(timezone_class, get_default);
+	if (env->ExceptionCheck() || timezone == nullptr) {
+		return fail();
+	}
+	// Java long is 64-bit even on ARMv7. Avoid Android's 32-bit time_t entirely.
+	const jint offset_msec = env->CallIntMethod(timezone, get_offset, jlong(p_unix_time * 1000));
+	if (env->ExceptionCheck()) {
+		return fail();
+	}
+	env->PopLocalFrame(nullptr);
+	const Dictionary local = Time::get_singleton()->get_datetime_dict_from_unix_time(p_unix_time + int64_t(offset_msec) / 1000);
+	r_datetime = {};
+	r_datetime.year = local["year"];
+	r_datetime.month = Month(int(local["month"]));
+	r_datetime.day = local["day"];
+	r_datetime.weekday = Weekday(int(local["weekday"]));
+	r_datetime.hour = local["hour"];
+	r_datetime.minute = local["minute"];
+	r_datetime.second = local["second"];
 	return OK;
 }
 

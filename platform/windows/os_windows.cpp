@@ -935,6 +935,30 @@ OS::DateTime OS_Windows::get_datetime(bool p_utc) const {
 	return dt;
 }
 
+Error OS_Windows::get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const {
+	// FILETIME starts at 1601. Limit the range before multiplying by 100 ns ticks.
+	if (p_unix_time < -11644473600LL || p_unix_time > 253402300799LL) {
+		return ERR_INVALID_PARAMETER;
+	}
+	const uint64_t ticks = uint64_t(p_unix_time + 11644473600LL) * 10000000;
+	const FILETIME file_time = { DWORD(ticks), DWORD(ticks >> 32) };
+	SYSTEMTIME utc = {};
+	SYSTEMTIME local = {};
+	DYNAMIC_TIME_ZONE_INFORMATION zone = {};
+	if (!FileTimeToSystemTime(&file_time, &utc) || GetDynamicTimeZoneInformation(&zone) == TIME_ZONE_ID_INVALID || !SystemTimeToTzSpecificLocalTimeEx(&zone, &utc, &local)) {
+		return FAILED;
+	}
+	r_datetime = {};
+	r_datetime.year = local.wYear;
+	r_datetime.month = Month(local.wMonth);
+	r_datetime.day = local.wDay;
+	r_datetime.weekday = Weekday(local.wDayOfWeek);
+	r_datetime.hour = local.wHour;
+	r_datetime.minute = local.wMinute;
+	r_datetime.second = local.wSecond;
+	return OK;
+}
+
 OS::TimeZoneInfo OS_Windows::get_time_zone_info() const {
 	TIME_ZONE_INFORMATION info;
 	bool is_daylight = false;

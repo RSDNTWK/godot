@@ -340,6 +340,19 @@ const GodotOS = {
 		window.open(GodotRuntime.parseString(p_uri), '_blank');
 	},
 
+	godot_js_os_local_datetime__sig: 'idp',
+	godot_js_os_local_datetime: function (p_unix_time, r_fields) {
+		const date = new Date(p_unix_time * 1000);
+		if (!Number.isFinite(date.getTime())) {
+			return 0;
+		}
+		const fields = [date.getFullYear(), date.getMonth() + 1, date.getDate(), date.getDay(), date.getHours(), date.getMinutes(), date.getSeconds()];
+		for (let i = 0; i < fields.length; i++) {
+			GodotRuntime.setHeapValue(r_fields + i * 4, fields[i], 'i32');
+		}
+		return 1;
+	},
+
 	godot_js_os_hw_concurrency_get__proxy: 'sync',
 	godot_js_os_hw_concurrency_get__sig: 'i',
 	godot_js_os_hw_concurrency_get: function () {

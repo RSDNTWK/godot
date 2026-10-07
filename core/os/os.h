@@ -271,6 +271,9 @@ public:
 	};
 
 	virtual DateTime get_datetime(bool utc = false) const = 0;
+	// Convert a UTC timestamp using the local timezone rules for that instant.
+	// The dst field is not available on every platform and must not be used.
+	virtual Error get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const { return ERR_UNAVAILABLE; }
 	virtual TimeZoneInfo get_time_zone_info() const = 0;
 	virtual double get_unix_time() const;
 

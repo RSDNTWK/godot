@@ -118,6 +118,7 @@ public:
 	virtual Error open_dynamic_library(const String &p_path, void *&p_library_handle, GDExtensionData *p_data = nullptr) override;
 
 	virtual String get_name() const override;
+	virtual Error get_local_datetime(int64_t p_unix_time, DateTime &r_datetime) const override;
 	virtual String get_distribution_name() const override;
 	virtual String get_version() const override;
 	virtual String get_version_alias() const override;

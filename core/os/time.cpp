@@ -369,6 +369,24 @@ String Time::get_time_string_from_system(bool p_utc) const {
 	return vformat("%02d:%02d:%02d", dt.hour, dt.minute, dt.second);
 }
 
+Dictionary Time::get_datetime_dict_from_unix_time_local(int64_t p_unix_time_val) const {
+	// Bound the calendar range before native conversions or offset arithmetic.
+	ERR_FAIL_COND_V_MSG(p_unix_time_val < -62135596800LL || p_unix_time_val > 253402300799LL, Dictionary(), "UTC timestamp must be within years 1 through 9999.");
+	OS::DateTime dt = {};
+	const Error err = OS::get_singleton()->get_local_datetime(p_unix_time_val, dt);
+	ERR_FAIL_COND_V_MSG(err != OK, Dictionary(), "The platform could not convert this UTC timestamp to local time.");
+	Dictionary result;
+	result[YEAR_KEY] = dt.year;
+	result[MONTH_KEY] = dt.month;
+	result[DAY_KEY] = dt.day;
+	result[WEEKDAY_KEY] = dt.weekday;
+	result[HOUR_KEY] = dt.hour;
+	result[MINUTE_KEY] = dt.minute;
+	result[SECOND_KEY] = dt.second;
+	result["utc_offset"] = get_unix_time_from_datetime_dict(result) - p_unix_time_val;
+	return result;
+}
+
 Dictionary Time::get_time_zone_from_system() const {
 	OS::TimeZoneInfo info = OS::get_singleton()->get_time_zone_info();
 	Dictionary ret_timezone;
@@ -391,6 +409,7 @@ uint64_t Time::get_ticks_usec() const {
 
 void Time::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_datetime_dict_from_unix_time", "unix_time_val"), &Time::get_datetime_dict_from_unix_time);
+	ClassDB::bind_method(D_METHOD("get_datetime_dict_from_unix_time_local", "unix_time_val"), &Time::get_datetime_dict_from_unix_time_local);
 	ClassDB::bind_method(D_METHOD("get_date_dict_from_unix_time", "unix_time_val"), &Time::get_date_dict_from_unix_time);
 	ClassDB::bind_method(D_METHOD("get_time_dict_from_unix_time", "unix_time_val"), &Time::get_time_dict_from_unix_time);
 	ClassDB::bind_method(D_METHOD("get_datetime_string_from_unix_time", "unix_time_val", "use_space"), &Time::get_datetime_string_from_unix_time, DEFVAL(false));
