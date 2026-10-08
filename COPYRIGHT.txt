@@ -414,7 +414,7 @@ Comment: WebP codec
 Copyright: 2010, Google Inc.
 License: BSD-3-clause
 
-Files: thirdparty/lzma2603/*
+Files: thirdparty/lzma2604/*
 Comment: LZMA SDK (7-Zip SDK)
 Copyright: Igor Pavlov
 License: Public-Domain
