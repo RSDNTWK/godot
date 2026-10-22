@@ -33,11 +33,194 @@
 TEST_FORCE_LINK(test_pck_packer)
 
 #include "core/io/file_access.h"
+#include "core/io/dir_access.h"
+#include "core/io/pck_lzma.h"
 #include "core/io/pck_packer.h"
 #include "core/os/os.h"
 #include "tests/test_utils.h"
 
+#ifdef TOOLS_ENABLED
+#include "editor/export/pck_compression_cache.h"
+#endif
+
 namespace TestPCKPacker {
+
+TEST_CASE("[PCKLzma] Tiny independent entries use a small decoder dictionary") {
+	for (int threads : { 1, 16 }) {
+		PCKLzmaOptions options;
+		options.threads = threads;
+		for (int size : { 1, 31, 4096 }) {
+			Vector<uint8_t> input;
+			input.resize(size);
+			for (int i = 0; i < size; i++) {
+				input.write[i] = uint8_t(i * 37);
+			}
+			Vector<uint8_t> compressed;
+			REQUIRE(compress_lzma2(input, compressed, options) == OK);
+			REQUIRE(compressed.size() > 1);
+			CHECK_MESSAGE(compressed[0] == 0, "A payload of at most 4 KiB must not request a 256 MiB decoder dictionary.");
+			Vector<uint8_t> decoded;
+			REQUIRE(decompress_lzma2(compressed.ptr(), compressed.size(), input.size(), decoded) == OK);
+			CHECK(decoded == input);
+		}
+	}
+}
+
+TEST_CASE("[PCKLzma] Memory input round trips mixed and incompressible entries") {
+	for (int threads : { 1, 16 }) {
+		PCKLzmaOptions options;
+		options.threads = threads;
+		for (bool repeating : { false, true }) {
+			Vector<uint8_t> input;
+			input.resize(1024 * 1024 + 17);
+			uint32_t state = 0x8a75c193;
+			for (int i = 0; i < input.size(); i++) {
+				state ^= state << 13;
+				state ^= state >> 17;
+				state ^= state << 5;
+				input.write[i] = repeating && i >= 65536 ? input[i % 65536] : uint8_t(state);
+			}
+			Vector<uint8_t> compressed;
+			REQUIRE(compress_lzma2(input, compressed, options) == OK);
+			Vector<uint8_t> decoded;
+			REQUIRE(decompress_lzma2(compressed.ptr(), compressed.size(), input.size(), decoded) == OK);
+			CHECK(decoded == input);
+			if (repeating) {
+				CHECK(compressed.size() < input.size() / 2);
+			}
+		}
+	}
+}
+
+TEST_CASE("[PCKLzma] Empty input clears a previous result") {
+	Vector<uint8_t> compressed;
+	compressed.push_back(123);
+	CHECK(compress_lzma2(Vector<uint8_t>(), compressed, PCKLzmaOptions()) == OK);
+	CHECK(compressed.is_empty());
+}
+
+#ifdef TOOLS_ENABLED
+struct CompressionCacheFixture {
+	String path = TestUtils::get_temp_path("pck_compression_cache_" + uitos(OS::get_singleton()->get_ticks_usec()));
+	~CompressionCacheFixture() {
+		Ref<DirAccess> dir = DirAccess::open(path);
+		if (dir.is_valid()) {
+			for (const String &name : dir->get_files()) {
+				DirAccess::remove_absolute(path.path_join(name));
+			}
+			dir.unref();
+			DirAccess::remove_absolute(path);
+		}
+	}
+};
+
+static Vector<uint8_t> cache_input(uint8_t p_value = 42) {
+	Vector<uint8_t> input;
+	input.resize(1024 * 1024);
+	input.fill(p_value);
+	return input;
+}
+
+TEST_CASE("[PCKLzmaCache] Exact input and every encoder setting invalidate the key") {
+	Vector<uint8_t> input = cache_input();
+	PCKLzmaOptions options;
+	const String key = PCKCompressionCache::make_key(input, options);
+	CHECK(key.length() == 64);
+	CHECK(PCKCompressionCache::make_key(input, options) == key);
+	input.write[0]++;
+	CHECK(PCKCompressionCache::make_key(input, options) != key);
+	input.write[0]--;
+	for (int field = 0; field < 5; field++) {
+		PCKLzmaOptions changed = options;
+		switch (field) {
+			case 0: changed.compression_level = 7; break;
+			case 1: changed.dictionary_size_mb = 128; break;
+			case 2: changed.word_size = 32; break;
+			case 3: changed.threads = 16; break;
+			case 4: changed.memory_usage_percent = 70; break;
+		}
+		CHECK(PCKCompressionCache::make_key(input, changed) != key);
+	}
+}
+
+TEST_CASE("[PCKLzmaCache] Compressed entries survive reopening and validate exact bytes") {
+	CompressionCacheFixture fixture;
+	PCKCompressionCache cache(fixture.path);
+	REQUIRE(cache.is_available());
+	const Vector<uint8_t> input = cache_input();
+	PCKLzmaOptions options;
+	const String key = PCKCompressionCache::make_key(input, options);
+	Vector<uint8_t> output;
+	CHECK(cache.load(key, input, output) == PCKCompressionCache::MISS);
+	Vector<uint8_t> candidate;
+	REQUIRE(compress_lzma2(input, candidate, options) == OK);
+	cache.store(key, input, candidate);
+	CHECK(cache.load(key, input, output) == PCKCompressionCache::COMPRESSED);
+	CHECK(output == candidate);
+	PCKCompressionCache reopened(fixture.path);
+	CHECK(reopened.load(key, input, output) == PCKCompressionCache::COMPRESSED);
+	CHECK(output == candidate);
+}
+
+TEST_CASE("[PCKLzmaCache] Truncated and mismatched entries become cache misses") {
+	CompressionCacheFixture fixture;
+	PCKCompressionCache cache(fixture.path);
+	const Vector<uint8_t> input = cache_input();
+	PCKLzmaOptions options;
+	const String key = PCKCompressionCache::make_key(input, options);
+	Vector<uint8_t> different;
+	REQUIRE(compress_lzma2(cache_input(43), different, options) == OK);
+	cache.store(key, input, different);
+	Vector<uint8_t> output;
+	CHECK(cache.load(key, input, output) == PCKCompressionCache::MISS);
+	CHECK(output.is_empty());
+	CHECK_FALSE(FileAccess::exists(fixture.path.path_join(key + ".lzma2")));
+	Vector<uint8_t> candidate;
+	REQUIRE(compress_lzma2(input, candidate, options) == OK);
+	cache.store(key, input, candidate);
+	Ref<FileAccess> file = FileAccess::open(fixture.path.path_join(key + ".lzma2"), FileAccess::WRITE);
+	REQUIRE(file.is_valid());
+	file->store_32(123);
+	file.unref();
+	CHECK(cache.load(key, input, output) == PCKCompressionCache::MISS);
+	CHECK(output.is_empty());
+}
+
+TEST_CASE("[PCKLzmaCache] Raw markers avoid ineffective compression without returning empty compressed data") {
+	CompressionCacheFixture fixture;
+	PCKCompressionCache cache(fixture.path);
+	const Vector<uint8_t> input = cache_input();
+	const String key = PCKCompressionCache::make_key(input, PCKLzmaOptions());
+	cache.store(key, input, input);
+	Vector<uint8_t> output;
+	output.push_back(123);
+	CHECK(cache.load(key, input, output) == PCKCompressionCache::RAW);
+	CHECK(output.is_empty());
+}
+
+TEST_CASE("[PCKLzmaCache] Disk budget evicts old entries and an unavailable cache is optional") {
+	CompressionCacheFixture fixture;
+	const Vector<uint8_t> first = cache_input();
+	const Vector<uint8_t> second = cache_input(43);
+	PCKLzmaOptions options;
+	Vector<uint8_t> first_candidate, second_candidate;
+	REQUIRE(compress_lzma2(first, first_candidate, options) == OK);
+	REQUIRE(compress_lzma2(second, second_candidate, options) == OK);
+	const uint64_t budget = 2 * 92 + first_candidate.size() + second_candidate.size() - 1;
+	PCKCompressionCache cache(fixture.path, budget);
+	const String first_key = PCKCompressionCache::make_key(first, options);
+	const String second_key = PCKCompressionCache::make_key(second, options);
+	cache.store(first_key, first, first_candidate);
+	cache.store(second_key, second, second_candidate);
+	Vector<uint8_t> output;
+	CHECK(cache.load(first_key, first, output) == PCKCompressionCache::MISS);
+	CHECK(cache.load(second_key, second, output) == PCKCompressionCache::COMPRESSED);
+	PCKCompressionCache disabled(String(), 0);
+	CHECK_FALSE(disabled.is_available());
+	disabled.store(first_key, first, first_candidate);
+	CHECK(disabled.load(first_key, first, output) == PCKCompressionCache::MISS);
+}
+#endif // TOOLS_ENABLED
 
 TEST_CASE("[PCKPacker] Pack an empty PCK file") {
 	PCKPacker pck_packer;

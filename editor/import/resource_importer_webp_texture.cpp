@@ -30,7 +30,7 @@
 
 #include "resource_importer_webp_texture.h"
 
-#include "core/io/resource_saver.h"
+#include "core/io/dir_access.h"
 #include "modules/webp/texture_loader_webp.h"
 #include "scene/resources/texture.h"
 
@@ -56,7 +56,7 @@ bool ResourceImporterWebPTexture::can_import(const String &p_path) const {
 }
 
 String ResourceImporterWebPTexture::get_save_extension() const {
-	return "res";
+	return "webp";
 }
 
 String ResourceImporterWebPTexture::get_resource_type() const {
@@ -68,7 +68,12 @@ float ResourceImporterWebPTexture::get_priority() const {
 }
 
 int ResourceImporterWebPTexture::get_format_version() const {
-	return 2;
+	return 3;
+}
+
+String ResourceImporterWebPTexture::get_import_settings_string() const {
+	// Invalidate cached import settings when the animation's stored format changes.
+	return itos(get_format_version());
 }
 
 void ResourceImporterWebPTexture::get_import_options(const String &p_path, List<ImportOption> *r_options, int p_preset) const {
@@ -89,14 +94,19 @@ Error ResourceImporterWebPTexture::import(ResourceUID::ID p_source_id, const Str
 	if (r_metadata) {
 		Dictionary meta;
 		meta["animated_webp"] = true;
+		meta["format_version"] = get_format_version();
 		*r_metadata = meta;
 	}
 
-	return ResourceSaver::save(texture, p_save_path + ".res");
+	// The runtime WebP loader creates the same AnimatedTexture directly. Retain the
+	// original compressed animation instead of serializing every decoded RGBA frame.
+	texture.unref();
+	resource.unref();
+	return DirAccess::copy_absolute(p_source_file, p_save_path + ".webp");
 }
 
 bool ResourceImporterWebPTexture::are_import_settings_valid(const String &p_path, const Dictionary &p_meta) const {
-	if (!p_meta.has("animated_webp") || !bool(p_meta["animated_webp"])) {
+	if (!p_meta.has("animated_webp") || !bool(p_meta["animated_webp"]) || int(p_meta.get("format_version", 0)) != get_format_version()) {
 		return false;
 	}
 

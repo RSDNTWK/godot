@@ -2330,7 +2330,8 @@ void EditorFileSystem::_process_update_pending() {
 	_update_script_classes();
 	// Parse documentation second, as it requires the class names to be loaded
 	// because _update_script_documentation loads the scripts completely.
-	if (!EditorNode::is_cmdline_mode()) {
+	// Pending script updates can be flushed after the editor node has been destroyed.
+	if (EditorNode::get_singleton() && !EditorNode::is_cmdline_mode()) {
 		_update_script_documentation();
 		_update_pending_scene_groups();
 	}

@@ -30,6 +30,7 @@
 
 #include "editor_export_platform.h"
 #include "editor_export_platform.compat.inc"
+#include "pck_compression_cache.h"
 
 #include "core/config/project_settings.h"
 #include "core/crypto/crypto_core.h"
@@ -540,10 +541,14 @@ Error EditorExportPlatform::_encrypt_and_store_data(Ref<FileAccess> p_fd, const 
 	return OK;
 }
 
+struct PCKExportPackData : EditorExportPlatform::PackData {
+	PCKCompressionCache *compression_cache = nullptr;
+};
+
 Error EditorExportPlatform::_save_pack_file(const Ref<EditorExportPreset> &p_preset, void *p_userdata, const String &p_path, const Vector<uint8_t> &p_data, int p_file, int p_total, const Vector<String> &p_enc_in_filters, const Vector<String> &p_enc_ex_filters, const Vector<uint8_t> &p_key, uint64_t p_seed, bool p_delta) {
 	ERR_FAIL_COND_V_MSG(p_total < 1, ERR_PARAMETER_RANGE_ERROR, "Must select at least one file to export.");
 
-	PackData *pd = (PackData *)p_userdata;
+	PCKExportPackData *pd = static_cast<PCKExportPackData *>(static_cast<PackData *>(p_userdata));
 
 	const String simplified_path = simplify_path(p_path);
 
@@ -615,14 +620,28 @@ Error EditorExportPlatform::_save_pack_file(const Ref<EditorExportPreset> &p_pre
 		lzma_options.word_size = pck_7zip_word_size;
 		lzma_options.threads = pck_7zip_threads;
 		lzma_options.memory_usage_percent = pck_7zip_memory;
+		const uint64_t prepare_start_usec = OS::get_singleton()->get_ticks_usec();
+		String cache_key;
+		PCKCompressionCache::Result cached = PCKCompressionCache::MISS;
+		// Cache substantial entries; tiny files cost less to encode than to maintain on disk.
+		if (p_data.size() >= 1024 * 1024 && pd->compression_cache && pd->compression_cache->is_available()) {
+			cache_key = PCKCompressionCache::make_key(p_data, lzma_options);
+			cached = pd->compression_cache->load(cache_key, p_data, compressed_data);
+		}
 		const uint64_t compress_start_usec = OS::get_singleton()->get_ticks_usec();
-		const Error c_err = compress_lzma2(p_data, compressed_data, lzma_options);
+		const Error c_err = cached == PCKCompressionCache::MISS ? compress_lzma2(p_data, compressed_data, lzma_options) : OK;
 		const uint64_t compress_elapsed_usec = OS::get_singleton()->get_ticks_usec() - compress_start_usec;
+		if (!cache_key.is_empty()) {
+			if (cached == PCKCompressionCache::MISS && c_err == OK) {
+				pd->compression_cache->store(cache_key, p_data, compressed_data);
+			}
+			print_verbose(vformat("PCK payload cache: %s status=%s prepare_ms=%d", simplified_path, cached == PCKCompressionCache::COMPRESSED ? "hit" : (cached == PCKCompressionCache::RAW ? "raw" : "miss"), (OS::get_singleton()->get_ticks_usec() - prepare_start_usec) / 1000ULL));
+		}
 		if (large_imported_payload) {
 			const uint64_t candidate_percent = compressed_data.is_empty() ? 100 : (uint64_t(compressed_data.size()) * 100ULL) / uint64_t(p_data.size());
 			print_verbose(vformat("PCK payload timing: %s compress_ms=%d candidate=%d candidate_percent=%d result=%s", simplified_path, compress_elapsed_usec / 1000ULL, compressed_data.size(), candidate_percent, c_err == OK ? "ok" : itos(c_err)));
 		}
-		if (c_err == OK && compressed_data.size() < p_data.size()) {
+		if (c_err == OK && !compressed_data.is_empty() && compressed_data.size() < p_data.size()) {
 			stored_data = &compressed_data;
 			sd.lzma2 = true;
 		}
@@ -2537,13 +2556,16 @@ Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, b
 	f->seek(file_base);
 
 	// Write files.
-	PackData pd;
+	const bool cache_enabled = bool(_preset_get_or_default_compat(p_preset, "binary_format/compression_enabled", "pck_7zip/enabled", true)) && _preset_get_pck_7zip_compression_type(p_preset.ptr()) == "7zip";
+	PCKCompressionCache compression_cache(cache_enabled ? ProjectSettings::get_singleton()->get_project_data_path().path_join("exported/pck_compression_cache") : String());
+	PCKExportPackData pd;
+	pd.compression_cache = &compression_cache;
 	pd.ep = &ep;
 	pd.f = f;
 	pd.so_files = p_so_files;
 	pd.path = p_path;
 
-	Error err = export_project_files(p_preset, p_debug, p_save_func, p_remove_func, &pd, _pack_add_shared_object);
+	Error err = export_project_files(p_preset, p_debug, p_save_func, p_remove_func, static_cast<PackData *>(&pd), _pack_add_shared_object);
 
 	if (err != OK) {
 		add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), TTR("Failed to export project files."));

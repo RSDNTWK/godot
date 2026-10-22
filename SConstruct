@@ -299,6 +299,7 @@ opts.Add(BoolVariable("engine_update_check", "Enable engine update checks in the
 opts.Add(BoolVariable("steamapi", "Enable minimal SteamAPI integration for usage time tracking (editor only)", False))
 opts.Add("cache_path", "Path to a directory where SCons cache files will be stored. No value disables the cache.", "")
 opts.Add("cache_limit", "Max size (in GiB) for the SCons cache. 0 means no limit.", "0")
+opts.Add(BoolVariable("library_reuse", "Verify and reuse static libraries after removing loose objects", False))
 opts.Add(
     BoolVariable(
         "redirect_build_objects",
@@ -1242,6 +1243,11 @@ if env["tests"]:
 SConscript("main/SCsub")
 
 SConscript("platform/" + env["platform"] + "/SCsub")  # Build selected platform.
+
+if env["library_reuse"]:
+    from misc.utility import library_cache
+
+    library_cache.finalize(env)
 
 # Microsoft Visual Studio Project Generation
 if env["vsproj"]:

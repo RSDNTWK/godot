@@ -30,8 +30,6 @@
 
 #include "pck_lzma.h"
 
-#include "core/templates/local_vector.h"
-
 #include <cstring>
 
 extern "C" {
@@ -45,29 +43,9 @@ namespace {
 ISzAlloc g_alloc = { SzAlloc, SzFree };
 ISzAlloc g_alloc_temp = { SzAllocTemp, SzFreeTemp };
 
-struct LzmaInStream {
-	ISeqInStream vt;
-	const uint8_t *data = nullptr;
-	size_t size = 0;
-	size_t pos = 0;
-};
-
-static SRes _lzma_in_stream_read(ISeqInStreamPtr pp, void *p_buf, size_t *p_size) {
-	LzmaInStream *stream = Z7_CONTAINER_FROM_VTBL(pp, LzmaInStream, vt); // NOLINT(modernize-use-bool-literals)
-	const size_t requested = *p_size;
-	const size_t left = (stream->pos < stream->size) ? stream->size - stream->pos : 0;
-	const size_t read_size = MIN(requested, left);
-	if (read_size > 0) {
-		memcpy(p_buf, stream->data + stream->pos, read_size);
-		stream->pos += read_size;
-	}
-	*p_size = read_size;
-	return SZ_OK;
-}
-
 struct LzmaOutStream {
 	ISeqOutStream vt;
-	LocalVector<uint8_t> data;
+	Vector<uint8_t> data;
 };
 
 static size_t _lzma_out_stream_write(ISeqOutStreamPtr pp, const void *p_buf, size_t p_size) {
@@ -76,9 +54,11 @@ static size_t _lzma_out_stream_write(ISeqOutStreamPtr pp, const void *p_buf, siz
 		return 0;
 	}
 	const uint8_t *buf_ptr = reinterpret_cast<const uint8_t *>(p_buf);
-	const uint32_t old_size = stream->data.size();
-	stream->data.resize(old_size + p_size);
-	memcpy(stream->data.ptr() + old_size, buf_ptr, p_size);
+	const int64_t old_size = stream->data.size();
+	if (p_size > uint64_t(INT64_MAX - old_size) || stream->data.resize(old_size + int64_t(p_size)) != OK) {
+		return 0;
+	}
+	memcpy(stream->data.ptrw() + old_size, buf_ptr, p_size);
 	return p_size;
 }
 
@@ -111,6 +91,8 @@ Error compress_lzma2(const Vector<uint8_t> &p_src, Vector<uint8_t> &r_dst, const
 	Lzma2EncProps_Init(&props);
 	props.lzmaProps.level = CLAMP(p_options.compression_level, 0, 9);
 	props.lzmaProps.dictSize = (UInt32)CLAMP(p_options.dictionary_size_mb, 1, 1536) * 1024 * 1024;
+	// Each entry is independent. History larger than its input only wastes memory.
+	props.lzmaProps.reduceSize = (UInt64)p_src.size();
 	props.lzmaProps.fb = CLAMP(p_options.word_size, 5, 273);
 	props.lzmaProps.numThreads = MAX(1, p_options.threads);
 	props.numTotalThreads = MAX(1, p_options.threads);
@@ -125,28 +107,24 @@ Error compress_lzma2(const Vector<uint8_t> &p_src, Vector<uint8_t> &r_dst, const
 		return _lzma_error_to_godot(set_res);
 	}
 	Lzma2Enc_SetDataSize(enc, (UInt64)p_src.size());
-	const Byte prop = Lzma2Enc_WriteProperties(enc);
-
-	LzmaInStream in_stream;
-	in_stream.vt.Read = _lzma_in_stream_read;
-	in_stream.data = p_src.ptr();
-	in_stream.size = p_src.size();
-	in_stream.pos = 0;
-
 	LzmaOutStream out_stream;
 	out_stream.vt.Write = _lzma_out_stream_write;
+	const Error resize_err = out_stream.data.resize(1);
+	if (resize_err != OK) {
+		Lzma2Enc_Destroy(enc);
+		return resize_err;
+	}
+	out_stream.data.write[0] = Lzma2Enc_WriteProperties(enc);
 
-	const SRes enc_res = Lzma2Enc_Encode2(enc, &out_stream.vt, nullptr, nullptr, &in_stream.vt, nullptr, 0, nullptr);
+	// The caller already owns the complete input; avoid a second sliding input buffer.
+	const SRes enc_res = Lzma2Enc_Encode2(enc, &out_stream.vt, nullptr, nullptr, nullptr, p_src.ptr(), (size_t)p_src.size(), nullptr);
 	Lzma2Enc_Destroy(enc);
 	if (enc_res != SZ_OK) {
 		return _lzma_error_to_godot(enc_res);
 	}
 
-	r_dst.resize(1 + out_stream.data.size());
-	r_dst.write[0] = prop;
-	if (!out_stream.data.is_empty()) {
-		memcpy(r_dst.ptrw() + 1, out_stream.data.ptr(), out_stream.data.size());
-	}
+	// Transfer the reference-counted buffer, including its property byte, without copying it.
+	r_dst = out_stream.data;
 	return OK;
 }
 
