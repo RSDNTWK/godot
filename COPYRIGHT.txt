@@ -330,8 +330,13 @@ Comment: Graphite engine
 Copyright: 2010, SIL International
 License: Expat
 
+Files: thirdparty/dragonbox/*
+Comment: Dragonbox floating point digit generation
+Copyright: 2020-2022, Junekey Jeon
+License: BSL-1.0
+
 Files: thirdparty/grisu2/*
-Comment: Grisu2 float serialization algorithm
+Comment: Godot floating point formatting compatibility wrapper
 Copyright: 2009, Florian Loitsch
  2018-2023, The simdjson authors
 License: Expat and Apache-2.0
@@ -414,7 +419,7 @@ Comment: WebP codec
 Copyright: 2010, Google Inc.
 License: BSD-3-clause
 
-Files: thirdparty/lzma2604/*
+Files: thirdparty/lzma2605/*
 Comment: LZMA SDK (7-Zip SDK)
 Copyright: Igor Pavlov
 License: Public-Domain

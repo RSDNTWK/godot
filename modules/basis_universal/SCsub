@@ -22,6 +22,14 @@ if basisu_encoder:
         "3rdparty/android_astc_decomp.cpp",
         "basisu_astc_hdr_6x6_enc.cpp",
         "basisu_astc_hdr_common.cpp",
+        "basisu_bc7e_scalar.cpp",
+        "basisu_bc15_spmd.cpp",
+        "basisu_bc15_spmd_sse.cpp",
+        "basisu_astc_ldr_common.cpp",
+        "basisu_astc_ldr_encode.cpp",
+        "basisu_astc_ldr_fencode.cpp",
+        "basisu_xbc7_encode.cpp",
+        "basisu_dds_export.cpp",
         "basisu_backend.cpp",
         "basisu_basis_file.cpp",
         "basisu_bc7enc.cpp",
@@ -64,6 +72,7 @@ if not env.msvc:
 # <https://github.com/BinomialLLC/basis_universal/wiki/How-to-Use-and-Configure-the-Transcoder>
 env_thirdparty.Append(
     CPPDEFINES=[
+        ("BASISU_SUPPORT_ASTCENC", 0),
         # Enable ktx2 zstd supercompression.
         ("BASISD_SUPPORT_KTX2_ZSTD", 1),
         # GPU compression formats.

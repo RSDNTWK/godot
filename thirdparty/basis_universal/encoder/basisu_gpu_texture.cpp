@@ -1,5 +1,5 @@
 // basisu_gpu_texture.cpp
-// Copyright (C) 2019-2024 Binomial LLC. All Rights Reserved.
+// Copyright (C) 2019-2026 Binomial LLC. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,27 +15,116 @@
 #include "basisu_gpu_texture.h"
 #include "basisu_enc.h"
 #include "basisu_pvrtc1_4.h"
-#include "3rdparty/android_astc_decomp.h"
 #include "basisu_bc7enc.h"
 #include "../transcoder/basisu_astc_hdr_core.h"
+#include "../transcoder/basisu_transcoder.h"
 
 #define BASISU_USE_GOOGLE_ASTC_DECODER (1)
 
 namespace basisu
 {
+	const char* get_dds_format_string(basist::dds_format fmt)
+	{
+		switch (fmt)
+		{
+		case basist::dds_format::cBC1:		return "BC1 (DXT1)";
+		case basist::dds_format::cBC2:		return "BC2 (DXT2/DXT3)";
+		case basist::dds_format::cBC3:		return "BC3 (DXT4/DXT5)";
+		case basist::dds_format::cBC4:		return "BC4 (ATI1/BC4U)";
+		case basist::dds_format::cBC5:		return "BC5 (ATI2/DXN)";
+		case basist::dds_format::cBC7:		return "BC7";
+		case basist::dds_format::cR5G6B5:	return "R5G6B5 (16bpp)";
+		case basist::dds_format::cA1R5G5B5:	return "A1R5G5B5 (16bpp)";
+		case basist::dds_format::cX1R5G5B5:	return "X1R5G5B5 (16bpp)";
+		case basist::dds_format::cA4R4G4B4:	return "A4R4G4B4 (16bpp)";
+		case basist::dds_format::cX4R4G4B4:	return "X4R4G4B4 (16bpp)";
+		case basist::dds_format::cR8G8B8:	return "R8G8B8 (24bpp, BGR in memory)";
+		case basist::dds_format::cB8G8R8:	return "B8G8R8 (24bpp, RGB in memory)";
+		case basist::dds_format::cA8R8G8B8:	return "A8R8G8B8 (32bpp, BGRA in memory)";
+		case basist::dds_format::cX8R8G8B8:	return "X8R8G8B8 (32bpp, BGRX in memory)";
+		case basist::dds_format::cA8B8G8R8:	return "A8B8G8R8 (32bpp, RGBA in memory)";
+		case basist::dds_format::cX8B8G8R8:	return "X8B8G8R8 (32bpp, RGBX in memory)";
+		case basist::dds_format::cR8:		return "R8 (8bpp)";
+		case basist::dds_format::cR8G8:		return "R8G8 (16bpp)";
+		case basist::dds_format::cA8:		return "A8 (8bpp)";
+		case basist::dds_format::cL8:		return "L8 (8bpp luminance)";
+		case basist::dds_format::cA8L8:		return "A8L8 (16bpp luminance+alpha)";
+		case basist::dds_format::cInvalid:
+		default:							return "Invalid";
+		}
+	}
+
+	const char* get_texture_format_name(texture_format fmt)
+	{
+		switch (fmt)
+		{
+		case texture_format::cInvalidTextureFormat: return "Invalid";
+		case texture_format::cETC1: return "ETC1";
+		case texture_format::cETC1S: return "ETC1S";
+		case texture_format::cETC2_RGB: return "ETC2_RGB";
+		case texture_format::cETC2_RGBA: return "ETC2_RGBA";
+		case texture_format::cETC2_ALPHA: return "ETC2_ALPHA";
+		case texture_format::cBC1: return "BC1";
+		case texture_format::cBC3: return "BC3";
+		case texture_format::cBC4: return "BC4";
+		case texture_format::cBC5: return "BC5";
+		case texture_format::cBC6HSigned: return "BC6H_Signed";
+		case texture_format::cBC6HUnsigned: return "BC6H_Unsigned";
+		case texture_format::cBC7: return "BC7";
+		case texture_format::cASTC_LDR_4x4: return "ASTC_LDR_4x4";
+		case texture_format::cASTC_HDR_4x4: return "ASTC_HDR_4x4";
+		case texture_format::cASTC_HDR_6x6: return "ASTC_HDR_6x6";
+		case texture_format::cPVRTC1_4_RGB: return "PVRTC1_4_RGB";
+		case texture_format::cPVRTC1_4_RGBA: return "PVRTC1_4_RGBA";
+		case texture_format::cATC_RGB: return "ATC_RGB";
+		case texture_format::cATC_RGBA_INTERPOLATED_ALPHA: return "ATC_RGBA_INTERPOLATED_ALPHA";
+		case texture_format::cFXT1_RGB: return "FXT1_RGB";
+		case texture_format::cPVRTC2_4_RGBA: return "PVRTC2_4_RGBA";
+		case texture_format::cETC2_R11_EAC: return "ETC2_R11_EAC";
+		case texture_format::cETC2_RG11_EAC: return "ETC2_RG11_EAC";
+		case texture_format::cUASTC4x4: return "UASTC4x4";
+		case texture_format::cUASTC_HDR_4x4: return "UASTC_HDR_4x4";
+		case texture_format::cBC1_NV: return "BC1_NV";
+		case texture_format::cBC1_AMD: return "BC1_AMD";
+		case texture_format::cRGBA32: return "RGBA32";
+		case texture_format::cRGB565: return "RGB565";
+		case texture_format::cBGR565: return "BGR565";
+		case texture_format::cRGBA4444: return "RGBA4444";
+		case texture_format::cABGR4444: return "ABGR4444";
+		case texture_format::cRGBA_HALF: return "RGBA_HALF";
+		case texture_format::cRGB_HALF: return "RGB_HALF";
+		case texture_format::cRGB_9E5: return "RGB_9E5";
+		case texture_format::cASTC_LDR_5x4: return "ASTC_LDR_5x4";
+		case texture_format::cASTC_LDR_5x5: return "ASTC_LDR_5x5";
+		case texture_format::cASTC_LDR_6x5: return "ASTC_LDR_6x5";
+		case texture_format::cASTC_LDR_6x6: return "ASTC_LDR_6x6";
+		case texture_format::cASTC_LDR_8x5: return "ASTC_LDR_8x5";
+		case texture_format::cASTC_LDR_8x6: return "ASTC_LDR_8x6";
+		case texture_format::cASTC_LDR_10x5: return "ASTC_LDR_10x5";
+		case texture_format::cASTC_LDR_10x6: return "ASTC_LDR_10x6";
+		case texture_format::cASTC_LDR_8x8: return "ASTC_LDR_8x8";
+		case texture_format::cASTC_LDR_10x8: return "ASTC_LDR_10x8";
+		case texture_format::cASTC_LDR_10x10: return "ASTC_LDR_10x10";
+		case texture_format::cASTC_LDR_12x10: return "ASTC_LDR_12x10";
+		case texture_format::cASTC_LDR_12x12: return "ASTC_LDR_12x12";
+		default: break;
+		}
+		return "?";
+	}
+
 	//------------------------------------------------------------------------------------------------
 	// ETC2 EAC
 
-	void unpack_etc2_eac(const void *pBlock_bits, color_rgba *pPixels)
+	void unpack_etc2_eac(const void* pBlock_bits, color_rgba* pPixels)
 	{
 		static_assert(sizeof(eac_a8_block) == 8, "sizeof(eac_a8_block) == 8");
 
-		const eac_a8_block *pBlock = static_cast<const eac_a8_block *>(pBlock_bits);
+		const eac_a8_block* pBlock = static_cast<const eac_a8_block*>(pBlock_bits);
 
-		const int8_t *pTable = g_etc2_eac_tables[pBlock->m_table];
-		
+		const int8_t* pTable = g_etc2_eac_tables[pBlock->m_table];
+
 		const uint64_t selector_bits = pBlock->get_selector_bits();
-		
+
 		const int32_t base = pBlock->m_base;
 		const int32_t mul = pBlock->m_multiplier;
 
@@ -62,6 +151,8 @@ namespace basisu
 
 	//------------------------------------------------------------------------------------------------
 	// BC1
+
+#if 0
 	struct bc1_block
 	{
 		enum { cTotalEndpointBytes = 2, cTotalSelectorBytes = 4 };
@@ -69,16 +160,16 @@ namespace basisu
 		uint8_t m_low_color[cTotalEndpointBytes];
 		uint8_t m_high_color[cTotalEndpointBytes];
 		uint8_t m_selectors[cTotalSelectorBytes];
-				
-		inline uint32_t get_high_color() const	{ return m_high_color[0] | (m_high_color[1] << 8U); }
+
+		inline uint32_t get_high_color() const { return m_high_color[0] | (m_high_color[1] << 8U); }
 		inline uint32_t get_low_color() const { return m_low_color[0] | (m_low_color[1] << 8U); }
 
-		static void unpack_color(uint32_t c, uint32_t &r, uint32_t &g, uint32_t &b) 
+		static void unpack_color(uint32_t c, uint32_t& r, uint32_t& g, uint32_t& b)
 		{
 			r = (c >> 11) & 31;
 			g = (c >> 5) & 63;
 			b = c & 31;
-			
+
 			r = (r << 3) | (r >> 2);
 			g = (g << 2) | (g >> 4);
 			b = (b << 3) | (b >> 2);
@@ -86,69 +177,13 @@ namespace basisu
 
 		inline uint32_t get_selector(uint32_t x, uint32_t y) const { assert((x < 4U) && (y < 4U)); return (m_selectors[y] >> (x * 2)) & 3; }
 	};
+#endif
 
-	// Returns true if the block uses 3 color punchthrough alpha mode.
-	bool unpack_bc1(const void *pBlock_bits, color_rgba *pPixels, bool set_alpha)
+	bool unpack_bc1_nv(const void* pBlock_bits, color_rgba* pPixels, bool set_alpha)
 	{
-		static_assert(sizeof(bc1_block) == 8, "sizeof(bc1_block) == 8");
+		static_assert(sizeof(basist::bc1_block) == 8, "sizeof(bc1_block) == 8");
 
-		const bc1_block *pBlock = static_cast<const bc1_block *>(pBlock_bits);
-
-		const uint32_t l = pBlock->get_low_color();
-		const uint32_t h = pBlock->get_high_color();
-
-		color_rgba c[4];
-
-		uint32_t r0, g0, b0, r1, g1, b1;
-		bc1_block::unpack_color(l, r0, g0, b0);
-		bc1_block::unpack_color(h, r1, g1, b1);
-
-		c[0].set_noclamp_rgba(r0, g0, b0, 255);
-		c[1].set_noclamp_rgba(r1, g1, b1, 255);
-
-		bool used_punchthrough = false;
-
-		if (l > h)
-		{
-			c[2].set_noclamp_rgba((r0 * 2 + r1) / 3, (g0 * 2 + g1) / 3, (b0 * 2 + b1) / 3, 255);
-			c[3].set_noclamp_rgba((r1 * 2 + r0) / 3, (g1 * 2 + g0) / 3, (b1 * 2 + b0) / 3, 255);
-		}
-		else
-		{
-			c[2].set_noclamp_rgba((r0 + r1) / 2, (g0 + g1) / 2, (b0 + b1) / 2, 255);
-			c[3].set_noclamp_rgba(0, 0, 0, 0);
-			used_punchthrough = true;
-		}
-
-		if (set_alpha)
-		{
-			for (uint32_t y = 0; y < 4; y++, pPixels += 4)
-			{
-				pPixels[0] = c[pBlock->get_selector(0, y)]; 
-				pPixels[1] = c[pBlock->get_selector(1, y)]; 
-				pPixels[2] = c[pBlock->get_selector(2, y)]; 
-				pPixels[3] = c[pBlock->get_selector(3, y)];
-			}
-		}
-		else
-		{
-			for (uint32_t y = 0; y < 4; y++, pPixels += 4)
-			{
-				pPixels[0].set_rgb(c[pBlock->get_selector(0, y)]); 
-				pPixels[1].set_rgb(c[pBlock->get_selector(1, y)]); 
-				pPixels[2].set_rgb(c[pBlock->get_selector(2, y)]); 
-				pPixels[3].set_rgb(c[pBlock->get_selector(3, y)]);
-			}
-		}
-
-		return used_punchthrough;
-	}
-
-	bool unpack_bc1_nv(const void *pBlock_bits, color_rgba *pPixels, bool set_alpha)
-	{
-		static_assert(sizeof(bc1_block) == 8, "sizeof(bc1_block) == 8");
-
-		const bc1_block *pBlock = static_cast<const bc1_block *>(pBlock_bits);
+		const basist::bc1_block* pBlock = static_cast<const basist::bc1_block*>(pBlock_bits);
 
 		const uint32_t l = pBlock->get_low_color();
 		const uint32_t h = pBlock->get_high_color();
@@ -179,19 +214,19 @@ namespace basisu
 		if (l > h)
 		{
 			c[2].r = (uint8_t)(((2 * r0 + r1) * 22) / 8);
-			c[2].g = (uint8_t)(((256 * c[0].g + gdiff/4 + 128 + gdiff * 80) / 256));
+			c[2].g = (uint8_t)(((256 * c[0].g + gdiff / 4 + 128 + gdiff * 80) / 256));
 			c[2].b = (uint8_t)(((2 * b0 + b1) * 22) / 8);
 			c[2].a = 0xFF;
 
 			c[3].r = (uint8_t)(((2 * r1 + r0) * 22) / 8);
-			c[3].g = (uint8_t)((256 * c[1].g - gdiff/4 + 128 - gdiff * 80) / 256);
+			c[3].g = (uint8_t)((256 * c[1].g - gdiff / 4 + 128 - gdiff * 80) / 256);
 			c[3].b = (uint8_t)(((2 * b1 + b0) * 22) / 8);
 			c[3].a = 0xFF;
 		}
 		else
 		{
 			c[2].r = (uint8_t)(((r0 + r1) * 33) / 8);
-			c[2].g = (uint8_t)((256 * c[0].g + gdiff/4 + 128 + gdiff * 128) / 256);
+			c[2].g = (uint8_t)((256 * c[0].g + gdiff / 4 + 128 + gdiff * 128) / 256);
 			c[2].b = (uint8_t)(((b0 + b1) * 33) / 8);
 			c[2].a = 0xFF;
 
@@ -203,9 +238,9 @@ namespace basisu
 		{
 			for (uint32_t y = 0; y < 4; y++, pPixels += 4)
 			{
-				pPixels[0] = c[pBlock->get_selector(0, y)]; 
-				pPixels[1] = c[pBlock->get_selector(1, y)]; 
-				pPixels[2] = c[pBlock->get_selector(2, y)]; 
+				pPixels[0] = c[pBlock->get_selector(0, y)];
+				pPixels[1] = c[pBlock->get_selector(1, y)];
+				pPixels[2] = c[pBlock->get_selector(2, y)];
 				pPixels[3] = c[pBlock->get_selector(3, y)];
 			}
 		}
@@ -213,9 +248,9 @@ namespace basisu
 		{
 			for (uint32_t y = 0; y < 4; y++, pPixels += 4)
 			{
-				pPixels[0].set_rgb(c[pBlock->get_selector(0, y)]); 
-				pPixels[1].set_rgb(c[pBlock->get_selector(1, y)]); 
-				pPixels[2].set_rgb(c[pBlock->get_selector(2, y)]); 
+				pPixels[0].set_rgb(c[pBlock->get_selector(0, y)]);
+				pPixels[1].set_rgb(c[pBlock->get_selector(1, y)]);
+				pPixels[2].set_rgb(c[pBlock->get_selector(2, y)]);
 				pPixels[3].set_rgb(c[pBlock->get_selector(3, y)]);
 			}
 		}
@@ -226,9 +261,9 @@ namespace basisu
 	static inline int interp_5_6_amd(int c0, int c1) { assert(c0 < 256 && c1 < 256); return (c0 * 43 + c1 * 21 + 32) >> 6; }
 	static inline int interp_half_5_6_amd(int c0, int c1) { assert(c0 < 256 && c1 < 256); return (c0 + c1 + 1) >> 1; }
 
-	bool unpack_bc1_amd(const void *pBlock_bits, color_rgba *pPixels, bool set_alpha)
+	bool unpack_bc1_amd(const void* pBlock_bits, color_rgba* pPixels, bool set_alpha)
 	{
-		const bc1_block *pBlock = static_cast<const bc1_block *>(pBlock_bits);
+		const basist::bc1_block* pBlock = static_cast<const basist::bc1_block*>(pBlock_bits);
 
 		const uint32_t l = pBlock->get_low_color();
 		const uint32_t h = pBlock->get_high_color();
@@ -236,12 +271,12 @@ namespace basisu
 		color_rgba c[4];
 
 		uint32_t r0, g0, b0, r1, g1, b1;
-		bc1_block::unpack_color(l, r0, g0, b0);
-		bc1_block::unpack_color(h, r1, g1, b1);
+		basist::bc1_block::unpack_color(l, r0, g0, b0);
+		basist::bc1_block::unpack_color(h, r1, g1, b1);
 
 		c[0].set_noclamp_rgba(r0, g0, b0, 255);
 		c[1].set_noclamp_rgba(r1, g1, b1, 255);
-				
+
 		bool used_punchthrough = false;
 
 		if (l > h)
@@ -260,9 +295,9 @@ namespace basisu
 		{
 			for (uint32_t y = 0; y < 4; y++, pPixels += 4)
 			{
-				pPixels[0] = c[pBlock->get_selector(0, y)]; 
-				pPixels[1] = c[pBlock->get_selector(1, y)]; 
-				pPixels[2] = c[pBlock->get_selector(2, y)]; 
+				pPixels[0] = c[pBlock->get_selector(0, y)];
+				pPixels[1] = c[pBlock->get_selector(1, y)];
+				pPixels[2] = c[pBlock->get_selector(2, y)];
 				pPixels[3] = c[pBlock->get_selector(3, y)];
 			}
 		}
@@ -270,9 +305,9 @@ namespace basisu
 		{
 			for (uint32_t y = 0; y < 4; y++, pPixels += 4)
 			{
-				pPixels[0].set_rgb(c[pBlock->get_selector(0, y)]); 
-				pPixels[1].set_rgb(c[pBlock->get_selector(1, y)]); 
-				pPixels[2].set_rgb(c[pBlock->get_selector(2, y)]); 
+				pPixels[0].set_rgb(c[pBlock->get_selector(0, y)]);
+				pPixels[1].set_rgb(c[pBlock->get_selector(1, y)]);
+				pPixels[2].set_rgb(c[pBlock->get_selector(2, y)]);
 				pPixels[3].set_rgb(c[pBlock->get_selector(3, y)]);
 			}
 		}
@@ -280,108 +315,6 @@ namespace basisu
 		return used_punchthrough;
 	}
 
-	//------------------------------------------------------------------------------------------------
-	// BC3-5
-
-	struct bc4_block
-	{
-		enum { cBC4SelectorBits = 3, cTotalSelectorBytes = 6, cMaxSelectorValues = 8 };
-		uint8_t m_endpoints[2];
-
-		uint8_t m_selectors[cTotalSelectorBytes];
-
-		inline uint32_t get_low_alpha() const { return m_endpoints[0]; }
-		inline uint32_t get_high_alpha() const { return m_endpoints[1]; }
-		inline bool is_alpha6_block() const { return get_low_alpha() <= get_high_alpha(); }
-
-		inline uint64_t get_selector_bits() const
-		{ 
-			return ((uint64_t)((uint32_t)m_selectors[0] | ((uint32_t)m_selectors[1] << 8U) | ((uint32_t)m_selectors[2] << 16U) | ((uint32_t)m_selectors[3] << 24U))) |
-				(((uint64_t)m_selectors[4]) << 32U) |
-				(((uint64_t)m_selectors[5]) << 40U);
-		}
-
-		inline uint32_t get_selector(uint32_t x, uint32_t y, uint64_t selector_bits) const
-		{
-			assert((x < 4U) && (y < 4U));
-			return (selector_bits >> (((y * 4) + x) * cBC4SelectorBits)) & (cMaxSelectorValues - 1);
-		}
-				
-		static inline uint32_t get_block_values6(uint8_t *pDst, uint32_t l, uint32_t h)
-		{
-			pDst[0] = static_cast<uint8_t>(l);
-			pDst[1] = static_cast<uint8_t>(h);
-			pDst[2] = static_cast<uint8_t>((l * 4 + h) / 5);
-			pDst[3] = static_cast<uint8_t>((l * 3 + h * 2) / 5);
-			pDst[4] = static_cast<uint8_t>((l * 2 + h * 3) / 5);
-			pDst[5] = static_cast<uint8_t>((l + h * 4) / 5);
-			pDst[6] = 0;
-			pDst[7] = 255;
-			return 6;
-		}
-
-		static inline uint32_t get_block_values8(uint8_t *pDst, uint32_t l, uint32_t h)
-		{
-			pDst[0] = static_cast<uint8_t>(l);
-			pDst[1] = static_cast<uint8_t>(h);
-			pDst[2] = static_cast<uint8_t>((l * 6 + h) / 7);
-			pDst[3] = static_cast<uint8_t>((l * 5 + h * 2) / 7);
-			pDst[4] = static_cast<uint8_t>((l * 4 + h * 3) / 7);
-			pDst[5] = static_cast<uint8_t>((l * 3 + h * 4) / 7);
-			pDst[6] = static_cast<uint8_t>((l * 2 + h * 5) / 7);
-			pDst[7] = static_cast<uint8_t>((l + h * 6) / 7);
-			return 8;
-		}
-
-		static inline uint32_t get_block_values(uint8_t *pDst, uint32_t l, uint32_t h)
-		{
-			if (l > h)
-				return get_block_values8(pDst, l, h);
-			else
-				return get_block_values6(pDst, l, h);
-		}
-	};
-
-	void unpack_bc4(const void *pBlock_bits, uint8_t *pPixels, uint32_t stride)
-	{
-		static_assert(sizeof(bc4_block) == 8, "sizeof(bc4_block) == 8");
-
-		const bc4_block *pBlock = static_cast<const bc4_block *>(pBlock_bits);
-
-		uint8_t sel_values[8];
-		bc4_block::get_block_values(sel_values, pBlock->get_low_alpha(), pBlock->get_high_alpha());
-
-		const uint64_t selector_bits = pBlock->get_selector_bits();
-
-		for (uint32_t y = 0; y < 4; y++, pPixels += (stride * 4U))
-		{
-			pPixels[0] = sel_values[pBlock->get_selector(0, y, selector_bits)];
-			pPixels[stride * 1] = sel_values[pBlock->get_selector(1, y, selector_bits)];
-			pPixels[stride * 2] = sel_values[pBlock->get_selector(2, y, selector_bits)];
-			pPixels[stride * 3] = sel_values[pBlock->get_selector(3, y, selector_bits)];
-		}
-	}
-	
-	// Returns false if the block uses 3-color punchthrough alpha mode, which isn't supported on some GPU's for BC3.
-	bool unpack_bc3(const void *pBlock_bits, color_rgba *pPixels)
-	{
-		bool success = true;
-
-		if (unpack_bc1((const uint8_t *)pBlock_bits + sizeof(bc4_block), pPixels, true))
-			success = false;
-
-		unpack_bc4(pBlock_bits, &pPixels[0].a, sizeof(color_rgba));
-		
-		return success;
-	}
-
-	// writes RG
-	void unpack_bc5(const void *pBlock_bits, color_rgba *pPixels)
-	{
-		unpack_bc4(pBlock_bits, &pPixels[0].r, sizeof(color_rgba));
-		unpack_bc4((const uint8_t *)pBlock_bits + sizeof(bc4_block), &pPixels[0].g, sizeof(color_rgba));
-	}
-	
 	//------------------------------------------------------------------------------------------------
 	// ATC isn't officially documented, so I'm assuming these references:
 	// http://www.guildsoftware.com/papers/2012.Converting.DXTC.to.ATC.pdf
@@ -429,330 +362,13 @@ namespace basisu
 		for (uint32_t i = 0; i < 16; i++)
 		{
 			const uint32_t s = sels & 3;
-			
+
 			pPixels[i] = c[s];
-							
+
 			sels >>= 2;
 		}
 	}
 
-	//------------------------------------------------------------------------------------------------
-	// BC7 mode 0-7 decompression.
-	// Instead of one monster routine to unpack all the BC7 modes, we're lumping the 3 subset, 2 subset, 1 subset, and dual plane modes together into simple shared routines.
-
-	static inline uint32_t bc7_dequant(uint32_t val, uint32_t pbit, uint32_t val_bits) { assert(val < (1U << val_bits)); assert(pbit < 2); assert(val_bits >= 4 && val_bits <= 8); const uint32_t total_bits = val_bits + 1; val = (val << 1) | pbit; val <<= (8 - total_bits); val |= (val >> total_bits); assert(val <= 255); return val; }
-	static inline uint32_t bc7_dequant(uint32_t val, uint32_t val_bits) { assert(val < (1U << val_bits)); assert(val_bits >= 4 && val_bits <= 8); val <<= (8 - val_bits); val |= (val >> val_bits); assert(val <= 255); return val; }
-
-	static inline uint32_t bc7_interp2(uint32_t l, uint32_t h, uint32_t w) { assert(w < 4); return (l * (64 - basist::g_bc7_weights2[w]) + h * basist::g_bc7_weights2[w] + 32) >> 6; }
-	static inline uint32_t bc7_interp3(uint32_t l, uint32_t h, uint32_t w) { assert(w < 8); return (l * (64 - basist::g_bc7_weights3[w]) + h * basist::g_bc7_weights3[w] + 32) >> 6; }
-	static inline uint32_t bc7_interp4(uint32_t l, uint32_t h, uint32_t w) { assert(w < 16); return (l * (64 - basist::g_bc7_weights4[w]) + h * basist::g_bc7_weights4[w] + 32) >> 6; }
-	static inline uint32_t bc7_interp(uint32_t l, uint32_t h, uint32_t w, uint32_t bits)
-	{
-		assert(l <= 255 && h <= 255);
-		switch (bits)
-		{
-		case 2: return bc7_interp2(l, h, w);
-		case 3: return bc7_interp3(l, h, w);
-		case 4: return bc7_interp4(l, h, w);
-		default: 
-			break;
-		}
-		return 0;
-	}
-		
-	bool unpack_bc7_mode0_2(uint32_t mode, const void* pBlock_bits, color_rgba* pPixels)
-	{
-		//const uint32_t SUBSETS = 3;
-		const uint32_t ENDPOINTS = 6;
-		const uint32_t COMPS = 3;
-		const uint32_t WEIGHT_BITS = (mode == 0) ? 3 : 2;
-		const uint32_t ENDPOINT_BITS = (mode == 0) ? 4 : 5;
-		const uint32_t PBITS = (mode == 0) ? 6 : 0;
-		const uint32_t WEIGHT_VALS = 1 << WEIGHT_BITS;
-		
-		uint32_t bit_offset = 0;
-		const uint8_t* pBuf = static_cast<const uint8_t*>(pBlock_bits);
-
-		if (read_bits32(pBuf, bit_offset, mode + 1) != (1U << mode)) return false;
-
-		const uint32_t part = read_bits32(pBuf, bit_offset, (mode == 0) ? 4 : 6);
-
-		color_rgba endpoints[ENDPOINTS];
-		for (uint32_t c = 0; c < COMPS; c++)
-			for (uint32_t e = 0; e < ENDPOINTS; e++)
-				endpoints[e][c] = (uint8_t)read_bits32(pBuf, bit_offset, ENDPOINT_BITS);
-
-		uint32_t pbits[6];
-		for (uint32_t p = 0; p < PBITS; p++)
-			pbits[p] = read_bits32(pBuf, bit_offset, 1);
-
-		uint32_t weights[16];
-		for (uint32_t i = 0; i < 16; i++)
-			weights[i] = read_bits32(pBuf, bit_offset, ((!i) || (i == basist::g_bc7_table_anchor_index_third_subset_1[part]) || (i == basist::g_bc7_table_anchor_index_third_subset_2[part])) ? (WEIGHT_BITS - 1) : WEIGHT_BITS);
-
-		assert(bit_offset == 128);
-
-		for (uint32_t e = 0; e < ENDPOINTS; e++)
-			for (uint32_t c = 0; c < 4; c++)
-				endpoints[e][c] = (uint8_t)((c == 3) ? 255 : (PBITS ? bc7_dequant(endpoints[e][c], pbits[e], ENDPOINT_BITS) : bc7_dequant(endpoints[e][c], ENDPOINT_BITS)));
-
-		color_rgba block_colors[3][8];
-		for (uint32_t s = 0; s < 3; s++)
-			for (uint32_t i = 0; i < WEIGHT_VALS; i++)
-			{
-				for (uint32_t c = 0; c < 3; c++)
-					block_colors[s][i][c] = (uint8_t)bc7_interp(endpoints[s * 2 + 0][c], endpoints[s * 2 + 1][c], i, WEIGHT_BITS);
-				block_colors[s][i][3] = 255;
-			}
-
-		for (uint32_t i = 0; i < 16; i++)
-			pPixels[i] = block_colors[basist::g_bc7_partition3[part * 16 + i]][weights[i]];
-
-		return true;
-	}
-
-	bool unpack_bc7_mode1_3_7(uint32_t mode, const void* pBlock_bits, color_rgba* pPixels)
-	{
-		//const uint32_t SUBSETS = 2;
-		const uint32_t ENDPOINTS = 4;
-		const uint32_t COMPS = (mode == 7) ? 4 : 3;
-		const uint32_t WEIGHT_BITS = (mode == 1) ? 3 : 2;
-		const uint32_t ENDPOINT_BITS = (mode == 7) ? 5 : ((mode == 1) ? 6 : 7);
-		const uint32_t PBITS = (mode == 1) ? 2 : 4;
-		const uint32_t SHARED_PBITS = (mode == 1) ? true : false;
-		const uint32_t WEIGHT_VALS = 1 << WEIGHT_BITS;
-		
-		uint32_t bit_offset = 0;
-		const uint8_t* pBuf = static_cast<const uint8_t*>(pBlock_bits);
-
-		if (read_bits32(pBuf, bit_offset, mode + 1) != (1U << mode)) return false;
-
-		const uint32_t part = read_bits32(pBuf, bit_offset, 6);
-
-		color_rgba endpoints[ENDPOINTS];
-		for (uint32_t c = 0; c < COMPS; c++)
-			for (uint32_t e = 0; e < ENDPOINTS; e++)
-				endpoints[e][c] = (uint8_t)read_bits32(pBuf, bit_offset, ENDPOINT_BITS);
-		
-		uint32_t pbits[4];
-		for (uint32_t p = 0; p < PBITS; p++)
-			pbits[p] = read_bits32(pBuf, bit_offset, 1);
-						
-		uint32_t weights[16];
-		for (uint32_t i = 0; i < 16; i++)
-			weights[i] = read_bits32(pBuf, bit_offset, ((!i) || (i == basist::g_bc7_table_anchor_index_second_subset[part])) ? (WEIGHT_BITS - 1) : WEIGHT_BITS);
-		
-		assert(bit_offset == 128);
-
-		for (uint32_t e = 0; e < ENDPOINTS; e++)
-			for (uint32_t c = 0; c < 4; c++)
-				endpoints[e][c] = (uint8_t)((c == ((mode == 7U) ? 4U : 3U)) ? 255 : bc7_dequant(endpoints[e][c], pbits[SHARED_PBITS ? (e >> 1) : e], ENDPOINT_BITS));
-		
-		color_rgba block_colors[2][8];
-		for (uint32_t s = 0; s < 2; s++)
-			for (uint32_t i = 0; i < WEIGHT_VALS; i++)
-			{
-				for (uint32_t c = 0; c < COMPS; c++)
-					block_colors[s][i][c] = (uint8_t)bc7_interp(endpoints[s * 2 + 0][c], endpoints[s * 2 + 1][c], i, WEIGHT_BITS);
-				block_colors[s][i][3] = (COMPS == 3) ? 255 : block_colors[s][i][3];
-			}
-
-		for (uint32_t i = 0; i < 16; i++)
-			pPixels[i] = block_colors[basist::g_bc7_partition2[part * 16 + i]][weights[i]];
-
-		return true;
-	}
-
-	bool unpack_bc7_mode4_5(uint32_t mode, const void* pBlock_bits, color_rgba* pPixels)
-	{
-		const uint32_t ENDPOINTS = 2;
-		const uint32_t COMPS = 4;
-		const uint32_t WEIGHT_BITS = 2;
-		const uint32_t A_WEIGHT_BITS = (mode == 4) ? 3 : 2;
-		const uint32_t ENDPOINT_BITS = (mode == 4) ? 5 : 7;
-		const uint32_t A_ENDPOINT_BITS = (mode == 4) ? 6 : 8;
-		//const uint32_t WEIGHT_VALS = 1 << WEIGHT_BITS;
-		//const uint32_t A_WEIGHT_VALS = 1 << A_WEIGHT_BITS;
-
-		uint32_t bit_offset = 0;
-		const uint8_t* pBuf = static_cast<const uint8_t*>(pBlock_bits);
-
-		if (read_bits32(pBuf, bit_offset, mode + 1) != (1U << mode)) return false;
-
-		const uint32_t comp_rot = read_bits32(pBuf, bit_offset, 2);
-		const uint32_t index_mode = (mode == 4) ? read_bits32(pBuf, bit_offset, 1) : 0;
-
-		color_rgba endpoints[ENDPOINTS];
-		for (uint32_t c = 0; c < COMPS; c++)
-			for (uint32_t e = 0; e < ENDPOINTS; e++)
-				endpoints[e][c] = (uint8_t)read_bits32(pBuf, bit_offset, (c == 3) ? A_ENDPOINT_BITS : ENDPOINT_BITS);
-		
-		const uint32_t weight_bits[2] = { index_mode ? A_WEIGHT_BITS : WEIGHT_BITS,  index_mode ? WEIGHT_BITS : A_WEIGHT_BITS };
-		
-		uint32_t weights[16], a_weights[16];
-		
-		for (uint32_t i = 0; i < 16; i++)
-			(index_mode ? a_weights : weights)[i] = read_bits32(pBuf, bit_offset, weight_bits[index_mode] - ((!i) ? 1 : 0));
-
-		for (uint32_t i = 0; i < 16; i++)
-			(index_mode ? weights : a_weights)[i] = read_bits32(pBuf, bit_offset, weight_bits[1 - index_mode] - ((!i) ? 1 : 0));
-
-		assert(bit_offset == 128);
-
-		for (uint32_t e = 0; e < ENDPOINTS; e++)
-			for (uint32_t c = 0; c < 4; c++)
-				endpoints[e][c] = (uint8_t)bc7_dequant(endpoints[e][c], (c == 3) ? A_ENDPOINT_BITS : ENDPOINT_BITS);
-
-		color_rgba block_colors[8];
-		for (uint32_t i = 0; i < (1U << weight_bits[0]); i++)
-			for (uint32_t c = 0; c < 3; c++)
-				block_colors[i][c] = (uint8_t)bc7_interp(endpoints[0][c], endpoints[1][c], i, weight_bits[0]);
-
-		for (uint32_t i = 0; i < (1U << weight_bits[1]); i++)
-			block_colors[i][3] = (uint8_t)bc7_interp(endpoints[0][3], endpoints[1][3], i, weight_bits[1]);
-
-		for (uint32_t i = 0; i < 16; i++)
-		{
-			pPixels[i] = block_colors[weights[i]];
-			pPixels[i].a = block_colors[a_weights[i]].a;
-			if (comp_rot >= 1)
-				std::swap(pPixels[i].a, pPixels[i].m_comps[comp_rot - 1]);
-		}
-
-		return true;
-	}
-
-	struct bc7_mode_6
-	{
-		struct
-		{
-			uint64_t m_mode : 7;
-			uint64_t m_r0 : 7;
-			uint64_t m_r1 : 7;
-			uint64_t m_g0 : 7;
-			uint64_t m_g1 : 7;
-			uint64_t m_b0 : 7;
-			uint64_t m_b1 : 7;
-			uint64_t m_a0 : 7;
-			uint64_t m_a1 : 7;
-			uint64_t m_p0 : 1;
-		} m_lo;
-
-		union
-		{
-			struct
-			{
-				uint64_t m_p1 : 1;
-				uint64_t m_s00 : 3;
-				uint64_t m_s10 : 4;
-				uint64_t m_s20 : 4;
-				uint64_t m_s30 : 4;
-
-				uint64_t m_s01 : 4;
-				uint64_t m_s11 : 4;
-				uint64_t m_s21 : 4;
-				uint64_t m_s31 : 4;
-
-				uint64_t m_s02 : 4;
-				uint64_t m_s12 : 4;
-				uint64_t m_s22 : 4;
-				uint64_t m_s32 : 4;
-
-				uint64_t m_s03 : 4;
-				uint64_t m_s13 : 4;
-				uint64_t m_s23 : 4;
-				uint64_t m_s33 : 4;
-
-			} m_hi;
-
-			uint64_t m_hi_bits;
-		};
-	};
-
-	bool unpack_bc7_mode6(const void *pBlock_bits, color_rgba *pPixels)
-	{
-		static_assert(sizeof(bc7_mode_6) == 16, "sizeof(bc7_mode_6) == 16");
-
-		const bc7_mode_6 &block = *static_cast<const bc7_mode_6 *>(pBlock_bits);
-
-		if (block.m_lo.m_mode != (1 << 6))
-			return false;
-
-		const uint32_t r0 = (uint32_t)((block.m_lo.m_r0 << 1) | block.m_lo.m_p0);
-		const uint32_t g0 = (uint32_t)((block.m_lo.m_g0 << 1) | block.m_lo.m_p0);
-		const uint32_t b0 = (uint32_t)((block.m_lo.m_b0 << 1) | block.m_lo.m_p0);
-		const uint32_t a0 = (uint32_t)((block.m_lo.m_a0 << 1) | block.m_lo.m_p0);
-		const uint32_t r1 = (uint32_t)((block.m_lo.m_r1 << 1) | block.m_hi.m_p1);
-		const uint32_t g1 = (uint32_t)((block.m_lo.m_g1 << 1) | block.m_hi.m_p1);
-		const uint32_t b1 = (uint32_t)((block.m_lo.m_b1 << 1) | block.m_hi.m_p1);
-		const uint32_t a1 = (uint32_t)((block.m_lo.m_a1 << 1) | block.m_hi.m_p1);
-
-		color_rgba vals[16];
-		for (uint32_t i = 0; i < 16; i++)
-		{
-			const uint32_t w = basist::g_bc7_weights4[i];
-			const uint32_t iw = 64 - w;
-			vals[i].set_noclamp_rgba( 
-				(r0 * iw + r1 * w + 32) >> 6, 
-				(g0 * iw + g1 * w + 32) >> 6, 
-				(b0 * iw + b1 * w + 32) >> 6, 
-				(a0 * iw + a1 * w + 32) >> 6);
-		}
-
-		pPixels[0] = vals[block.m_hi.m_s00];
-		pPixels[1] = vals[block.m_hi.m_s10];
-		pPixels[2] = vals[block.m_hi.m_s20];
-		pPixels[3] = vals[block.m_hi.m_s30];
-
-		pPixels[4] = vals[block.m_hi.m_s01];
-		pPixels[5] = vals[block.m_hi.m_s11];
-		pPixels[6] = vals[block.m_hi.m_s21];
-		pPixels[7] = vals[block.m_hi.m_s31];
-		
-		pPixels[8] = vals[block.m_hi.m_s02];
-		pPixels[9] = vals[block.m_hi.m_s12];
-		pPixels[10] = vals[block.m_hi.m_s22];
-		pPixels[11] = vals[block.m_hi.m_s32];
-
-		pPixels[12] = vals[block.m_hi.m_s03];
-		pPixels[13] = vals[block.m_hi.m_s13];
-		pPixels[14] = vals[block.m_hi.m_s23];
-		pPixels[15] = vals[block.m_hi.m_s33];
-
-		return true;
-	}
-
-	bool unpack_bc7(const void *pBlock, color_rgba *pPixels)
-	{
-		const uint32_t first_byte = static_cast<const uint8_t*>(pBlock)[0];
-
-		for (uint32_t mode = 0; mode <= 7; mode++)
-		{
-			if (first_byte & (1U << mode))
-			{
-				switch (mode)
-				{
-				case 0:
-				case 2:
-					return unpack_bc7_mode0_2(mode, pBlock, pPixels);
-				case 1:
-				case 3:
-				case 7:
-					return unpack_bc7_mode1_3_7(mode, pBlock, pPixels);
-				case 4:
-				case 5:
-					return unpack_bc7_mode4_5(mode, pBlock, pPixels);
-				case 6:
-					return unpack_bc7_mode6(pBlock, pPixels);
-				default:
-					break;
-				}
-			}
-		}
-
-		return false;
-	}
-	
 	static inline int bc6h_sign_extend(int val, int bits)
 	{
 		assert((bits >= 1) && (bits < 32));
@@ -1361,13 +977,14 @@ namespace basisu
 	}
 			
 	// Unpacks to RGBA, R, RG, or A. LDR GPU texture formats only.
-	bool unpack_block(texture_format fmt, const void* pBlock, color_rgba* pPixels)
+	// astc_srgb: if true, ASTC LDR formats are decoded in sRGB decode mode, otherwise L8.
+	bool unpack_block(texture_format fmt, const void* pBlock, color_rgba* pPixels, bool astc_srgb)
 	{
 		switch (fmt)
 		{
 		case texture_format::cBC1:
 		{
-			unpack_bc1(pBlock, pPixels, true);
+			basist::bcu::unpack_bc1(pBlock, reinterpret_cast<basist::color_rgba*>(pPixels), true);
 			break;
 		}
 		case texture_format::cBC1_NV:
@@ -1382,22 +999,24 @@ namespace basisu
 		}
 		case texture_format::cBC3:
 		{
-			return unpack_bc3(pBlock, pPixels);
+			// unpack_bc3 is void (always succeeds); fall through to the function's success return.
+			basist::bcu::unpack_bc3(pBlock, reinterpret_cast<basist::color_rgba*>(pPixels));
+			break;
 		}
 		case texture_format::cBC4:
 		{
 			// Unpack to R
-			unpack_bc4(pBlock, &pPixels[0].r, sizeof(color_rgba));
+			basist::bcu::unpack_bc4(pBlock, &pPixels[0].r, sizeof(color_rgba));
 			break;
 		}
 		case texture_format::cBC5:
 		{
-			unpack_bc5(pBlock, pPixels);
+			basist::bcu::unpack_bc5(pBlock, reinterpret_cast<basist::color_rgba*>(pPixels));
 			break;
 		}
 		case texture_format::cBC7:
 		{
-			return unpack_bc7(pBlock, pPixels);
+			return basist::bc7u::unpack_bc7(pBlock, reinterpret_cast<basist::color_rgba *>(pPixels));
 		}
 		// Full ETC2 color blocks (planar/T/H modes) is currently unsupported in basisu, but we do support ETC2 with alpha (using ETC1 for color)
 		case texture_format::cETC2_RGB:
@@ -1430,9 +1049,27 @@ namespace basisu
 			return false;
 		}
 		case texture_format::cASTC_LDR_4x4:
+		case texture_format::cASTC_LDR_5x4:
+		case texture_format::cASTC_LDR_5x5:
+		case texture_format::cASTC_LDR_6x5:
+		case texture_format::cASTC_LDR_6x6:
+		case texture_format::cASTC_LDR_8x5:
+		case texture_format::cASTC_LDR_8x6:
+		case texture_format::cASTC_LDR_10x5:
+		case texture_format::cASTC_LDR_10x6:
+		case texture_format::cASTC_LDR_8x8:
+		case texture_format::cASTC_LDR_10x8:
+		case texture_format::cASTC_LDR_10x10:
+		case texture_format::cASTC_LDR_12x10:
+		case texture_format::cASTC_LDR_12x12:
 		{
-			const bool astc_srgb = false;
-			bool status = basisu_astc::astc::decompress_ldr(reinterpret_cast<uint8_t*>(pPixels), static_cast<const uint8_t*>(pBlock), astc_srgb, 4, 4);
+			const uint32_t block_width = get_block_width(fmt), block_height = get_block_height(fmt);
+
+			assert(get_astc_ldr_texture_format(block_width, block_height) == fmt);
+			assert(astc_helpers::is_valid_block_size(block_width, block_height));
+						
+			// TODO: Allow caller to use the Android decoder, too.
+			bool status = basisu_astc::astc::decompress_ldr(reinterpret_cast<uint8_t*>(pPixels), static_cast<const uint8_t*>(pBlock), astc_srgb, block_width, block_height);
 			assert(status);
 
 			if (!status)
@@ -1448,7 +1085,7 @@ namespace basisu
 		case texture_format::cATC_RGBA_INTERPOLATED_ALPHA:
 		{
 			unpack_atc(static_cast<const uint8_t*>(pBlock) + 8, pPixels);
-			unpack_bc4(pBlock, &pPixels[0].a, sizeof(color_rgba));
+			basist::bcu::unpack_bc4(pBlock, &pPixels[0].a, sizeof(color_rgba));
 			break;
 		}
 		case texture_format::cFXT1_RGB:
@@ -1575,7 +1212,7 @@ namespace basisu
 		return false;
 	}
 		
-	bool gpu_image::unpack(image& img) const
+	bool gpu_image::unpack(image& img, bool astc_srgb) const
 	{
 		img.resize(get_pixel_width(), get_pixel_height());
 		img.set_all(g_black_color);
@@ -1590,7 +1227,7 @@ namespace basisu
 			if (get_total_blocks() != pi.get_total_blocks())
 				return false;
 			
-			memcpy(&pi.get_blocks()[0], get_ptr(), get_size_in_bytes());
+			memcpy((void *)&pi.get_blocks()[0], (const void *)get_ptr(), get_size_in_bytes());
 
 			pi.deswizzle();
 
@@ -1600,7 +1237,10 @@ namespace basisu
 		}
 
 		assert((m_block_width <= cMaxBlockSize) && (m_block_height <= cMaxBlockSize));
+				
 		color_rgba pixels[cMaxBlockSize * cMaxBlockSize];
+		
+		// Notice here we default all texels to (0,0,0,255) - some block unpackers like BC4/5 only write certain channels.
 		for (uint32_t i = 0; i < cMaxBlockSize * cMaxBlockSize; i++)
 			pixels[i] = g_black_color;
 
@@ -1612,7 +1252,7 @@ namespace basisu
 			{
 				const void* pBlock = get_block_ptr(bx, by);
 
-				if (!unpack_block(m_fmt, pBlock, pixels))
+				if (!unpack_block(m_fmt, pBlock, pixels, astc_srgb))
 					success = false;
 
 				img.set_block_clipped(pixels, bx * m_block_width, by * m_block_height, m_block_width, m_block_height);
@@ -1684,6 +1324,16 @@ namespace basisu
 		KTX_COMPRESSED_SRGB_ALPHA_BPTC_UNORM = 0x8E8D,
 		KTX_COMPRESSED_RGB_BPTC_SIGNED_FLOAT = 0x8E8E,
 		KTX_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT = 0x8E8F,
+
+		// sRGB GL enums, emitted when exporting an sRGB source (EXT_texture_sRGB / ETC2 / BPTC).
+		// BC7's sRGB enum is KTX_COMPRESSED_SRGB_ALPHA_BPTC_UNORM = 0x8E8D, already defined above.
+		KTX_COMPRESSED_SRGB_S3TC_DXT1_EXT = 0x8C4C,        // BC1 RGB, sRGB
+		KTX_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT = 0x8C4F,  // BC3, sRGB
+		KTX_COMPRESSED_SRGB8_ETC2 = 0x9275,                // ETC2 RGB, sRGB
+		KTX_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC = 0x9279,     // ETC2 RGBA, sRGB
+		KTX_COMPRESSED_SRGB_PVRTC_4BPPV1_EXT = 0x8A55,        // PVRTC1 4bpp RGB, sRGB (EXT_pvrtc_sRGB)
+		KTX_COMPRESSED_SRGB_ALPHA_PVRTC_4BPPV1_EXT = 0x8A57,  // PVRTC1 4bpp RGBA, sRGB (EXT_pvrtc_sRGB)
+
 		KTX_COMPRESSED_RGB_PVRTC_4BPPV1_IMG = 0x8C00,
 		KTX_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG = 0x8C02,
 		
@@ -1750,7 +1400,7 @@ namespace basisu
 	};
 
 	// Input is a texture array of mipmapped gpu_image's: gpu_images[array_index][level_index]
-	bool create_ktx_texture_file(uint8_vec &ktx_data, const basisu::vector<gpu_image_vec>& gpu_images, bool cubemap_flag)
+	bool create_ktx_texture_file(uint8_vec &ktx_data, const basisu::vector<gpu_image_vec>& gpu_images, bool cubemap_flag, bool astc_srgb_flag)
 	{
 		if (!gpu_images.size())
 		{
@@ -1831,12 +1481,12 @@ namespace basisu
 		case texture_format::cBC1_NV:
 		case texture_format::cBC1_AMD:
 		{
-			internal_fmt = KTX_COMPRESSED_RGB_S3TC_DXT1_EXT;
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGB_S3TC_DXT1_EXT : KTX_COMPRESSED_SRGB_S3TC_DXT1_EXT;
 			break;
 		}
 		case texture_format::cBC3:
 		{
-			internal_fmt = KTX_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_S3TC_DXT5_EXT : KTX_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT;
 			base_internal_fmt = KTX_RGBA;
 			break;
 		}
@@ -1855,62 +1505,147 @@ namespace basisu
 		case texture_format::cETC1:
 		case texture_format::cETC1S:
 		{
+			// ETC1 has no sRGB GL enum; it is always written as linear ETC1, never
+			// relabeled as ETC2.
 			internal_fmt = KTX_ETC1_RGB8_OES;
 			break;
 		}
 		case texture_format::cETC2_RGB:
 		{
-			internal_fmt = KTX_COMPRESSED_RGB8_ETC2;
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGB8_ETC2 : KTX_COMPRESSED_SRGB8_ETC2;
 			break;
 		}
 		case texture_format::cETC2_RGBA:
 		{
-			internal_fmt = KTX_COMPRESSED_RGBA8_ETC2_EAC;
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA8_ETC2_EAC : KTX_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC;
 			base_internal_fmt = KTX_RGBA;
 			break;
 		}
 		case texture_format::cBC6HSigned:
 		{
 			internal_fmt = KTX_COMPRESSED_RGB_BPTC_SIGNED_FLOAT;
-			base_internal_fmt = KTX_RGBA;
+			base_internal_fmt = KTX_RGB;
 			break;
 		}
 		case texture_format::cBC6HUnsigned:
 		{
 			internal_fmt = KTX_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT;
-			base_internal_fmt = KTX_RGBA;
+			base_internal_fmt = KTX_RGB;
 			break;
 		}
 		case texture_format::cBC7:
 		{
-			internal_fmt = KTX_COMPRESSED_RGBA_BPTC_UNORM;
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_BPTC_UNORM : KTX_COMPRESSED_SRGB_ALPHA_BPTC_UNORM;
 			base_internal_fmt = KTX_RGBA;
 			break;
 		}
 		case texture_format::cPVRTC1_4_RGB:
 		{
-			internal_fmt = KTX_COMPRESSED_RGB_PVRTC_4BPPV1_IMG;
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGB_PVRTC_4BPPV1_IMG : KTX_COMPRESSED_SRGB_PVRTC_4BPPV1_EXT;
 			break;
 		}
 		case texture_format::cPVRTC1_4_RGBA:
 		{
-			internal_fmt = KTX_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG;
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG : KTX_COMPRESSED_SRGB_ALPHA_PVRTC_4BPPV1_EXT;
 			base_internal_fmt = KTX_RGBA;
 			break;
 		}
 		case texture_format::cASTC_HDR_6x6:
 		{
 			internal_fmt = KTX_COMPRESSED_RGBA_ASTC_6x6_KHR;
-			// TODO: should we write RGB? We don't support generating HDR 6x6 with alpha.
-			base_internal_fmt = KTX_RGBA; 
+			// RGBA is correct: ASTC HDR can have alpha, and the RGBA ASTC token's base format is RGBA.
+			base_internal_fmt = KTX_RGBA;
 			break;
 		}
 		// We use different enums for HDR vs. LDR ASTC, but internally they are both just ASTC.
-		case texture_format::cASTC_LDR_4x4:
 		case texture_format::cASTC_HDR_4x4:
-		case texture_format::cUASTC_HDR_4x4: // UASTC_HDR is just HDR-only ASTC
+		case texture_format::cUASTC_HDR_4x4: // UASTC_HDR 4x4 is just HDR-only ASTC
 		{
 			internal_fmt = KTX_COMPRESSED_RGBA_ASTC_4x4_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_4x4:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_4x4_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_5x4:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_5x4_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_5x5:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_5x5_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_6x5:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_6x5_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_6x6:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_6x6_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_8x5:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_8x5_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_8x6:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_8x6_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_10x5:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_10x5_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_10x6:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_10x6_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_8x8:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_8x8_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_10x8:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_10x8_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_10x10:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_10x10_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_12x10:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_12x10_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR;
+			base_internal_fmt = KTX_RGBA;
+			break;
+		}
+		case texture_format::cASTC_LDR_12x12:
+		{
+			internal_fmt = !astc_srgb_flag ? KTX_COMPRESSED_RGBA_ASTC_12x12_KHR : KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR;
 			base_internal_fmt = KTX_RGBA;
 			break;
 		}
@@ -1983,6 +1718,12 @@ namespace basisu
 		header.m_numberOfFaces = cubemap_flag ? 6 : 1;
 
 		append_vector(ktx_data, (uint8_t*)&header, sizeof(header));
+
+		fmt_debug_printf("create_ktx_texture_file: {}x{}, astc_srgb_flag: {}, basis::texture_format: {}, internalFormat: {}, baseInternalFormat: {}, arrayElements: {}, faces: {}, mipLevels: {}\n",
+			width, height, astc_srgb_flag, (uint32_t)fmt,
+			(uint32_t)header.m_glInternalFormat, (uint32_t)header.m_glBaseInternalFormat,
+			(uint32_t)header.m_numberOfArrayElements, (uint32_t)header.m_numberOfFaces,
+			(uint32_t)header.m_numberOfMipmapLevels);
 
 		for (uint32_t level_index = 0; level_index < total_levels; level_index++)
 		{
@@ -2064,6 +1805,19 @@ namespace basisu
 
 		return true;
 	}
+
+	static uint32_t mipmap_reduce(uint32_t value, uint32_t level)
+	{
+		for (uint32_t i = 0; i < level; i++) 
+		{
+			if (value <= 1u)
+				return 1;
+
+			value = value >> 1u;
+		}
+
+		return value;
+	}
 		
 	bool read_uncompressed_dds_file(const char* pFilename, basisu::vector<image> &ldr_mips,	basisu::vector<imagef>& hdr_mips)
 	{
@@ -2077,7 +1831,7 @@ namespace basisu
 		uint8_vec filedata;
 		if (extension == "ktx")
 		{
-			if (!create_ktx_texture_file(filedata, g, cubemap_flag))
+			if (!create_ktx_texture_file(filedata, g, cubemap_flag, use_srgb_format))
 				return false;
 		}
 		else if (extension == "pvr")
@@ -2151,12 +1905,88 @@ namespace basisu
 		return fclose(pFile) != EOF;
 	}
 
+#pragma pack(push, 1)
+	struct astc_file_header
+	{
+		uint8_t m_sig[4];
+		uint8_t m_block_dim[3];
+		uint8_t m_width[3];
+		uint8_t m_height[3];
+		uint8_t m_depth[3];
+	};
+#pragma pack(pop)
+
+	bool read_astc_file(const uint8_t *pImage_data, size_t image_data_size, vector2D<astc_helpers::astc_block>& blocks, uint32_t &block_width, uint32_t &block_height, uint32_t &width, uint32_t &height)
+	{
+		block_width = 0;
+		block_height = 0;
+		width = 0;
+		height = 0;
+		blocks.resize(0, 0);
+
+		if (image_data_size < (sizeof(astc_file_header) + sizeof(astc_helpers::astc_block)))
+			return false;
+
+		const astc_file_header* pHeader = reinterpret_cast<const astc_file_header*>(pImage_data);
+
+		if ((pHeader->m_sig[0] != 0x13) || (pHeader->m_sig[1] != 0xAB) || (pHeader->m_sig[2] != 0xA1) || (pHeader->m_sig[3] != 0x5C))
+			return false;
+
+		const uint32_t block_depth = pHeader->m_block_dim[2];
+		if (block_depth != 1)
+			return false;
+
+		if ((pHeader->m_depth[0] != 1) || (pHeader->m_depth[1] != 0) || (pHeader->m_depth[2] != 0))
+			return false;
+
+		block_width = pHeader->m_block_dim[0];
+		block_height = pHeader->m_block_dim[1];
+				
+		if (!astc_helpers::is_valid_block_size(block_width, block_height))
+			return false;
+				
+		width = pHeader->m_width[0] | ((uint32_t)pHeader->m_width[1] << 8u) | ((uint32_t)pHeader->m_width[2] << 16u);
+		height = pHeader->m_height[0] | ((uint32_t)pHeader->m_height[1] << 8u) | ((uint32_t)pHeader->m_height[2] << 16u);
+		
+		const uint32_t MAX_DIM = 32768;
+		if ((!width) || (width > MAX_DIM) || (!height) || (height > MAX_DIM))
+			return false;
+
+		const uint32_t num_blocks_x = (width + block_width - 1) / block_width;
+		const uint32_t num_blocks_y = (height + block_height - 1) / block_height;
+		const uint32_t total_blocks = num_blocks_x * num_blocks_y;
+		
+		size_t total_expected_size = sizeof(astc_file_header) + (size_t)total_blocks * sizeof(astc_helpers::astc_block);
+		if (image_data_size < total_expected_size)
+			return false;
+
+		if (!blocks.try_resize(num_blocks_x, num_blocks_y))
+			return false;
+
+		memcpy(blocks.get_ptr(), pImage_data + sizeof(astc_file_header), (size_t)total_blocks * sizeof(astc_helpers::astc_block));
+
+		return true;
+	}
+
+	bool read_astc_file(const char* pFilename, vector2D<astc_helpers::astc_block>& blocks, uint32_t& block_width, uint32_t& block_height, uint32_t& width, uint32_t& height)
+	{
+		uint8_vec file_data;
+		if (!read_file_to_vec(pFilename, file_data))
+			return false;
+
+		if (!file_data.size())
+			return false;
+
+		return read_astc_file(file_data.get_ptr(), file_data.size(), blocks, block_width, block_height, width, height);
+	}
+
 	// The .astc texture format is readable using ARM's astcenc, AMD Compressonator, and other engines/tools. It oddly doesn't support mipmaps, limiting 
 	// its usefulness/relevance.
 	// https://github.com/ARM-software/astc-encoder/blob/main/Docs/FileFormat.md
 	bool write_astc_file(const char* pFilename, const void* pBlocks, uint32_t block_width, uint32_t block_height, uint32_t dim_x, uint32_t dim_y)
 	{
-		assert(pBlocks && (block_width >= 4) && (block_height >= 4) && (dim_x > 0) && (dim_y > 0));
+		assert(pBlocks && (dim_x > 0) && (dim_y > 0));
+		assert(astc_helpers::is_valid_block_size(block_width, block_height));
 
 		uint8_vec file_data;
 		file_data.push_back(0x13);
@@ -2193,6 +2023,398 @@ namespace basisu
 
 		return write_vec_to_file(pFilename, file_data);
 	}
-		
+
+	bool write_uncompressed_rgba32_dds(uint8_vec& dds_data, const basisu::vector<image_vec>& images, bool cubemap_flag, bool use_srgb_format)
+	{
+		// Godot does not include the optional QOI/TinyDDS command-line helpers.
+		return false;
+	}
+
+	// Shared by transcode_ktx2_to_dds()/transcode_ktx2_to_ktx(): transcodes every
+	// (array layer, cubemap face, mip level) of an already-start_transcoding()'d
+	// ktx2_transcoder to the block GPU format (fmt, with its basisu::texture_format
+	// equivalent bfmt) and builds the [slice][mip] gpu_image array the DDS/KTX
+	// writers consume. Slices are ordered layer-major then cubemap face. Returns
+	// false on any transcode failure.
+	static bool transcode_ktx2_to_block_image_slices(basist::ktx2_transcoder& transcoder, basist::transcoder_texture_format fmt, texture_format bfmt, basisu::vector<gpu_image_vec>& slices, uint32_t decode_flags)
+	{
+		using namespace basist;
+
+		const uint32_t levels = transcoder.get_levels();
+		const uint32_t faces = transcoder.get_faces();
+		const uint32_t layers = maximum<uint32_t>(1, transcoder.get_layers());
+
+		slices.resize(0);
+		slices.reserve(layers * faces);
+
+		for (uint32_t layer = 0; layer < layers; layer++)
+		{
+			for (uint32_t face = 0; face < faces; face++)
+			{
+				gpu_image_vec mips;
+				mips.resize(levels);
+
+				for (uint32_t level = 0; level < levels; level++)
+				{
+					ktx2_image_level_info li;
+					if (!transcoder.get_image_level_info(li, level, layer, face))
+					{
+						error_printf("transcode_ktx2_to_block_image_slices: get_image_level_info(L%u, layer %u, face %u) failed\n", level, layer, face);
+						return false;
+					}
+
+					gpu_image& gi = mips[level];
+					gi.init(bfmt, li.m_orig_width, li.m_orig_height);
+
+					if (!transcoder.transcode_image_level(level, layer, face, gi.get_ptr(), gi.get_total_blocks(), fmt, decode_flags))
+					{
+						error_printf("transcode_ktx2_to_block_image_slices: transcode_image_level(L%u, layer %u, face %u) failed\n", level, layer, face);
+						return false;
+					}
+				}
+
+				slices.push_back(mips);
+			}
+		}
+
+		return true;
+	}
+
+	bool transcode_ktx2_to_dds(basist::ktx2_transcoder& transcoder, basist::transcoder_texture_format fmt, uint8_vec& dds_data, int srgb_mode, uint32_t decode_flags)
+	{
+		using namespace basist;
+
+		dds_data.resize(0);
+
+		// Validate the requested output format: BC1/BC3/BC4/BC5/BC6H/BC7 or RGBA32 only.
+		const bool is_rgba32 = (fmt == transcoder_texture_format::cTFRGBA32);
+		const texture_format bfmt = basis_get_basisu_texture_format(fmt);
+		if ((!is_rgba32) && (!does_dds_support_format(bfmt)))
+		{
+			error_printf("transcode_ktx2_to_dds: output format \"%s\" can't be written to DDS (must be BC1/BC3/BC4/BC5/BC6H/BC7 or RGBA32)\n", basis_get_format_name(fmt));
+			return false;
+		}
+
+		if (!basis_is_format_supported(fmt, transcoder.get_basis_tex_format()))
+		{
+			error_printf("transcode_ktx2_to_dds: output format \"%s\" isn't a supported transcode target for this input texture\n", basis_get_format_name(fmt));
+			return false;
+		}
+
+		if (!transcoder.start_transcoding())
+		{
+			error_printf("transcode_ktx2_to_dds: start_transcoding() failed\n");
+			return false;
+		}
+
+		const uint32_t levels = transcoder.get_levels();
+		const uint32_t faces = transcoder.get_faces();
+		const uint32_t layers = maximum<uint32_t>(1, transcoder.get_layers());
+		const bool cubemap_flag = (faces == 6);
+		// srgb_mode: -1 = auto (use the KTX2's transfer function), 0 = force linear, 1 = force sRGB.
+		const bool srgb = (srgb_mode < 0) ? transcoder.is_srgb() : (srgb_mode != 0);
+
+		if ((!levels) || (!faces))
+		{
+			error_printf("transcode_ktx2_to_dds: degenerate texture (levels=%u, faces=%u)\n", levels, faces);
+			return false;
+		}
+
+		// Build the slice list ordered layer-major then face -- the layout
+		// write_dds_file() / write_uncompressed_rgba32_dds() expect for 2D, 2D arrays,
+		// cubemaps, and cubemap arrays (with or without mips).
+		if (is_rgba32)
+		{
+		// Godot does not include the optional QOI/TinyDDS command-line helpers.
+		return false;
+	}
+		else
+		{
+			basisu::vector<gpu_image_vec> slices;
+			if (!transcode_ktx2_to_block_image_slices(transcoder, fmt, bfmt, slices, decode_flags))
+				return false;
+
+			if (!write_dds_file(dds_data, slices, cubemap_flag, srgb))
+			{
+				error_printf("transcode_ktx2_to_dds: write_dds_file() failed\n");
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	bool does_ktx_support_format(texture_format fmt)
+	{
+		switch (fmt)
+		{
+		case texture_format::cBC1:
+		case texture_format::cBC1_NV:
+		case texture_format::cBC1_AMD:
+		case texture_format::cBC3:
+		case texture_format::cBC4:
+		case texture_format::cBC5:
+		case texture_format::cBC6HSigned:
+		case texture_format::cBC6HUnsigned:
+		case texture_format::cBC7:
+		case texture_format::cETC1:
+		case texture_format::cETC1S:
+		case texture_format::cETC2_RGB:
+		case texture_format::cETC2_RGBA:
+		case texture_format::cETC2_R11_EAC:
+		case texture_format::cETC2_RG11_EAC:
+		case texture_format::cPVRTC1_4_RGB:
+		case texture_format::cPVRTC1_4_RGBA:
+		case texture_format::cPVRTC2_4_RGBA:
+		case texture_format::cUASTC4x4:
+		case texture_format::cASTC_LDR_4x4:
+		case texture_format::cASTC_LDR_5x4:
+		case texture_format::cASTC_LDR_5x5:
+		case texture_format::cASTC_LDR_6x5:
+		case texture_format::cASTC_LDR_6x6:
+		case texture_format::cASTC_LDR_8x5:
+		case texture_format::cASTC_LDR_8x6:
+		case texture_format::cASTC_LDR_10x5:
+		case texture_format::cASTC_LDR_10x6:
+		case texture_format::cASTC_LDR_8x8:
+		case texture_format::cASTC_LDR_10x8:
+		case texture_format::cASTC_LDR_10x10:
+		case texture_format::cASTC_LDR_12x10:
+		case texture_format::cASTC_LDR_12x12:
+		case texture_format::cASTC_HDR_4x4:
+		case texture_format::cUASTC_HDR_4x4:
+		case texture_format::cASTC_HDR_6x6:
+			return true;
+		default:
+			break;
+		}
+		return false;
+	}
+
+	bool transcode_ktx2_to_ktx(basist::ktx2_transcoder& transcoder, basist::transcoder_texture_format fmt, uint8_vec& ktx_data, int srgb_mode, uint32_t decode_flags)
+	{
+		using namespace basist;
+
+		ktx_data.resize(0);
+
+		// Validate: must be a compressed format the KTX1 writer supports. Uncompressed
+		// (RGBA32/half/float/9e5) is intentionally not supported here yet.
+		const texture_format bfmt = basis_get_basisu_texture_format(fmt);
+		if (!does_ktx_support_format(bfmt))
+		{
+			error_printf("transcode_ktx2_to_ktx: output format \"%s\" can't be written to a compressed KTX file\n", basis_get_format_name(fmt));
+			return false;
+		}
+
+		if (!basis_is_format_supported(fmt, transcoder.get_basis_tex_format()))
+		{
+			error_printf("transcode_ktx2_to_ktx: output format \"%s\" isn't a supported transcode target for this input texture\n", basis_get_format_name(fmt));
+			return false;
+		}
+
+		if (!transcoder.start_transcoding())
+		{
+			error_printf("transcode_ktx2_to_ktx: start_transcoding() failed\n");
+			return false;
+		}
+
+		const uint32_t levels = transcoder.get_levels();
+		const uint32_t faces = transcoder.get_faces();
+		const bool cubemap_flag = (faces == 6);
+		// srgb_mode: -1 = auto (KTX2's transfer function), 0 = force linear, 1 = force sRGB.
+		// Selects the sRGB GL enum variants in create_ktx_texture_file() for the formats
+		// that have them (BC1/BC3/BC7, ETC2, PVRTC1, ASTC LDR); ignored for formats with
+		// no sRGB variant (BC4/BC5/BC6H/ETC1/PVRTC2).
+		const bool srgb = (srgb_mode < 0) ? transcoder.is_srgb() : (srgb_mode != 0);
+
+		if ((!levels) || (!faces))
+		{
+			error_printf("transcode_ktx2_to_ktx: degenerate texture (levels=%u, faces=%u)\n", levels, faces);
+			return false;
+		}
+
+		basisu::vector<gpu_image_vec> slices;
+		if (!transcode_ktx2_to_block_image_slices(transcoder, fmt, bfmt, slices, decode_flags))
+			return false;
+
+		if (!create_ktx_texture_file(ktx_data, slices, cubemap_flag, srgb))
+		{
+			error_printf("transcode_ktx2_to_ktx: create_ktx_texture_file() failed\n");
+			return false;
+		}
+
+		return true;
+	}
+
+	// Returns a friendly name for the common DDS formats we care about (BC1-7 and
+	// the usual LDR/HDR uncompressed variants); returns nullptr for anything else so
+	// the caller can fall back to printing the raw hex value. For --tinydds_info.
+	static const char* tinydds_format_to_string(uint32_t fmt)
+	{
+		// Godot does not include the optional QOI/TinyDDS command-line helpers.
+		return nullptr;
+	}
+
+	bool print_dds_info(const char* pFilename)
+	{
+		// Godot does not include the optional QOI/TinyDDS command-line helpers.
+		return false;
+	}
+
+	// Friendly name for the KTX1 glInternalFormat GL enums we care about (the set
+	// create_ktx_texture_file() writes, plus a few common extras). nullptr otherwise
+	// so the caller prints the raw hex. For --ktx_info.
+	static const char* ktx_gl_internal_format_name(uint32_t fmt)
+	{
+		switch (fmt)
+		{
+		case KTX_RGB:                                  return "RGB (uncompressed)";
+		case KTX_RGBA:                                 return "RGBA (uncompressed)";
+		case KTX_RED:                                  return "RED (uncompressed)";
+		case KTX_RG:                                   return "RG (uncompressed)";
+		case KTX_ETC1_RGB8_OES:                        return "ETC1 RGB8";
+		case KTX_COMPRESSED_RGB_S3TC_DXT1_EXT:         return "BC1 (DXT1 RGB)";
+		case KTX_COMPRESSED_SRGB_S3TC_DXT1_EXT:        return "BC1 (DXT1 RGB sRGB)";
+		case KTX_COMPRESSED_RGBA_S3TC_DXT5_EXT:        return "BC3 (DXT5 RGBA)";
+		case KTX_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT:  return "BC3 (DXT5 RGBA sRGB)";
+		case KTX_COMPRESSED_RED_RGTC1_EXT:             return "BC4 (RGTC1 R)";
+		case KTX_COMPRESSED_RED_GREEN_RGTC2_EXT:       return "BC5 (RGTC2 RG)";
+		case KTX_COMPRESSED_RGB8_ETC2:                 return "ETC2 RGB8";
+		case KTX_COMPRESSED_SRGB8_ETC2:                return "ETC2 RGB8 sRGB";
+		case KTX_COMPRESSED_RGBA8_ETC2_EAC:            return "ETC2 RGBA8 EAC";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC:     return "ETC2 RGBA8 EAC sRGB";
+		case KTX_COMPRESSED_RGBA_BPTC_UNORM:           return "BC7 (BPTC UNORM)";
+		case KTX_COMPRESSED_SRGB_ALPHA_BPTC_UNORM:     return "BC7 (BPTC sRGB)";
+		case KTX_COMPRESSED_RGB_BPTC_SIGNED_FLOAT:     return "BC6H (signed float)";
+		case KTX_COMPRESSED_RGB_BPTC_UNSIGNED_FLOAT:   return "BC6H (unsigned float)";
+		case KTX_COMPRESSED_RGB_PVRTC_4BPPV1_IMG:      return "PVRTC1 4bpp RGB";
+		case KTX_COMPRESSED_SRGB_PVRTC_4BPPV1_EXT:       return "PVRTC1 4bpp RGB sRGB";
+		case KTX_COMPRESSED_RGBA_PVRTC_4BPPV1_IMG:     return "PVRTC1 4bpp RGBA";
+		case KTX_COMPRESSED_SRGB_ALPHA_PVRTC_4BPPV1_EXT: return "PVRTC1 4bpp RGBA sRGB";
+		case KTX_COMPRESSED_RGBA_PVRTC_4BPPV2_IMG:     return "PVRTC2 4bpp RGBA";
+		case KTX_COMPRESSED_R11_EAC:                   return "EAC R11";
+		case KTX_COMPRESSED_RG11_EAC:                  return "EAC RG11";
+		case KTX_COMPRESSED_RGBA_UASTC_4x4_KHR:        return "UASTC 4x4";
+		case KTX_ATC_RGB_AMD:                          return "ATC RGB";
+		case KTX_ATC_RGBA_INTERPOLATED_ALPHA_AMD:      return "ATC RGBA (interpolated alpha)";
+		case KTX_COMPRESSED_RGB_FXT1_3DFX:             return "FXT1 RGB";
+		case KTX_COMPRESSED_RGBA_FXT1_3DFX:            return "FXT1 RGBA";
+		case KTX_COMPRESSED_RGBA_ASTC_4x4_KHR:         return "ASTC 4x4";
+		case KTX_COMPRESSED_RGBA_ASTC_5x4_KHR:         return "ASTC 5x4";
+		case KTX_COMPRESSED_RGBA_ASTC_5x5_KHR:         return "ASTC 5x5";
+		case KTX_COMPRESSED_RGBA_ASTC_6x5_KHR:         return "ASTC 6x5";
+		case KTX_COMPRESSED_RGBA_ASTC_6x6_KHR:         return "ASTC 6x6";
+		case KTX_COMPRESSED_RGBA_ASTC_8x5_KHR:         return "ASTC 8x5";
+		case KTX_COMPRESSED_RGBA_ASTC_8x6_KHR:         return "ASTC 8x6";
+		case KTX_COMPRESSED_RGBA_ASTC_8x8_KHR:         return "ASTC 8x8";
+		case KTX_COMPRESSED_RGBA_ASTC_10x5_KHR:        return "ASTC 10x5";
+		case KTX_COMPRESSED_RGBA_ASTC_10x6_KHR:        return "ASTC 10x6";
+		case KTX_COMPRESSED_RGBA_ASTC_10x8_KHR:        return "ASTC 10x8";
+		case KTX_COMPRESSED_RGBA_ASTC_10x10_KHR:       return "ASTC 10x10";
+		case KTX_COMPRESSED_RGBA_ASTC_12x10_KHR:       return "ASTC 12x10";
+		case KTX_COMPRESSED_RGBA_ASTC_12x12_KHR:       return "ASTC 12x12";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_4x4_KHR:   return "ASTC 4x4 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_5x4_KHR:   return "ASTC 5x4 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_5x5_KHR:   return "ASTC 5x5 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_6x5_KHR:   return "ASTC 6x5 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_6x6_KHR:   return "ASTC 6x6 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_8x5_KHR:   return "ASTC 8x5 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_8x6_KHR:   return "ASTC 8x6 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_8x8_KHR:   return "ASTC 8x8 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x5_KHR:  return "ASTC 10x5 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x6_KHR:  return "ASTC 10x6 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x8_KHR:  return "ASTC 10x8 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_10x10_KHR: return "ASTC 10x10 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_12x10_KHR: return "ASTC 12x10 sRGB";
+		case KTX_COMPRESSED_SRGB8_ALPHA8_ASTC_12x12_KHR: return "ASTC 12x12 sRGB";
+		default:                                       return nullptr;
+		}
+	}
+
+	bool print_ktx_info(const char* pFilename)
+	{
+		FILE* pFile = fopen_safe(pFilename, "rb");
+		if (!pFile)
+		{
+			error_printf("Can't open .ktx file \"%s\"\n", pFilename);
+			return false;
+		}
+
+		ktx_header hdr;
+		hdr.clear();
+		const size_t n = fread(&hdr, 1, sizeof(hdr), pFile);
+		fclose(pFile);
+
+		if (n != sizeof(hdr))
+		{
+			error_printf("Failed reading KTX header from \"%s\" (file too small)\n", pFilename);
+			return false;
+		}
+
+		if (memcmp(hdr.m_identifier, g_ktx_file_id, sizeof(g_ktx_file_id)) != 0)
+		{
+			error_printf("File \"%s\" is not a KTX1 file (bad identifier)\n", pFilename);
+			return false;
+		}
+
+		// The endianness field is 0x04030201 stored in the file's byte order. If we
+		// read back KTX_ENDIAN the file matches our (little-endian) byte order; if we
+		// read KTX_OPPOSITE_ENDIAN every uint32 field must be byte-swapped.
+		const uint32_t endianness = hdr.m_endianness;
+		bool swap;
+		if (endianness == KTX_ENDIAN)
+			swap = false;
+		else if (endianness == KTX_OPPOSITE_ENDIAN)
+			swap = true;
+		else
+		{
+			error_printf("File \"%s\" has an invalid KTX endianness field (0x%08X)\n", pFilename, endianness);
+			return false;
+		}
+
+		// packed_uint<4> yields a little-endian uint32; swap it for an opposite-endian file.
+		auto rd = [swap](uint32_t v) -> uint32_t
+		{
+			if (!swap)
+				return v;
+			return ((v >> 24) & 0xFFu) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | ((v << 24) & 0xFF000000u);
+		};
+
+		const uint32_t gl_type = rd(hdr.m_glType);
+		const uint32_t gl_type_size = rd(hdr.m_glTypeSize);
+		const uint32_t gl_format = rd(hdr.m_glFormat);
+		const uint32_t gl_internal_format = rd(hdr.m_glInternalFormat);
+		const uint32_t gl_base_internal_format = rd(hdr.m_glBaseInternalFormat);
+		const uint32_t pixel_width = rd(hdr.m_pixelWidth);
+		const uint32_t pixel_height = rd(hdr.m_pixelHeight);
+		const uint32_t pixel_depth = rd(hdr.m_pixelDepth);
+		const uint32_t array_elements = rd(hdr.m_numberOfArrayElements);
+		const uint32_t faces = rd(hdr.m_numberOfFaces);
+		const uint32_t mip_levels = rd(hdr.m_numberOfMipmapLevels);
+		const uint32_t kvd_bytes = rd(hdr.m_bytesOfKeyValueData);
+
+		const char* pName = ktx_gl_internal_format_name(gl_internal_format);
+
+		printf("KTX1 file: %s\n", pFilename);
+		printf("  Endianness            : 0x%08X (%s)\n", endianness, swap ? "opposite -- byte-swapped" : "native");
+		printf("  glType                : 0x%X (%u)%s\n", gl_type, gl_type, gl_type ? "" : "  (0 = compressed)");
+		printf("  glTypeSize            : %u\n", gl_type_size);
+		printf("  glFormat              : 0x%X (%u)%s\n", gl_format, gl_format, gl_format ? "" : "  (0 = compressed)");
+		if (pName)
+			printf("  glInternalFormat      : 0x%X (%u)  %s\n", gl_internal_format, gl_internal_format, pName);
+		else
+			printf("  glInternalFormat      : 0x%X (%u)\n", gl_internal_format, gl_internal_format);
+		printf("  glBaseInternalFormat  : 0x%X (%u)\n", gl_base_internal_format, gl_base_internal_format);
+		printf("  pixelWidth            : %u\n", pixel_width);
+		printf("  pixelHeight           : %u%s\n", pixel_height, pixel_height ? "" : "  (1D texture)");
+		printf("  pixelDepth            : %u%s\n", pixel_depth, pixel_depth ? "" : "  (non-3D)");
+		printf("  numberOfArrayElements : %u%s\n", array_elements, array_elements ? "" : "  (not an array)");
+		printf("  numberOfFaces         : %u%s\n", faces, (faces == 6) ? "  (cubemap)" : "");
+		printf("  numberOfMipmapLevels  : %u\n", mip_levels);
+		printf("  bytesOfKeyValueData   : %u\n", kvd_bytes);
+
+		return true;
+	}
+
 } // basisu
 

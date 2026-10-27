@@ -1,4 +1,12 @@
 def can_build(env, platform):
+    # Declare dependencies before SConstruct checks them. Registering a disabled
+    # FFmpeg dependency in configure() can leave module ordering waiting forever.
+    dependencies = ["opus"]
+    if env["module_ffmpeg_enabled"]:
+        dependencies.append("ffmpeg")
+    else:
+        dependencies += ["ogg", "vorbis"]
+    env.module_add_dependencies("webm", dependencies)
     if env["arch"].startswith("rv"):
         return False
     if platform == "iphone":
@@ -11,7 +19,7 @@ def can_build(env, platform):
 
 
 def configure(env):
-    env.module_add_dependencies("webm", ["opus", "ffmpeg"])
+    pass
 
 
 def get_doc_classes():

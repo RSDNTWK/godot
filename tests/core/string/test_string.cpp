@@ -34,6 +34,8 @@ TEST_FORCE_LINK(test_string)
 
 #include "core/string/ustring.h"
 
+#include <limits>
+
 namespace TestString {
 
 int u32scmp(const char32_t *l, const char32_t *r) {
@@ -2243,6 +2245,19 @@ TEST_CASE("[String][URL] Parse URL") {
 	CHECK_URL("https://godotengine.org:88888", "https://", "godotengine.org", 88888, "", "", Error::ERR_INVALID_PARAMETER);
 
 #undef CHECK_URL
+}
+
+TEST_CASE("[String] Scientific formatting preserves float and double boundaries") {
+	CHECK(String::num_scientific(std::numeric_limits<double>::max()) == "1.7976931348623157e+308");
+	CHECK(String::num_scientific(std::numeric_limits<double>::lowest()) == "-1.7976931348623157e+308");
+	CHECK(String::num_scientific(std::numeric_limits<double>::min()) == "2.2250738585072014e-308");
+	CHECK(String::num_scientific(std::numeric_limits<double>::denorm_min()) == "5e-324");
+	CHECK(String::num_scientific(std::numeric_limits<float>::max()) == "3.4028235e+38");
+	CHECK(String::num_scientific(std::numeric_limits<float>::lowest()) == "-3.4028235e+38");
+	CHECK(String::num_scientific(std::numeric_limits<float>::min()) == "1.1754944e-38");
+	CHECK(String::num_scientific(std::numeric_limits<float>::denorm_min()) == "1e-45");
+	CHECK(String::num_scientific(0.1f) == "0.1");
+	CHECK(String::num_scientific(-0.0f) == "-0");
 }
 
 } // namespace TestString

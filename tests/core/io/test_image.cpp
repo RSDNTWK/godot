@@ -487,4 +487,47 @@ TEST_CASE("[Image] Convert image") {
 	CHECK_MESSAGE(image2->get_data() == image_data, "Image conversion to invalid type (Image::FORMAT_MAX + 1) should not alter image.");
 }
 
+#if defined(TOOLS_ENABLED) && defined(MODULE_BASIS_UNIVERSAL_ENABLED) && defined(MODULE_KTX_ENABLED)
+TEST_CASE("[SceneTree][Image] Basis KTX2 preserves pixel transfer function") {
+	REQUIRE(Image::basis_universal_packer != nullptr);
+	if (Image::basis_universal_packer == nullptr) {
+		return;
+	}
+
+	Ref<Image> source = memnew(Image(16, 16, false, Image::FORMAT_RGBA8));
+	source->fill(Color(0.25, 0.5, 0.75, 0.5));
+	Image::BasisUniversalPackerParams params;
+	params.uastc_level = 0;
+	params.rdo_quality_loss = 0;
+	const Vector<uint8_t> packed = Image::basis_universal_packer(source, Image::USED_CHANNELS_RGBA, params);
+	REQUIRE(packed.size() > 4);
+	if (packed.size() <= 4) {
+		return;
+	}
+
+	// The Godot format word precedes the standard KTX2 payload.
+	Ref<Image> decoded = memnew(Image);
+	const Error load_error = decoded->load_ktx_from_buffer(packed.slice(4));
+	REQUIRE(load_error == OK);
+	if (load_error != OK) {
+		return;
+	}
+	if (decoded->is_compressed()) {
+		const Error decompress_error = decoded->decompress();
+		REQUIRE(decompress_error == OK);
+		if (decompress_error != OK) {
+			return;
+		}
+	}
+	CHECK(decoded->get_width() == source->get_width());
+	CHECK(decoded->get_height() == source->get_height());
+	const Color expected = source->get_pixel(8, 8);
+	const Color actual = decoded->get_pixel(8, 8);
+	CHECK(Math::abs(actual.r - expected.r) < 0.03);
+	CHECK(Math::abs(actual.g - expected.g) < 0.03);
+	CHECK(Math::abs(actual.b - expected.b) < 0.03);
+	CHECK(Math::abs(actual.a - expected.a) < 0.03);
+}
+#endif
+
 } // namespace TestImage

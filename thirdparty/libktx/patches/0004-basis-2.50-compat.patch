@@ -1,0 +1,12 @@
+diff --git a/thirdparty/libktx/lib/basis_transcode.cpp b/thirdparty/libktx/lib/basis_transcode.cpp
+--- a/thirdparty/libktx/lib/basis_transcode.cpp
++++ b/thirdparty/libktx/lib/basis_transcode.cpp
+@@ -277,7 +277,7 @@
+ 
+     basis_tex_format textureFormat;
+     if (colorModel == KHR_DF_MODEL_UASTC)
+-        textureFormat = basis_tex_format::cUASTC4x4;
++        textureFormat = basis_tex_format::cUASTC_LDR_4x4;
+     else
+         textureFormat = basis_tex_format::cETC1S;
+ 

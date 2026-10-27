@@ -1,0 +1,47 @@
+diff --git a/thirdparty/openxr/src/loader/api_layer_interface.cpp b/thirdparty/openxr/src/loader/api_layer_interface.cpp
+--- a/thirdparty/openxr/src/loader/api_layer_interface.cpp
++++ b/thirdparty/openxr/src/loader/api_layer_interface.cpp
+@@ -453,16 +453,20 @@
+       _supported_extensions(supported_extensions) {}
+ 
+ ApiLayerInterface::~ApiLayerInterface() {
++#ifndef XRLOADER_DISABLE_EXCEPTION_HANDLING
+     try {
++#endif
+         std::string info_message = "ApiLayerInterface being destroyed for layer ";
+         info_message += _layer_name;
+         LoaderLogger::LogInfoMessage("", info_message);
++#ifndef XRLOADER_DISABLE_EXCEPTION_HANDLING
+     }
+     // NOLINTNEXTLINE(bugprone-empty-catch)
+     catch (...) {
+         // Need a try catch here to avoid concerns about exceptions in a destructor
+         // If logging fails here there isn't much we can do so left intentionally empty
+     }
++#endif
+ 
+     LoaderPlatformLibraryClose(_layer_library);
+ }
+diff --git a/thirdparty/openxr/src/loader/runtime_interface.cpp b/thirdparty/openxr/src/loader/runtime_interface.cpp
+--- a/thirdparty/openxr/src/loader/runtime_interface.cpp
++++ b/thirdparty/openxr/src/loader/runtime_interface.cpp
+@@ -299,15 +299,19 @@
+     : _runtime_library(runtime_library), _get_instance_proc_addr(get_instance_proc_addr) {}
+ 
+ RuntimeInterface::~RuntimeInterface() {
++#ifndef XRLOADER_DISABLE_EXCEPTION_HANDLING
+     try {
++#endif
+         std::string info_message = "RuntimeInterface being destroyed.";
+         LoaderLogger::LogInfoMessage("", info_message);
++#ifndef XRLOADER_DISABLE_EXCEPTION_HANDLING
+     }
+     // NOLINTNEXTLINE(bugprone-empty-catch)
+     catch (...) {
+         // Need a try catch here to avoid concerns about exceptions in a destructor
+         // If logging fails here there isn't much we can do so left intentionally empty
+     }
++#endif
+ 
+     {
+         std::scoped_lock<std::mutex> mlock(_dispatch_table_mutex);

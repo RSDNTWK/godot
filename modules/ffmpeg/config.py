@@ -1,4 +1,5 @@
 def can_build(env, platform):
+    env.module_add_dependencies("ffmpeg", ["ogg"])
     # FFmpeg is configured per target platform by the module build script.
     return not env["arch"].startswith("rv")
 
@@ -17,7 +18,7 @@ def get_opts(platform):
 
 
 def configure(env):
-    env.module_add_dependencies("ffmpeg", ["ogg"])
+    pass
 
 
 def get_doc_classes():

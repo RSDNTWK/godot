@@ -1,0 +1,47 @@
+diff --git a/thirdparty/glslang/SPIRV/GlslangToSpv.cpp b/thirdparty/glslang/SPIRV/GlslangToSpv.cpp
+--- a/thirdparty/glslang/SPIRV/GlslangToSpv.cpp
++++ b/thirdparty/glslang/SPIRV/GlslangToSpv.cpp
+@@ -5791,6 +5791,11 @@
+     glslang::TQualifier typeQualifier = node->getType().getQualifier();
+     TranslateMemoryDecoration(typeQualifier, topLevelDecorations, glslangIntermediate->usingVulkanMemoryModel());
+     for (auto deco : topLevelDecorations) {
++#ifdef __APPLE__
++        if (deco != spv::Decoration::Restrict &&
++            deco != spv::Decoration::RestrictPointer &&
++            deco != spv::Decoration::RestrictPointerEXT)
++#endif
+         builder.addDecoration(var, deco);
+     }
+     return var;
+diff --git a/thirdparty/glslang/glslang/Include/InfoSink.h b/thirdparty/glslang/glslang/Include/InfoSink.h
+--- a/thirdparty/glslang/glslang/Include/InfoSink.h
++++ b/thirdparty/glslang/glslang/Include/InfoSink.h
+@@ -36,9 +36,7 @@
+ #define _INFOSINK_INCLUDED_
+ 
+ #include "../Include/Common.h"
+-#if __has_include(<filesystem>)
+-#include <filesystem>
+-#endif
++//#include <filesystem>
+ #include <cmath>
+ 
+ namespace glslang {
+@@ -108,7 +106,7 @@
+ 
+         if(loc.getFilename() == nullptr && shaderFileName != nullptr && absolute) {
+         #if defined(__cpp_lib_filesystem)
+-            append(std::filesystem::absolute(shaderFileName).string());
++            append(shaderFileName);
+         #else
+             append(shaderFileName);
+         #endif
+@@ -116,7 +114,7 @@
+             std::string location = loc.getStringNameOrNum(false);
+             if (absolute) {
+         #if defined(__cpp_lib_filesystem)
+-                append(std::filesystem::absolute(location).string());
++                append(location);
+         #else
+                 append(location);
+         #endif

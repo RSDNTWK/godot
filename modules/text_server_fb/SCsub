@@ -24,4 +24,12 @@ if env["builtin_freetype"] and freetype_enabled:
     env_text_server_fb.Append(CPPDEFINES=["FT_CONFIG_OPTION_USE_BROTLI"])
     env_text_server_fb.Prepend(CPPPATH=["#thirdparty/freetype/include"])
 
-env_text_server_fb.add_source_files(env.modules_sources, "*.cpp")
+module_obj = []
+env_text_server_fb.add_source_files(module_obj, "*.cpp")
+env.modules_sources += module_obj
+
+if env["builtin_freetype"] and freetype_enabled:
+    ft_headers = env_text_server_fb.Glob("#thirdparty/freetype/include/*.h")
+    ft_headers += env_text_server_fb.Glob("#thirdparty/freetype/include/freetype/*.h")
+    ft_headers += [h for h in env_text_server_fb.Glob("#thirdparty/freetype/include/freetype/config/*.h") if h.name != "ftmodule.h"]
+    env.Depends(module_obj, ft_headers)

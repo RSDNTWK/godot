@@ -46,6 +46,8 @@ if env["builtin_harfbuzz"]:
         # "src/hb-coretext-font.cc",
         # "src/hb-coretext-shape.cc",
         # "src/hb-directwrite.cc",
+        "src/hb-ot-fetch.cc",
+        "src/hb-depend.cc",
         "src/hb-draw.cc",
         "src/hb-face-builder.cc",
         "src/hb-face.cc",
@@ -99,7 +101,6 @@ if env["builtin_harfbuzz"]:
         # "src/hb-subset-cff-common.cc",
         # "src/hb-subset-cff1.cc",
         # "src/hb-subset-cff2.cc",
-        # "src/hb-subset-cff2-to-cff1.cc",
         # "src/hb-subset-input.cc",
         # "src/hb-subset-instancer-iup.cc",
         # "src/hb-subset-instancer-solver.cc",
@@ -110,7 +111,6 @@ if env["builtin_harfbuzz"]:
         # "src/hb-subset-table-layout.cc",
         # "src/hb-subset-table-other.cc",
         # "src/hb-subset-table-var.cc",
-        "src/hb-raster.cc",
         "src/hb-raster-draw.cc",
         "src/hb-raster-image.cc",
         "src/hb-raster-paint.cc",
@@ -165,6 +165,13 @@ if env["builtin_harfbuzz"]:
         env_harfbuzz.Append(CPPDEFINES=["HAVE_PTHREAD"])
 
     env_text_server_adv.Prepend(CPPPATH=["#thirdparty/harfbuzz/src"])
+
+    if freetype_enabled and env["builtin_freetype"]:
+        # hb-ft.cc consumes FreeType's public headers through FT_* macros.
+        ft_headers = env_harfbuzz.Glob("#thirdparty/freetype/include/*.h")
+        ft_headers += env_harfbuzz.Glob("#thirdparty/freetype/include/freetype/*.h")
+        ft_headers += [h for h in env_harfbuzz.Glob("#thirdparty/freetype/include/freetype/config/*.h") if h.name != "ftmodule.h"]
+        env_harfbuzz.Depends(env_harfbuzz.Object(thirdparty_dir + "src/hb-ft.cc"), ft_headers)
 
     lib = env_harfbuzz.add_library("harfbuzz_builtin", thirdparty_sources)
     thirdparty_obj += lib
@@ -543,6 +550,12 @@ if env["builtin_graphite"] and freetype_enabled and env["graphite"]:
 
 env_text_server_adv.add_source_files(module_obj, "*.cpp")
 env.modules_sources += module_obj
+
+if env["builtin_freetype"] and freetype_enabled:
+    ft_headers = env_text_server_adv.Glob("#thirdparty/freetype/include/*.h")
+    ft_headers += env_text_server_adv.Glob("#thirdparty/freetype/include/freetype/*.h")
+    ft_headers += [h for h in env_text_server_adv.Glob("#thirdparty/freetype/include/freetype/config/*.h") if h.name != "ftmodule.h"]
+    env.Depends(module_obj, ft_headers)
 
 # Needed to force rebuilding the module files when the thirdparty library is updated.
 env.Depends(module_obj, thirdparty_obj)

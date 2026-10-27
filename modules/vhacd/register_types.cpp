@@ -35,28 +35,42 @@
 #include <thirdparty/vhacd/public/VHACD.h>
 
 static Vector<Vector<Vector3>> convex_decompose(const real_t *p_vertices, int p_vertex_count, const uint32_t *p_triangles, int p_triangle_count, const Ref<MeshConvexDecompositionSettings> &p_settings, Vector<Vector<uint32_t>> *r_convex_indices) {
+	Vector<Vector<Vector3>> ret;
+	if (r_convex_indices) {
+		r_convex_indices->clear();
+	}
+	ERR_FAIL_COND_V(p_settings.is_null(), ret);
+	ERR_FAIL_COND_V(!p_vertices || p_vertex_count < 4 || !p_triangles || p_triangle_count < 4, ret);
+	for (int i = 0; i < p_vertex_count; i++) {
+		ERR_FAIL_COND_V(!Vector3(p_vertices[i * 3], p_vertices[i * 3 + 1], p_vertices[i * 3 + 2]).is_finite(), ret);
+	}
+	for (int i = 0; i < p_triangle_count; i++) {
+		for (int j = 0; j < 3; j++) {
+			ERR_FAIL_COND_V(p_triangles[i * 3 + j] >= uint32_t(p_vertex_count), ret);
+		}
+	}
+
 	VHACD::IVHACD::Parameters params;
-	params.m_concavity = p_settings->get_max_concavity();
-	params.m_alpha = p_settings->get_symmetry_planes_clipping_bias();
-	params.m_beta = p_settings->get_revolution_axes_clipping_bias();
-	params.m_minVolumePerCH = p_settings->get_min_volume_per_convex_hull();
+	// V-HACD 4 measures percentage volume error, rather than V-HACD 2's
+	// concavity. Preserve the property's range and direction, using percent.
+	params.m_minimumVolumePercentErrorAllowed = p_settings->get_max_concavity() * 100.0;
 	params.m_resolution = p_settings->get_resolution();
 	params.m_maxNumVerticesPerCH = p_settings->get_max_num_vertices_per_convex_hull();
-	params.m_planeDownsampling = p_settings->get_plane_downsampling();
-	params.m_convexhullDownsampling = p_settings->get_convex_hull_downsampling();
-	params.m_pca = p_settings->get_normalize_mesh();
-	params.m_mode = p_settings->get_mode();
-	params.m_convexhullApproximation = p_settings->get_convex_hull_approximation();
-	params.m_oclAcceleration = true;
 	params.m_maxConvexHulls = p_settings->get_max_convex_hulls();
-	params.m_projectHullVertices = p_settings->get_project_hull_vertices();
+	params.m_shrinkWrap = p_settings->get_project_hull_vertices();
+	// Keep decomposition synchronous without an additional per-mesh worker pool.
+	params.m_asyncACD = false;
+	// Removed legacy tuning parameters remain serializable, but have no
+	// equivalent in V-HACD 4. See MeshConvexDecompositionSettings documentation.
 
 	VHACD::IVHACD *decomposer = VHACD::CreateVHACD();
-	decomposer->Compute(p_vertices, p_vertex_count, p_triangles, p_triangle_count, params);
+	if (!decomposer->Compute(p_vertices, p_vertex_count, p_triangles, p_triangle_count, params)) {
+		decomposer->Release();
+		ERR_FAIL_V_MSG(ret, "V-HACD convex decomposition failed.");
+	}
 
 	int hull_count = decomposer->GetNConvexHulls();
 
-	Vector<Vector<Vector3>> ret;
 	ret.resize(hull_count);
 
 	if (r_convex_indices) {
@@ -68,20 +82,25 @@ static Vector<Vector<Vector3>> convex_decompose(const real_t *p_vertices, int p_
 		decomposer->GetConvexHull(i, hull);
 
 		Vector<Vector3> &points = ret.write[i];
-		points.resize(hull.m_nPoints);
+		points.resize(hull.m_points.size());
 
 		Vector3 *w = points.ptrw();
-		for (uint32_t j = 0; j < hull.m_nPoints; ++j) {
+		for (uint32_t j = 0; j < hull.m_points.size(); ++j) {
 			for (int k = 0; k < 3; k++) {
-				w[j][k] = hull.m_points[j * 3 + k];
+				w[j][k] = hull.m_points[j][k];
 			}
 		}
 
 		if (r_convex_indices) {
 			Vector<uint32_t> &indices = r_convex_indices->write[i];
-			indices.resize(hull.m_nTriangles * 3);
+			indices.resize(hull.m_triangles.size() * 3);
 
-			memcpy(indices.ptrw(), hull.m_triangles, hull.m_nTriangles * 3 * sizeof(uint32_t));
+			uint32_t *w_indices = indices.ptrw();
+			for (uint32_t j = 0; j < hull.m_triangles.size(); j++) {
+				w_indices[j * 3] = hull.m_triangles[j].mI0;
+				w_indices[j * 3 + 1] = hull.m_triangles[j].mI1;
+				w_indices[j * 3 + 2] = hull.m_triangles[j].mI2;
+			}
 		}
 	}
 

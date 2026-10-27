@@ -111,7 +111,7 @@ bool PCKCompressionCache::_make_room(uint64_t p_bytes) {
 
 String PCKCompressionCache::make_key(const Vector<uint8_t> &p_input, const PCKLzmaOptions &p_options) {
 	// Bump this implementation tag when changing the encoder or its effective settings.
-	const CharString settings = vformat("pck-lzma2-sdk2604-memory-v1:%d:%d:%d:%d:%d:", p_options.compression_level, p_options.dictionary_size_mb, p_options.word_size, p_options.threads, p_options.memory_usage_percent).utf8();
+	const CharString settings = vformat("pck-lzma2-sdk2605-memory-v1:%d:%d:%d:%d:%d:", p_options.compression_level, p_options.dictionary_size_mb, p_options.word_size, p_options.threads, p_options.memory_usage_percent).utf8();
 	CryptoCore::SHA256Context hash;
 	uint8_t digest[32];
 	if (hash.start() != OK || hash.update(reinterpret_cast<const uint8_t *>(settings.get_data()), settings.length()) != OK || hash.update(p_input.ptr(), p_input.size()) != OK || hash.finish(digest) != OK) {

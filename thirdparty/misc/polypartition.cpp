@@ -34,15 +34,11 @@ TPPLPoly::TPPLPoly() {
 }
 
 TPPLPoly::~TPPLPoly() {
-  if (points) {
-    delete[] points;
-  }
+  delete[] points;
 }
 
 void TPPLPoly::Clear() {
-  if (points) {
-    delete[] points;
-  }
+  delete[] points;
   hole = false;
   numpoints = 0;
   points = NULL;
@@ -121,7 +117,7 @@ TPPLPartition::PartitionVertex::PartitionVertex() :
 
 TPPLPoint TPPLPartition::Normalize(const TPPLPoint &p) {
   TPPLPoint r;
-  tppl_float n = sqrt(p.x * p.x + p.y * p.y);
+  tppl_float n = tppl_sqrt(p.x * p.x + p.y * p.y);
   if (n != 0) {
     r = p / n;
   } else {
@@ -135,7 +131,7 @@ tppl_float TPPLPartition::Distance(const TPPLPoint &p1, const TPPLPoint &p2) {
   tppl_float dx, dy;
   dx = p2.x - p1.x;
   dy = p2.y - p1.y;
-  return (sqrt(dx * dx + dy * dy));
+  return (tppl_sqrt(dx * dx + dy * dy));
 }
 
 // Checks if two lines intersect.
@@ -189,7 +185,7 @@ int TPPLPartition::RemoveHoles(TPPLPolyList *inpolys, TPPLPolyList *outpolys) {
   long i, i2, holepointindex, polypointindex;
   TPPLPoint holepoint, polypoint, bestpolypoint;
   TPPLPoint linep1, linep2;
-  TPPLPoint v1, v2;
+  tppl_float v1dist, v2dist;
   TPPLPoly newpoly;
   bool hasholes;
   bool pointvisible;
@@ -255,9 +251,9 @@ int TPPLPartition::RemoveHoles(TPPLPolyList *inpolys, TPPLPolyList *outpolys) {
         }
         polypoint = iter->get().GetPoint(i);
         if (pointfound) {
-          v1 = Normalize(polypoint - holepoint);
-          v2 = Normalize(bestpolypoint - holepoint);
-          if (v2.x > v1.x) {
+          v1dist = Distance(holepoint, polypoint);
+          v2dist = Distance(holepoint, bestpolypoint);
+          if (v2dist < v1dist) {
             continue;
           }
         }
@@ -1443,7 +1439,6 @@ int TPPLPartition::MonotonePartition(TPPLPolyList *inpolys, TPPLPolyList *monoto
           AddDiagonal(vertices, &newnumvertices, vindex, helpers[v->previous],
                   vertextypes, edgeTreeIterators, &edgeTree, helpers);
           vindex2 = newnumvertices - 2;
-          v2 = &(vertices[vindex2]);
         }
         // Delete e_i - 1 from T.
         edgeTree.erase(edgeTreeIterators[v->previous]);

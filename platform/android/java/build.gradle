@@ -165,11 +165,20 @@ def generateBuildTasks(String flavor = "template", String edition = "standard", 
                 if (tasks.findByName(copyAARToBinTaskName) != null) {
                     buildTasks += tasks.getByName(copyAARToBinTaskName)
                 } else {
-                    buildTasks += tasks.create(name: copyAARToBinTaskName, type: Copy) {
+                    buildTasks += tasks.create(name: copyAARToBinTaskName) {
                         dependsOn ":lib:assembleTemplate${capitalizedTarget}"
-                        from('lib/build/outputs/aar')
-                        include("godot-lib.template_${targetSuffix}.aar")
-                        into(binDir)
+                        File sourceAar = file("lib/build/outputs/aar/godot-lib.template_${targetSuffix}.aar")
+                        File destinationAar = file("${binDir}/godot-lib.template_${targetSuffix}.aar")
+                        inputs.file(sourceAar)
+                        // A Copy task snapshots its entire destination directory.
+                        // Track only this artifact, not unrelated bin contents.
+                        outputs.file(destinationAar)
+                        doLast {
+                            project.copy {
+                                from(sourceAar)
+                                into(destinationAar.parentFile)
+                            }
+                        }
                     }
                 }
 
@@ -179,13 +188,19 @@ def generateBuildTasks(String flavor = "template", String edition = "standard", 
                 if (tasks.findByName(copyBinaryTaskName) != null) {
                     buildTasks += tasks.getByName(copyBinaryTaskName)
                 } else {
-                    buildTasks += tasks.create(name: copyBinaryTaskName, type: Copy) {
+                    buildTasks += tasks.create(name: copyBinaryTaskName) {
                         String filenameSuffix = edition == "mono" ? "${edition}${capitalizedTarget}" : target
                         dependsOn ":app:assemble${capitalizedEdition}${capitalizedTarget}"
-                        from("app/build/outputs/apk/${edition}/${target}") {
-                            include("android_${filenameSuffix}.apk")
+                        File sourceApk = file("app/build/outputs/apk/${edition}/${target}/android_${filenameSuffix}.apk")
+                        File destinationApk = file("${binDir}/android_${filenameSuffix}.apk")
+                        inputs.file(sourceApk)
+                        outputs.file(destinationApk)
+                        doLast {
+                            project.copy {
+                                from(sourceApk)
+                                into(destinationApk.parentFile)
+                            }
                         }
-                        into(binDir)
                     }
                 }
             } else {

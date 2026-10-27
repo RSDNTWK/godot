@@ -1,0 +1,79 @@
+diff --git a/thirdparty/vulkan/vk_enum_string_helper.h b/thirdparty/vulkan/vk_enum_string_helper.h
+--- a/thirdparty/vulkan/vk_enum_string_helper.h
++++ b/thirdparty/vulkan/vk_enum_string_helper.h
+@@ -13,7 +13,7 @@
+ #ifdef __cplusplus
+ #include <string>
+ #endif
+-#include <vulkan/vulkan.h>
++#include <drivers/vulkan/godot_vulkan.h>
+ static inline const char* string_VkResult(VkResult input_value) {
+     switch (input_value) {
+         case VK_SUCCESS:
+diff --git a/thirdparty/vulkan/vk_mem_alloc.h b/thirdparty/vulkan/vk_mem_alloc.h
+--- a/thirdparty/vulkan/vk_mem_alloc.h
++++ b/thirdparty/vulkan/vk_mem_alloc.h
+@@ -124,15 +124,10 @@
+ See documentation chapter: \ref statistics.
+ */
+ 
++#include <drivers/vulkan/godot_vulkan.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+-#endif
+-
+-#ifndef VMA_VULKAN_HEADERS_ALREADY_INCLUDED
+-    #if !defined(VULKAN_H_)
+-        #include <vulkan/vulkan.h>
+-    #endif
+ #endif
+ 
+ #define VMA_VERSION (VK_MAKE_VERSION(3, 4, 0))
+@@ -1833,6 +1828,19 @@
+     VmaAllocator VMA_NOT_NULL allocator,
+     VmaTotalStatistics* VMA_NOT_NULL pStats);
+ 
++/** \brief Retrieves lazily allocated bytes
++
++This function is called "calculate" not "get" because it has to traverse all
++internal data structures, so it may be quite slow. Use it for debugging purposes.
++For faster but more brief statistics suitable to be called every frame or every allocation,
++use vmaGetHeapBudgets().
++
++Note that when using allocator from multiple threads, returned information may immediately
++become outdated.
++*/
++VMA_CALL_PRE uint64_t VMA_CALL_POST vmaCalculateLazilyAllocatedBytes(
++    VmaAllocator VMA_NOT_NULL allocator);
++
+ /** \brief Retrieves information about current memory usage and budget for all memory heaps.
+ 
+ \param allocator
+@@ -15846,6 +15854,26 @@
+     allocator->CalculateStatistics(pStats);
+ }
+ 
++VMA_CALL_PRE uint64_t VMA_CALL_POST vmaCalculateLazilyAllocatedBytes(
++    VmaAllocator allocator)
++{
++    VMA_ASSERT(allocator);
++    VMA_DEBUG_GLOBAL_MUTEX_LOCK
++	VmaTotalStatistics stats;
++    allocator->CalculateStatistics(&stats);
++	uint64_t total_lazilily_allocated_bytes = 0;
++	for (uint32_t heapIndex = 0; heapIndex < allocator->GetMemoryHeapCount(); ++heapIndex) {
++		for (uint32_t typeIndex = 0; typeIndex < allocator->GetMemoryTypeCount(); ++typeIndex) {
++			if (allocator->MemoryTypeIndexToHeapIndex(typeIndex) == heapIndex) {
++				VkMemoryPropertyFlags flags = allocator->m_MemProps.memoryTypes[typeIndex].propertyFlags;
++				if (flags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
++					total_lazilily_allocated_bytes += stats.memoryType[typeIndex].statistics.allocationBytes;
++			}
++		}
++	}
++	return total_lazilily_allocated_bytes;
++}
++
+ VMA_CALL_PRE void VMA_CALL_POST vmaGetHeapBudgets(
+     VmaAllocator allocator,
+     VmaBudget* pBudgets)

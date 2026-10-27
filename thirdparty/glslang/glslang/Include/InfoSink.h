@@ -105,14 +105,22 @@ public:
         }
 
         if(loc.getFilename() == nullptr && shaderFileName != nullptr && absolute) {
-            //append(std::filesystem::absolute(shaderFileName).string());
+        #if defined(__cpp_lib_filesystem)
+            append(shaderFileName);
+        #else
+            append(shaderFileName);
+        #endif
         } else {
             std::string location = loc.getStringNameOrNum(false);
-            //if (absolute) {
-            //    append(std::filesystem::absolute(location).string());
-            //} else {
+            if (absolute) {
+        #if defined(__cpp_lib_filesystem)
                 append(location);
-            //}
+        #else
+                append(location);
+        #endif
+            } else {
+                append(location);
+            }
         }
 
         append(locText);

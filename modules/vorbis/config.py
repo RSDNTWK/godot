@@ -1,10 +1,13 @@
 def can_build(env, platform):
-    env.module_add_dependencies("vorbis", ["ogg"])
+    dependencies = ["ogg"]
+    if env["module_ffmpeg_enabled"]:
+        dependencies.append("ffmpeg")
+    env.module_add_dependencies("vorbis", dependencies)
     return True
 
 
 def configure(env):
-    env.module_add_dependencies("vorbis", ["ogg", "ffmpeg"])
+    pass
 
 
 def get_doc_classes():

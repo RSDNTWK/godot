@@ -1,4 +1,6 @@
 def can_build(env, platform):
+    if env["module_ffmpeg_enabled"]:
+        env.module_add_dependencies("mp3", ["ffmpeg"])
     return True
 
 
@@ -11,7 +13,7 @@ def get_opts(platform):
 
 
 def configure(env):
-    env.module_add_dependencies("mp3", ["ffmpeg"])
+    pass
 
 
 def get_doc_classes():

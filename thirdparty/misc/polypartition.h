@@ -28,7 +28,12 @@
 #include "core/templates/list.h"
 #include "core/templates/rb_set.h"
 
-typedef double tppl_float;
+#ifndef tppl_float
+#define tppl_float double
+#endif
+#ifndef tppl_sqrt
+#define tppl_sqrt sqrt
+#endif
 
 enum TPPLOrientation {
   TPPL_ORIENTATION_CW = -1,

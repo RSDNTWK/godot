@@ -121,6 +121,8 @@ Vector<uint8_t> basis_universal_packer(const Ref<Image> &p_image, Image::UsedCha
 	params.m_rdo_uastc_ldr_4x4_dict_size = rdo_dict_size;
 
 	params.m_create_ktx2_file = true;
+	// Preserve Godot's linear transfer metadata; Basis 2.50 changed its default.
+	params.m_ktx2_and_basis_srgb_transfer_function = false;
 	params.m_ktx2_uastc_supercompression = zstd_supercompression ? basist::KTX2_SS_ZSTANDARD : basist::KTX2_SS_NONE;
 	params.m_ktx2_zstd_supercompression_level = zstd_supercompression_level;
 

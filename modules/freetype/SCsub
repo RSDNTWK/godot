@@ -91,7 +91,22 @@ if env["builtin_freetype"]:
 
     env_thirdparty = env_freetype.Clone()
     env_thirdparty.disable_warnings()
-    lib = env_thirdparty.add_library("freetype_builtin", thirdparty_sources)
+    # FreeType includes many headers through FT_* macros, which the normal
+    # include scanner cannot resolve. Track them explicitly on the objects so
+    # incremental builds and verified archive reuse cannot retain stale code.
+    freetype_headers = []
+    for pattern in (
+        "include/*.h",
+        "include/freetype/*.h",
+        "include/freetype/config/*.h",
+        "include/freetype/internal/*.h",
+        "include/freetype/internal/services/*.h",
+    ):
+        freetype_headers += env_thirdparty.Glob(thirdparty_dir + pattern)
+    freetype_objects = env_thirdparty.Object(thirdparty_sources[:-1])
+    freetype_objects += sfnt if env["platform"] == "web" else env_thirdparty.Object(sfnt)
+    env_thirdparty.Depends(freetype_objects, freetype_headers)
+    lib = env_thirdparty.add_library("freetype_builtin", freetype_objects)
     thirdparty_obj += lib
 
     # Needs to be appended to arrive after libscene in the linker call,

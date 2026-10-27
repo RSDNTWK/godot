@@ -1,0 +1,11 @@
+diff --git a/thirdparty/libvpx/vpx_dsp/vpx_convolve.h b/thirdparty/libvpx/vpx_dsp/vpx_convolve.h
+--- a/thirdparty/libvpx/vpx_dsp/vpx_convolve.h
++++ b/thirdparty/libvpx/vpx_dsp/vpx_convolve.h
+@@ -12,6 +12,7 @@
+ 
+ #include "./vpx_config.h"
+ #include "vpx/vpx_integer.h"
++#include "vpx_dsp/vpx_filter.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {

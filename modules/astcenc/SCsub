@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 from misc.utility.scons_hints import *
 
+import astcenc_builders
+
 Import("env")
 Import("env_modules")
 
@@ -35,7 +37,14 @@ thirdparty_sources = [
     "astcenc_weight_align.cpp",
     "astcenc_weight_quant_xfer_tables.cpp",
 ]
-thirdparty_sources = [thirdparty_dir + file for file in thirdparty_sources]
+isolated_sources = []
+for source in thirdparty_sources:
+    generated = env_astcenc.CommandNoCache(
+        source.removesuffix(".cpp") + ".godot.gen.cpp",
+        thirdparty_dir + source,
+        astcenc_builders.make_isolated_source,
+    )
+    isolated_sources += generated
 
 env_astcenc.Prepend(CPPPATH=[thirdparty_dir])
 
@@ -48,7 +57,7 @@ astc_encoder = env.editor_build
 if not astc_encoder:
     env_thirdparty.Append(CPPDEFINES=[("ASTCENC_DECOMPRESS_ONLY")])
 
-env_thirdparty.add_source_files(thirdparty_obj, thirdparty_sources)
+env_thirdparty.add_source_files(thirdparty_obj, isolated_sources)
 env.modules_sources += thirdparty_obj
 
 # Godot source files

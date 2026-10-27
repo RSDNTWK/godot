@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2025 The Khronos Group Inc.
+// Copyright (c) 2017-2026 The Khronos Group Inc.
 // Copyright (c) 2017-2019 Valve Corporation
 // Copyright (c) 2017-2019 LunarG, Inc.
 //
@@ -29,6 +29,7 @@
 #include <openxr/openxr.h>
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -428,20 +429,43 @@ static void ReadLayerDataFilesInRegistry(const std::string &registry_location, s
             return false;
         }
 
-        wchar_t name_w[1024]{};
         LONG rtn_value;
-        DWORD name_size = 1023;
-        DWORD value;
-        DWORD value_size = sizeof(value);
         DWORD key_index = 0;
-        while (ERROR_SUCCESS ==
-               (rtn_value = RegEnumValueW(hkey, key_index++, name_w, &name_size, NULL, NULL, (LPBYTE)&value, &value_size))) {
-            if (value_size == sizeof(value) && value == 0) {
-                const std::string filename = wide_to_utf8(name_w);
-                AddFilesInPath(filename, false, manifest_files);
+
+        for (;;) {
+            wchar_t name_w[1024]{};
+            DWORD name_size = 1023;
+            DWORD type;
+            DWORD value;
+            DWORD value_size = sizeof(value);
+
+            rtn_value = RegEnumValueW(hkey, key_index++, name_w, &name_size, NULL, &type, (LPBYTE)&value, &value_size);
+
+            // Break if there are no more keys
+            if (rtn_value == ERROR_NO_MORE_ITEMS) {
+                break;
             }
-            // Reset some items for the next loop
-            name_size = 1023;
+
+            // Break for any other unexpected error
+            if (rtn_value != ERROR_SUCCESS && rtn_value != ERROR_MORE_DATA) {
+                LoaderLogger::LogInfoMessage(
+                    "", "ReadLayerDataFilesInRegistry - Unexpected error from RegEnumValueW (" + DescribeError(rtn_value) + ")");
+                break;
+            }
+
+            const std::string filename = wide_to_utf8(name_w);
+
+            // Handle valid DWORD keys
+            if (rtn_value == ERROR_SUCCESS && type == REG_DWORD && value_size == sizeof(value)) {
+                if (value == 0) {
+                    AddFilesInPath(filename, false, manifest_files);
+                } else {
+                    LoaderLogger::LogInfoMessage("", "ReadLayerDataFilesInRegistry - skipping disabled API layer " + filename);
+                }
+            } else {
+                // Log invalid keys
+                LoaderLogger::LogInfoMessage("", "ReadLayerDataFilesInRegistry - skipping invalid registry key " + filename);
+            }
         }
 
         RegCloseKey(hkey);
@@ -476,7 +500,8 @@ bool ManifestFile::IsValidJson(const Json::Value &root_node, JsonVersion &versio
         return false;
     }
     std::string file_format = root_node["file_format_version"].asString();
-    const int num_fields = sscanf(file_format.c_str(), "%u.%u.%u", &version.major, &version.minor, &version.patch);
+    const int num_fields =
+        sscanf(file_format.c_str(), "%" SCNu32 ".%" SCNu32 ".%" SCNu32, &version.major, &version.minor, &version.patch);
 
     // Only version 1.0.0 is defined currently.  Eventually we may have more version, but
     // some of the versions may only be valid for layers or runtimes specifically.
@@ -540,7 +565,7 @@ static void ParseExtension(Json::Value const &ext, std::vector<ExtensionListing>
         if (ext_version.isUInt()) {
             ext_listing.extension_version = ext_version.asUInt();
         } else {
-            ext_listing.extension_version = atoi(ext_version.asString().c_str());
+            ext_listing.extension_version = strtoul(ext_version.asString().c_str(), nullptr, 10);
         }
         extensions.push_back(ext_listing);
     }
@@ -640,10 +665,10 @@ void RuntimeManifestFile::CreateIfValid(const Json::Value &root_node, const std:
     }
 
     // Add this runtime manifest file
-    manifest_files.emplace_back(new RuntimeManifestFile(filename, lib_path));
+    std::unique_ptr<RuntimeManifestFile> manifest{new RuntimeManifestFile(filename, lib_path)};
+    manifest_files.emplace_back(std::move(manifest));
 
-    // Add any extensions to it after the fact.
-    // Handle any renamed functions
+    // Add any extensions to it after the fact, while handling any renamed functions
     manifest_files.back()->ParseCommon(runtime_root_node);
 }
 
@@ -816,24 +841,29 @@ void ApiLayerManifestFile::CreateIfValid(ManifestFileType type, const std::strin
         LoaderLogger::LogErrorMessage("", error_ss.str());
         return;
     }
+
+    // Figure out enabled state of implicit layers
     if (MANIFEST_TYPE_IMPLICIT_API_LAYER == type) {
         bool enabled = true;
         // Implicit layers require the disable environment variable.
-        if (layer_root_node["disable_environment"].isNull() || !layer_root_node["disable_environment"].isString()) {
+        auto &disable_env_node = layer_root_node["disable_environment"];
+        if (disable_env_node.isNull() || !disable_env_node.isString()) {
             error_ss << "Implicit layer " << filename << " is missing \"disable_environment\"";
             LoaderLogger::LogErrorMessage("", error_ss.str());
             return;
         }
-        // Check if there's an enable environment variable provided
-        if (!layer_root_node["enable_environment"].isNull() && layer_root_node["enable_environment"].isString()) {
-            std::string env_var = layer_root_node["enable_environment"].asString();
+        // Check if there's an enable environment variable provided: If so, it must be set in the environment.
+        auto &enable_env_node = layer_root_node["enable_environment"];
+        if (!enable_env_node.isNull() && enable_env_node.isString()) {
+            std::string env_var = enable_env_node.asString();
             // If it's not set in the environment, disable the layer
             if (!LoaderProperty::IsSet(env_var)) {
                 enabled = false;
             }
         }
+
         // Check for the disable environment variable, which must be provided in the JSON
-        std::string env_var = layer_root_node["disable_environment"].asString();
+        std::string env_var = disable_env_node.asString();
         // If the env var is set, disable the layer. Disable env var overrides enable above
         if (LoaderProperty::IsSet(env_var)) {
             enabled = false;
@@ -849,7 +879,7 @@ void ApiLayerManifestFile::CreateIfValid(ManifestFileType type, const std::strin
     std::string layer_name = layer_root_node["name"].asString();
     std::string api_version_string = layer_root_node["api_version"].asString();
     JsonVersion api_version = {};
-    const int num_fields = sscanf(api_version_string.c_str(), "%u.%u", &api_version.major, &api_version.minor);
+    const int num_fields = sscanf(api_version_string.c_str(), "%" SCNu32 ".%" SCNu32, &api_version.major, &api_version.minor);
     api_version.patch = 0;
 
     if ((num_fields != 2) || (api_version.major == 0 && api_version.minor == 0) ||
@@ -859,7 +889,17 @@ void ApiLayerManifestFile::CreateIfValid(ManifestFileType type, const std::strin
         return;
     }
 
-    uint32_t implementation_version = atoi(layer_root_node["implementation_version"].asString().c_str());
+    uint32_t implementation_version = 0;
+    {
+        std::string implementation_version_str = layer_root_node["implementation_version"].asString();
+        char *end_ptr;
+        implementation_version = strtoul(implementation_version_str.c_str(), &end_ptr, 10);
+        if (*end_ptr != '\0') {
+            error_ss << "layer " << filename << " has invalid implementation version.";
+            LoaderLogger::LogWarningMessage("", error_ss.str());
+            return;
+        }
+    }
     std::string library_path = layer_root_node["library_path"].asString();
 
     // If the library_path variable has no directory symbol, it's just a file name and should be accessible on the
@@ -890,10 +930,11 @@ void ApiLayerManifestFile::CreateIfValid(ManifestFileType type, const std::strin
     }
 
     // Add this layer manifest file
-    manifest_files.emplace_back(
-        new ApiLayerManifestFile(type, filename, layer_name, description, api_version, implementation_version, library_path));
+    std::unique_ptr<ApiLayerManifestFile> manifest{
+        new ApiLayerManifestFile(type, filename, layer_name, description, api_version, implementation_version, library_path)};
+    manifest_files.emplace_back(std::move(manifest));
 
-    // Add any extensions to it after the fact.
+    // Add any extensions to it after the fact, while handling any renamed functions
     manifest_files.back()->ParseCommon(layer_root_node);
 }
 

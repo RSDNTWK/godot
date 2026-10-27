@@ -9,7 +9,8 @@
  * Lossless JPEG Modifications:
  * Copyright (C) 1999, Ken Murchison.
  * libjpeg-turbo Modifications:
- * Copyright (C) 2009, 2011, 2014-2015, 2018, 2020, 2022, D. R. Commander.
+ * Copyright (C) 2009, 2011, 2014-2015, 2018, 2020, 2022, 2026,
+ *           D. R. Commander.
  * For conditions of distribution and use, see the accompanying README.ijg
  * file.
  *
@@ -251,9 +252,8 @@ typedef int boolean;
  * precision, so jchuff.c normally uses entropy optimization to compute
  * usable tables for higher precision.  If you don't want to do optimization,
  * you'll have to supply different default Huffman tables.
- * The exact same statements apply for progressive and lossless JPEG:
- * the default tables don't work for progressive mode or lossless mode.
- * (This may get fixed, however.)
+ * The exact same statements apply for lossless JPEG: the default tables don't
+ * work for lossless mode.  (This may get fixed, however.)
  */
 #define INPUT_SMOOTHING_SUPPORTED   /* Input image smoothing option? */
 
@@ -264,8 +264,8 @@ typedef int boolean;
 //#define D_LOSSLESS_SUPPORTED        /* Lossless JPEG? */
 #define SAVE_MARKERS_SUPPORTED      /* jpeg_save_markers() needed? */
 #define BLOCK_SMOOTHING_SUPPORTED   /* Block smoothing? (Progressive only) */
-#define IDCT_SCALING_SUPPORTED      /* Output rescaling via IDCT? */
-#undef  UPSAMPLE_SCALING_SUPPORTED  /* Output rescaling at upsample stage? */
+#define IDCT_SCALING_SUPPORTED      /* Output rescaling via IDCT?  (Requires
+                                       DCT_ISLOW_SUPPORTED) */
 #define UPSAMPLE_MERGING_SUPPORTED  /* Fast path for sloppy upsampling? */
 #define QUANT_1PASS_SUPPORTED       /* 1-pass color quantization? */
 #define QUANT_2PASS_SUPPORTED       /* 2-pass color quantization? */

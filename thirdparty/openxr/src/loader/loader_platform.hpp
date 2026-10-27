@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2025 The Khronos Group Inc.
+// Copyright (c) 2017-2026 The Khronos Group Inc.
 // Copyright (c) 2017-2019 Valve Corporation
 // Copyright (c) 2017-2019 LunarG, Inc.
 //
@@ -124,6 +124,9 @@ static inline std::string DescribeError(uint32_t code, bool prefixErrorCode = tr
         str = "(unknown)";
     }
 
+    // FormatMessage appends a trailing newline
+    str.erase(str.find_last_not_of("\r\n") + 1);
+
     return str;
 }
 
@@ -159,7 +162,7 @@ static inline void LoaderPlatformLibraryClose(LoaderPlatformLibraryHandle librar
 
 static inline void *LoaderPlatformLibraryGetProcAddr(LoaderPlatformLibraryHandle library, const std::string &name) {
     assert(library);
-    assert(name.size() > 0);
+    assert(!name.empty());
     return reinterpret_cast<void *>(GetProcAddress(library, name.c_str()));
 }
 
