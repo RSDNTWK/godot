@@ -31,6 +31,7 @@
 #include "test_crypto_mbedtls.h"
 
 #include "../crypto_mbedtls.h"
+#include "test_crypto_core_psa.h"
 
 #include "core/io/file_access.h"
 #include "tests/test_macros.h"
@@ -179,6 +180,86 @@ void crypto_decrypt_test(const String &p_in_priv_path, const Vector<uint8_t> &p_
 	REQUIRE(c.is_valid());
 	Vector<uint8_t> plaintext = c->decrypt(priv, p_ciphertext);
 	CHECK_EQ(equals(plaintext, p_message), p_valid);
+}
+
+TEST_CASE("[CryptoMbedTLS] Arbitrary HMAC key lengths remain supported") {
+	const PackedByteArray message = String("long-key regression").to_utf8_buffer();
+	{
+		PackedByteArray key;
+		key.resize(65);
+		key.fill(170);
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA1, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "014f1ff3dfee8abccf98a80dfedbe13f2945dfdd");
+		}
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA256, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "f8a284df3a8818b56b8a439786092cec6d8513512feb13ca50e50b1672565add");
+		}
+	}
+	{
+		PackedByteArray key;
+		key.resize(131);
+		key.fill(170);
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA1, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "9d60fd360c3506b30f1d33f5d20425ff93941636");
+		}
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA256, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "7549fae2bd1240218ae4b59c76237d7db13a97447f792cbb222f33d044a172ac");
+		}
+	}
+	{
+		PackedByteArray key;
+		key.resize(8192);
+		key.fill(170);
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA1, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "56a047c086e3d4aeb9842e3dc995e65058cda942");
+		}
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA256, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "2c42bc279ce9fa89ca6daf0c3ffa90412b49266845876c5928eeb80f38b851f7");
+		}
+	}
+	{
+		PackedByteArray key;
+		key.resize(65536);
+		key.fill(170);
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA1, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "ca770510141325e7e8a93dda2acf3aaf2ff44bcb");
+		}
+		{
+			HMACContextMbedTLS context;
+			REQUIRE(context.start(HashingContext::HASH_SHA256, key) == OK);
+			REQUIRE(context.update(message) == OK);
+			PackedByteArray digest = context.finish();
+			CHECK(String::hex_encode_buffer(digest.ptr(), digest.size()) == "c1fcb4c864ed7ace2e7908a90525dff2d4e0ecc881d1eb04910bd7176d4cd1c2");
+		}
+	}
 }
 
 } // namespace TestCryptoMbedTLS

@@ -292,14 +292,27 @@ Error OS_Unix::get_entropy(uint8_t *r_buffer, int p_bytes) {
 	} while (left > 0);
 // Define this yourself if you don't want to fall back to /dev/urandom.
 #elif !defined(NO_URANDOM)
+	ERR_FAIL_COND_V(p_bytes < 0, ERR_INVALID_PARAMETER);
+	if (p_bytes == 0) {
+		return OK;
+	}
 	int r = open("/dev/urandom", O_RDONLY);
 	ERR_FAIL_COND_V(r < 0, FAILED);
 	int left = p_bytes;
-	do {
-		ssize_t ret = read(r, r_buffer, p_bytes);
-		ERR_FAIL_COND_V(ret <= 0, FAILED);
+	int ofs = 0;
+	while (left > 0) {
+		ssize_t ret = read(r, r_buffer + ofs, left);
+		if (ret < 0 && errno == EINTR) {
+			continue;
+		}
+		if (ret <= 0) {
+			close(r);
+			ERR_FAIL_V(FAILED);
+		}
 		left -= ret;
-	} while (left > 0);
+		ofs += ret;
+	}
+	close(r);
 #else
 	return ERR_UNAVAILABLE;
 #endif

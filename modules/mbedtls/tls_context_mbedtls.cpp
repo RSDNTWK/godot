@@ -53,18 +53,28 @@ void TLSContextMbedTLS::print_mbedtls_error(int p_ret) {
 Error CookieContextMbedTLS::setup() {
 	ERR_FAIL_COND_V_MSG(inited, ERR_ALREADY_IN_USE, "This cookie context is already in use");
 
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_ctr_drbg_init(&ctr_drbg);
 	mbedtls_entropy_init(&entropy);
+#endif
 	mbedtls_ssl_cookie_init(&cookie_ctx);
 	inited = true;
 
-	int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, nullptr, 0);
+#if MBEDTLS_VERSION_MAJOR >= 4
+	int ret = 0;
+#else
+	int ret = /* legacy RNG */ mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, nullptr, 0);
 	if (ret != 0) {
 		clear(); // Never leave unusable resources around.
 		ERR_FAIL_V_MSG(FAILED, "mbedtls_ctr_drbg_seed returned an error " + itos(ret));
 	}
+#endif
 
+#if MBEDTLS_VERSION_MAJOR >= 4
+	ret = mbedtls_ssl_cookie_setup(&cookie_ctx);
+#else
 	ret = mbedtls_ssl_cookie_setup(&cookie_ctx, mbedtls_ctr_drbg_random, &ctr_drbg);
+#endif
 	if (ret != 0) {
 		clear();
 		ERR_FAIL_V_MSG(FAILED, "mbedtls_ssl_cookie_setup returned an error " + itos(ret));
@@ -76,8 +86,10 @@ void CookieContextMbedTLS::clear() {
 	if (!inited) {
 		return;
 	}
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_ctr_drbg_free(&ctr_drbg);
 	mbedtls_entropy_free(&entropy);
+#endif
 	mbedtls_ssl_cookie_free(&cookie_ctx);
 	inited = false;
 }
@@ -96,15 +108,21 @@ Error TLSContextMbedTLS::_setup(int p_endpoint, int p_transport, int p_authmode)
 
 	mbedtls_ssl_init(&tls);
 	mbedtls_ssl_config_init(&conf);
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_ctr_drbg_init(&ctr_drbg);
 	mbedtls_entropy_init(&entropy);
+#endif
 	inited = true;
 
-	int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, nullptr, 0);
+#if MBEDTLS_VERSION_MAJOR >= 4
+	int ret = 0;
+#else
+	int ret = /* legacy RNG */ mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, nullptr, 0);
 	if (ret != 0) {
 		clear(); // Never leave unusable resources around.
 		ERR_FAIL_V_MSG(FAILED, "mbedtls_ctr_drbg_seed returned an error " + itos(ret));
 	}
+#endif
 
 	ret = mbedtls_ssl_config_defaults(&conf, p_endpoint, p_transport, MBEDTLS_SSL_PRESET_DEFAULT);
 	if (ret != 0) {
@@ -112,7 +130,9 @@ Error TLSContextMbedTLS::_setup(int p_endpoint, int p_transport, int p_authmode)
 		ERR_FAIL_V_MSG(FAILED, "mbedtls_ssl_config_defaults returned an error" + itos(ret));
 	}
 	mbedtls_ssl_conf_authmode(&conf, p_authmode);
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+#endif
 	mbedtls_ssl_conf_dbg(&conf, my_debug, stdout);
 	return OK;
 }
@@ -237,8 +257,10 @@ void TLSContextMbedTLS::clear() {
 	}
 	mbedtls_ssl_free(&tls);
 	mbedtls_ssl_config_free(&conf);
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_ctr_drbg_free(&ctr_drbg);
 	mbedtls_entropy_free(&entropy);
+#endif
 
 	// Unlock and key and certificates
 	if (certs.is_valid()) {

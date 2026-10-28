@@ -39,6 +39,9 @@ class String;
 
 class CryptoCore {
 public:
+	static Error initialize_crypto_library();
+	static void finalize_crypto_library();
+
 	class RandomGenerator {
 	private:
 		void *entropy = nullptr;

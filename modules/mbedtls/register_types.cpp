@@ -36,13 +36,14 @@
 #include "stream_peer_mbedtls.h"
 
 #include "core/config/project_settings.h"
+#include "core/crypto/crypto_core.h"
 #include "core/os/os.h"
 
 #if MBEDTLS_VERSION_MAJOR >= 3
 #include <psa/crypto.h>
 #endif
 
-#ifdef GODOT_MBEDTLS_THREADING_ALT
+#if defined(GODOT_MBEDTLS_THREADING_ALT) && MBEDTLS_VERSION_MAJOR < 4
 extern "C" {
 void godot_mbedtls_mutex_init(mbedtls_threading_mutex_t *p_mutex) {
 	ERR_FAIL_NULL(p_mutex);
@@ -80,7 +81,7 @@ void initialize_mbedtls_module(ModuleInitializationLevel p_level) {
 
 	GLOBAL_DEF("network/tls/enable_tls_v1.3", true);
 
-#ifdef GODOT_MBEDTLS_THREADING_ALT
+#if defined(GODOT_MBEDTLS_THREADING_ALT) && MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_threading_set_alt(
 			godot_mbedtls_mutex_init,
 			godot_mbedtls_mutex_free,
@@ -88,7 +89,9 @@ void initialize_mbedtls_module(ModuleInitializationLevel p_level) {
 			godot_mbedtls_mutex_unlock);
 #endif
 
-#if MBEDTLS_VERSION_MAJOR >= 3
+#if MBEDTLS_VERSION_MAJOR >= 4
+	ERR_FAIL_COND_MSG(CryptoCore::initialize_crypto_library() != OK, "Failed to initialize PSA Crypto.");
+#elif MBEDTLS_VERSION_MAJOR >= 3
 	int status = psa_crypto_init();
 	ERR_FAIL_COND_MSG(status != PSA_SUCCESS, "Failed to initialize psa crypto. The mbedTLS modules will not work.");
 #endif
@@ -116,7 +119,7 @@ void uninitialize_mbedtls_module(ModuleInitializationLevel p_level) {
 		return;
 	}
 
-#if MBEDTLS_VERSION_MAJOR >= 3
+#if MBEDTLS_VERSION_MAJOR == 3
 	mbedtls_psa_crypto_free();
 #endif
 
@@ -125,7 +128,7 @@ void uninitialize_mbedtls_module(ModuleInitializationLevel p_level) {
 	StreamPeerMbedTLS::finalize_tls();
 	CryptoMbedTLS::finalize_crypto();
 
-#ifdef GODOT_MBEDTLS_THREADING_ALT
+#if defined(GODOT_MBEDTLS_THREADING_ALT) && MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_threading_free_alt();
 #endif
 }

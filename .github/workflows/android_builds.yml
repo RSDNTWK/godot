@@ -49,11 +49,14 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up Java 17
+      - name: Set up Java 25
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 25
+
+      - name: Install Android SDK 37.2
+        run: sdkmanager "platforms;android-37.2" "build-tools;37.0.0"
 
       - name: Restore Godot build cache
         uses: ./.github/actions/godot-cache-restore

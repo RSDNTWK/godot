@@ -1,0 +1,19 @@
+--- a/thirdparty/embree/common/simd/arm/emulation.h
++++ b/thirdparty/embree/common/simd/arm/emulation.h
+@@ -10,6 +10,16 @@
+ #endif
+ 
+ #include "sse2neon.h"
++
++// Embree-specific shuffle masks from its original ARM integration.
++#if defined(__aarch64__)
++#define _MN_SHUFFLE(fp3,fp2,fp1,fp0) ( (uint8x16_t){ (((fp3)*4)+0), (((fp3)*4)+1), (((fp3)*4)+2), (((fp3)*4)+3),  (((fp2)*4)+0), (((fp2)*4)+1), (((fp2)*4)+\
++2), (((fp2)*4)+3),  (((fp1)*4)+0), (((fp1)*4)+1), (((fp1)*4)+2), (((fp1)*4)+3),  (((fp0)*4)+0), (((fp0)*4)+1), (((fp0)*4)+2), (((fp0)*4)+3) } )
++#define _MF_SHUFFLE(fp3,fp2,fp1,fp0) ( (uint8x16_t){ (((fp3)*4)+0), (((fp3)*4)+1), (((fp3)*4)+2), (((fp3)*4)+3),  (((fp2)*4)+0), (((fp2)*4)+1), (((fp2)*4)+\
++2), (((fp2)*4)+3),  (((fp1)*4)+16+0), (((fp1)*4)+16+1), (((fp1)*4)+16+2), (((fp1)*4)+16+3),  (((fp0)*4)+16+0), (((fp0)*4)+16+1), (((fp0)*4)+16+2), (((fp0)*\
++4)+16+3) } )
++#endif
++
+ 
+ __forceinline __m128 _mm_abs_ps(__m128 a) { return vabsq_f32(a); }
+ 

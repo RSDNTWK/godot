@@ -34,10 +34,12 @@
 
 #include "core/object/ref_counted.h"
 
-#include <mbedtls/ctr_drbg.h>
 #include <mbedtls/debug.h>
-#include <mbedtls/entropy.h>
 #include <mbedtls/ssl.h>
+#if MBEDTLS_VERSION_MAJOR < 4
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#endif
 #include <mbedtls/ssl_cookie.h>
 
 class TLSContextMbedTLS;
@@ -49,8 +51,10 @@ class CookieContextMbedTLS : public RefCounted {
 
 protected:
 	bool inited = false;
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_entropy_context entropy;
 	mbedtls_ctr_drbg_context ctr_drbg;
+#endif
 	mbedtls_ssl_cookie_ctx cookie_ctx;
 
 public:
@@ -74,8 +78,10 @@ public:
 	Ref<CryptoKeyMbedTLS> pkey;
 	Ref<CookieContextMbedTLS> cookies;
 
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_entropy_context entropy;
 	mbedtls_ctr_drbg_context ctr_drbg;
+#endif
 	mbedtls_ssl_context tls;
 	mbedtls_ssl_config conf;
 

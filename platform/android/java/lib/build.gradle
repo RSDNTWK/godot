@@ -11,6 +11,8 @@ ext {
 
 apply from: "../scripts/publish-module.gradle"
 
+addGodotRuntimeDependencyConstraints(project)
+
 dependencies {
     implementation "androidx.fragment:fragment:$versions.fragmentVersion"
     implementation "androidx.documentfile:documentfile:$versions.documentfileVersion"

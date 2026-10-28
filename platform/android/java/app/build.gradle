@@ -31,6 +31,8 @@ configurations {
     monoImplementation {}
 }
 
+addGodotRuntimeDependencyConstraints(project)
+
 dependencies {
     // Android instrumented test dependencies
     androidTestImplementation "androidx.test.ext:junit:$versions.junitVersion"
@@ -297,8 +299,8 @@ task copyAndRenameBinary(type: Copy) {
  * Used to validate the version of the Java SDK used for the Godot gradle builds.
  */
 task validateJavaVersion {
-    if (!JavaVersion.current().isCompatibleWith(versions.javaVersion)) {
-        throw new GradleException("Invalid Java version ${JavaVersion.current()}. Version ${versions.javaVersion} is the minimum supported Java version for Godot gradle builds.")
+    if (!JavaVersion.current().isCompatibleWith(versions.jdkVersion)) {
+        throw new GradleException("Invalid Java version ${JavaVersion.current()}. JDK ${versions.jdkVersion} or newer is required for Godot Android builds; configure JAVA_HOME or the editor's Java SDK path.")
     }
 }
 

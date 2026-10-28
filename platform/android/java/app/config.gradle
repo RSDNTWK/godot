@@ -1,30 +1,38 @@
+apply from: new File(buildscript.sourceFile.parentFile, 'runtime_dependencies.gradle')
+
 ext.versions = [
-    androidGradlePlugin: '8.6.1',
-    compileSdk         : 36,
+    androidGradlePlugin: '9.4.1',
+    compileSdk         : 'android-37.2',
     // Also update:
     // - 'platform/android/export/export_plugin.cpp#DEFAULT_MIN_SDK_VERSION'
     // - 'platform/android/detect.py#get_min_target_api()'
     minSdk             : 24,
     // Also update 'platform/android/export/export_plugin.cpp#DEFAULT_TARGET_SDK_VERSION'
-    targetSdk          : 36,
-    buildTools         : '36.1.0',
-    kotlinVersion      : '2.1.21',
-    fragmentVersion    : '1.8.6',
-    nexusPublishVersion: '1.3.0',
+    targetSdk          : 37,
+    buildTools         : '37.0.0',
+    kotlinVersion      : '2.4.21',
+    fragmentVersion    : '1.9.1',
+    nexusPublishVersion: '2.0.0',
+    jdkVersion         : JavaVersion.VERSION_25,
+    // Keep Android-compatible bytecode while running Gradle with JDK 25.
     javaVersion        : JavaVersion.VERSION_17,
     // Also update 'platform/android/detect.py#get_ndk_version()' when this is updated.
-    ndkVersion         : '29.0.14206865',
-    splashscreenVersion: '1.0.1',
+    ndkVersion         : '30.0.16248370',
+    splashscreenVersion: '1.2.0',
     // 'openxrLoaderVersion' should be set to XR_CURRENT_API_VERSION, see 'thirdparty/openxr'
     openxrLoaderVersion: '1.1.65',
     openxrVendorsVersion: '4.3.0-stable',
     junitVersion       : '1.3.0',
     espressoCoreVersion: '3.7.0',
-    kotlinTestVersion  : '1.3.11',
+    kotlinTestVersion  : '2.4.21',
     testRunnerVersion  : '1.7.0',
     testOrchestratorVersion: '1.6.1',
     documentfileVersion: '1.1.0',
 ]
+
+if (!JavaVersion.current().isCompatibleWith(versions.jdkVersion)) {
+    throw new GradleException("Godot Android builds require JDK ${versions.jdkVersion} or newer. Configure JAVA_HOME or the editor's Java SDK path.")
+}
 
 ext.getExportPackageName = { ->
     // Retrieve the app id from the project property set by the Godot build command.
@@ -208,6 +216,11 @@ ext.getExportPath = {
     String exportPath = project.hasProperty("export_path") ? project.property("export_path") : ""
     if (exportPath == null || exportPath.isEmpty()) {
         exportPath = "."
+    }
+    // Godot passes Windows folders as file:C:/... . Gradle 9 rejects this
+    // opaque URI; pass its literal drive path to Gradle's file resolver.
+    if (exportPath ==~ /(?i)file:[a-z]:.*/) {
+        exportPath = exportPath.substring("file:".length())
     }
     return exportPath
 }

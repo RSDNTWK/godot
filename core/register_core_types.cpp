@@ -35,6 +35,7 @@
 #include "core/core_bind.h"
 #include "core/crypto/aes_context.h"
 #include "core/crypto/crypto.h"
+#include "core/crypto/crypto_core.h"
 #include "core/crypto/crypto_resource_format.h"
 #include "core/crypto/hashing_context.h"
 #include "core/debugger/engine_profiler.h"
@@ -132,6 +133,8 @@ static ResourceUID *resource_uid = nullptr;
 static bool _is_core_extensions_registered = false;
 
 void register_core_types() {
+	ERR_FAIL_COND_MSG(CryptoCore::initialize_crypto_library() != OK, "Failed to initialize the core crypto library.");
+
 	OS::get_singleton()->benchmark_begin_measure("Core", "Register Types");
 
 	//consistency check
@@ -497,6 +500,7 @@ void unregister_core_types() {
 	StringName::cleanup();
 
 	FileAccessEncrypted::deinitialize();
+	CryptoCore::finalize_crypto_library();
 
 	OS::get_singleton()->benchmark_end_measure("Core", "Unregister Types");
 }

@@ -1,4 +1,4 @@
-// Generated from libjpeg-turbo 3.2.0 src/jversion.h.in.
+// Generated from libjpeg-turbo 3.2.1 src/jversion.h.in.
 /*
  * jversion.h
  *

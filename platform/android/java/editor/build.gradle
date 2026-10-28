@@ -198,6 +198,8 @@ android {
     }
 }
 
+addGodotRuntimeDependencyConstraints(project)
+
 dependencies {
     implementation fileTree(dir: "libs", include: ["*.jar", "*.aar"])
 

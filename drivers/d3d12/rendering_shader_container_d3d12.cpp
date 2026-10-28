@@ -366,7 +366,6 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 				code.ptr(),
 				code.size(),
 				nullptr,
-				0,
 				SPIRV_TO_MESA_STAGES[stage],
 				entry_point,
 				dxil_spirv_nir_get_spirv_options(),

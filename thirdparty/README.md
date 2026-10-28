@@ -54,7 +54,7 @@ Windows static package: chromium/8118, from the official Godot ANGLE release
 pin. `misc/scripts/install_angle.py` selects the current package.
 
 - Upstream: https://chromium.googlesource.com/angle/angle/
-- Version: git (chromium/5907, 430a4f559cbc2bcd5d026e8b36ee46ddd80e9651, 2023)
+- Version: git (chromium/8118, 2026)
 - License: BSD-3-Clause
 
 Files extracted from upstream source:
@@ -159,7 +159,7 @@ Patches:
 ## d3d12ma
 
 - Upstream: https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator
-- Version: 3.2.0 (tag v3.2.0, 2026)
+- Version: 3.2.1 (tag v3.2.1, 2026)
 - License: MIT
 
 Files extracted from upstream source:
@@ -176,7 +176,7 @@ Patches:
 ## directx_headers
 
 - Upstream: https://github.com/microsoft/DirectX-Headers
-- Version: main (25411c74bb9cc7c416b2ff01b3ad8a306811dfdd, 2025)
+- Version: 1.619.5 (tag v1.619.5, 2026)
 - License: MIT
 
 Files extracted from upstream source:
@@ -217,6 +217,12 @@ Files extracted from upstream source:
 
 
 ## embree
+
+Embedded SSE2NEON: v1.9.1 (https://github.com/DLTcollab/sse2neon).
+`0002-sse2neon-runtime-blend-mask.patch` retains runtime mask forwarding
+from Embree AVX emulation with explicit 16-bit mask element conversions.
+`0003-retain-embree-neon-shuffle-masks.patch` preserves Embree's private
+shuffle helpers in its emulation layer.
 
 - Upstream: https://github.com/embree/embree
 - Version: 4.4.1 (tag v4.4.1, 2026)
@@ -550,7 +556,7 @@ Patches:
 ## libjpeg-turbo
 
 - Upstream: https://github.com/libjpeg-turbo/libjpeg-turbo
-- Version: 3.2.0 (tag 3.2.0, 2026)
+- Version: 3.2.1 (tag 3.2.1, 2026)
 - License: BSD-3-Clause and IJG
 
 Files extracted from upstream source:
@@ -708,26 +714,24 @@ File extracted from upstream source:
 ## mbedtls
 
 - Upstream: https://github.com/Mbed-TLS/mbedtls
-- Version: 3.6.7 (068ff080b369adfac81509f9b57b2afabaf82dc5, 2026)
-- License: Apache 2.0
+- Version: 4.2.0 (tag mbedtls-4.2.0, 2026)
+- License: Apache 2.0 (selected from upstream dual licensing)
 
-File extracted from upstream release tarball:
+Files extracted from the checksum-verified upstream release:
 
-- All `.h` from `include/mbedtls/` to `thirdparty/mbedtls/include/mbedtls/`
-  and all `.h` from `include/psa/` to `thirdparty/mbedtls/include/psa/`
-- From `library/` to `thirdparty/mbedtls/library/`:
-  - All `.c` and `.h` files
-  - Except `bignum_mod.c`, `block_cipher.c`, `ecp_curves_new.c`, `lmots.c`,
-    `lms.c`
-- The `LICENSE` file (edited to keep only the Apache 2.0 variant)
-- Added 2 files `godot_core_mbedtls_platform.c` and `godot_core_mbedtls_config.h`
-  providing configuration for light bundling with core
-- Added 2 files `godot_module_mbedtls_config.h` and `threading_alt.h`
-  to customize the build configuration when bundling the full library
+- All `.h` files from `include/` and all `.c` and `.h` files from `library/`
+- Upstream license files
 
-Patches:
+The cryptography backend is TF-PSA-Crypto 1.2.0:
+https://github.com/Mbed-TLS/TF-PSA-Crypto/tree/tf-psa-crypto-1.2.0
+Its release source/header subsets are under `tf-psa-crypto/`: `include/`, `core/`,
+`dispatch/`, `drivers/builtin/include/`, `drivers/builtin/src/`, `extras/`,
+`platform/`, and `utilities/`. It uses the same Apache 2.0 license selection.
 
-- `0001-msvc-2019-psa-redeclaration.patch` ([GH-90535](https://github.com/godotengine/godot/pull/90535))
+`godot_build.py`, `godot_module_mbedtls_config.h`, `godot_psa_crypto_config.h`
+and `threading_alt.h` are Godot integration files and must be preserved.
+Core crypto uses the public PSA API. The module-disabled configuration builds
+only the crypto backend; TLS/X.509 sources are added by the mbedtls module.
 
 
 ## metal-cpp
@@ -1036,10 +1040,12 @@ Files extracted from upstream source:
 
 ## sdl
 
+Embedded HIDAPI: 0.15.0, with SDL integration in `0002-hidapi-0.15.0-integration.patch`.
+
 - Upstream: https://github.com/libsdl-org/SDL
 - Version: 3.4.18 (tag release-3.4.18, 2026)
 - License: Zlib
-- Vendored: hidapi 0.14.0, license BSD-3-Clause
+- Vendored: hidapi 0.15.0, license BSD-3-Clause
 
 Files extracted from upstream source:
 
@@ -1048,6 +1054,8 @@ Files extracted from upstream source:
 Patches:
 
 - `0001-godot-integration.patch`: local integration changes rebased on the version above.
+- `0002-hidapi-0.15.0-integration.patch`: retain SDL OS and allocation integration.
+- `0003-hidapi-0.15.0-backend-namespaces.patch`: namespace new HIDAPI APIs for SDL backend wrappers.
 
 
 ## spirv-cross
@@ -1220,7 +1228,7 @@ Files extracted from upstream source:
 SDK release: https://github.com/KhronosGroup/Vulkan-Utility-Libraries/blob/main/include/vulkan/vk_enum_string_helper.h
 
 `vk_mem_alloc.h` is taken from https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
-Version: 3.4.0 (tag v3.4.0, 2026)
+Version: 3.5.0 (tag v3.5.0, 2026)
 `vk_mem_alloc.cpp` is a Godot file and should be preserved on updates.
 
 Patches:

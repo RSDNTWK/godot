@@ -30,6 +30,10 @@
 
 #include "crypto_core.h"
 
+#include <mbedtls/version.h>
+
+#if MBEDTLS_VERSION_MAJOR < 4
+
 #include "core/os/os.h"
 #include "core/string/ustring.h"
 
@@ -251,3 +255,5 @@ Error CryptoCore::sha256(const uint8_t *p_src, size_t p_src_len, unsigned char r
 	int ret = mbedtls_sha256_ret(p_src, p_src_len, r_hash, 0);
 	return ret ? FAILED : OK;
 }
+
+#endif // MBEDTLS_VERSION_MAJOR < 4

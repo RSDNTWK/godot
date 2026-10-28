@@ -30,6 +30,7 @@
 
 #include "crypto_mbedtls.h"
 
+#include "core/crypto/crypto_core.h"
 #include "core/io/certs_compressed.gen.h"
 #include "core/io/compression.h"
 #include "core/io/file_access.h"
@@ -39,6 +40,19 @@
 #include <mbedtls/debug.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pem.h>
+
+#if MBEDTLS_VERSION_MAJOR >= 4
+struct GodotHMACPSA {
+	psa_mac_operation_t operation = PSA_MAC_OPERATION_INIT;
+	psa_key_id_t key = 0;
+	~GodotHMACPSA() {
+		psa_mac_abort(&operation);
+		if (key) {
+			psa_destroy_key(key);
+		}
+	}
+};
+#endif
 
 #define PEM_BEGIN_CRT "-----BEGIN CERTIFICATE-----\n"
 #define PEM_END_CRT "-----END CERTIFICATE-----\n"
@@ -131,6 +145,9 @@ String CryptoKeyMbedTLS::save_to_string(bool p_public_only) {
 }
 
 int CryptoKeyMbedTLS::_parse_key(const uint8_t *p_buf, int p_size) {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	return mbedtls_pk_parse_key(&pkey, p_buf, p_size, nullptr, 0);
+#else
 #if MBEDTLS_VERSION_MAJOR >= 3
 	mbedtls_entropy_context rng_entropy;
 	mbedtls_ctr_drbg_context rng_drbg;
@@ -146,6 +163,7 @@ int CryptoKeyMbedTLS::_parse_key(const uint8_t *p_buf, int p_size) {
 	return ret;
 #else
 	return mbedtls_pk_parse_key(&pkey, p_buf, p_size, nullptr, 0);
+#endif
 #endif
 }
 
@@ -252,6 +270,52 @@ HMACContext *HMACContextMbedTLS::create(bool p_notify_postinitialize) {
 }
 
 Error HMACContextMbedTLS::start(HashingContext::HashType p_hash_type, const PackedByteArray &p_key) {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	ERR_FAIL_COND_V_MSG(ctx != nullptr, ERR_FILE_ALREADY_IN_USE, "HMACContext already started.");
+	ERR_FAIL_COND_V_MSG(p_key.is_empty(), ERR_INVALID_PARAMETER, "Key must not be empty.");
+	ERR_FAIL_COND_V(p_hash_type != HashingContext::HASH_SHA1 && p_hash_type != HashingContext::HASH_SHA256, ERR_INVALID_PARAMETER);
+	hash_type = p_hash_type;
+	hash_len = p_hash_type == HashingContext::HASH_SHA1 ? 20 : 32;
+	psa_algorithm_t algorithm = PSA_ALG_HMAC(p_hash_type == HashingContext::HASH_SHA1 ? PSA_ALG_SHA_1 : PSA_ALG_SHA_256);
+	GodotHMACPSA *state = memnew(GodotHMACPSA);
+	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
+	psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
+	psa_set_key_algorithm(&attributes, algorithm);
+	// HMAC hashes keys longer than its block size. Normalize before import so
+	// Godot keeps accepting arbitrary key lengths beyond PSA key-object limits.
+	uint8_t normalized_key[32] = {};
+	const uint8_t *key_data = p_key.ptr();
+	size_t key_size = p_key.size();
+	psa_status_t status = PSA_SUCCESS;
+	if (key_size > 64) {
+		size_t digest_size = 0;
+		status = psa_hash_compute(p_hash_type == HashingContext::HASH_SHA1 ? PSA_ALG_SHA_1 : PSA_ALG_SHA_256,
+				key_data, key_size, normalized_key, sizeof(normalized_key), &digest_size);
+		if (status != PSA_SUCCESS || digest_size != (size_t)hash_len) {
+			mbedtls_platform_zeroize(normalized_key, sizeof(normalized_key));
+			psa_reset_key_attributes(&attributes);
+			memdelete(state);
+			hash_len = 0;
+			return FAILED;
+		}
+		key_data = normalized_key;
+		key_size = digest_size;
+	}
+	status = psa_import_key(&attributes, key_data, key_size, &state->key);
+	mbedtls_platform_zeroize(normalized_key, sizeof(normalized_key));
+	psa_reset_key_attributes(&attributes);
+	if (status == PSA_SUCCESS) {
+		status = psa_mac_sign_setup(&state->operation, state->key, algorithm);
+	}
+	if (status != PSA_SUCCESS) {
+		memdelete(state);
+		hash_len = 0;
+		return FAILED;
+	}
+	ctx = state;
+	return OK;
+#else
 	ERR_FAIL_COND_V_MSG(ctx != nullptr, ERR_FILE_ALREADY_IN_USE, "HMACContext already started.");
 
 	// HMAC keys can be any size.
@@ -269,18 +333,38 @@ Error HMACContextMbedTLS::start(HashingContext::HashType p_hash_type, const Pack
 	mbedtls_md_setup((mbedtls_md_context_t *)ctx, mbedtls_md_info_from_type((mbedtls_md_type_t)ht), 1);
 	int ret = mbedtls_md_hmac_starts((mbedtls_md_context_t *)ctx, (const uint8_t *)p_key.ptr(), (size_t)p_key.size());
 	return ret ? FAILED : OK;
+#endif
 }
 
 Error HMACContextMbedTLS::update(const PackedByteArray &p_data) {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	ERR_FAIL_NULL_V_MSG(ctx, ERR_INVALID_DATA, "Start must be called before update.");
+	ERR_FAIL_COND_V(p_data.is_empty(), ERR_INVALID_PARAMETER);
+	return psa_mac_update(&static_cast<GodotHMACPSA *>(ctx)->operation, p_data.ptr(), p_data.size()) == PSA_SUCCESS ? OK : FAILED;
+#else
 	ERR_FAIL_NULL_V_MSG(ctx, ERR_INVALID_DATA, "Start must be called before update.");
 
 	ERR_FAIL_COND_V_MSG(p_data.is_empty(), ERR_INVALID_PARAMETER, "Src must not be empty.");
 
 	int ret = mbedtls_md_hmac_update((mbedtls_md_context_t *)ctx, (const uint8_t *)p_data.ptr(), (size_t)p_data.size());
 	return ret ? FAILED : OK;
+#endif
 }
 
 PackedByteArray HMACContextMbedTLS::finish() {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	ERR_FAIL_NULL_V_MSG(ctx, PackedByteArray(), "Start must be called before finish.");
+	PackedByteArray out;
+	out.resize(hash_len);
+	size_t size = 0;
+	psa_status_t status = psa_mac_sign_finish(&static_cast<GodotHMACPSA *>(ctx)->operation, out.ptrw(), out.size(), &size);
+	memdelete(static_cast<GodotHMACPSA *>(ctx));
+	ctx = nullptr;
+	bool valid = status == PSA_SUCCESS && size == (size_t)hash_len;
+	hash_len = 0;
+	ERR_FAIL_COND_V(!valid, PackedByteArray());
+	return out;
+#else
 	ERR_FAIL_NULL_V_MSG(ctx, PackedByteArray(), "Start must be called before finish.");
 	ERR_FAIL_COND_V_MSG(hash_len == 0, PackedByteArray(), "Unsupported hash type.");
 
@@ -297,13 +381,20 @@ PackedByteArray HMACContextMbedTLS::finish() {
 
 	ERR_FAIL_COND_V_MSG(ret, PackedByteArray(), "Error received while finishing HMAC");
 	return out;
+#endif
 }
 
 HMACContextMbedTLS::~HMACContextMbedTLS() {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	if (ctx) {
+		memdelete(static_cast<GodotHMACPSA *>(ctx));
+	}
+#else
 	if (ctx != nullptr) {
 		mbedtls_md_free((mbedtls_md_context_t *)ctx);
 		memfree((mbedtls_md_context_t *)ctx);
 	}
+#endif
 }
 
 Crypto *CryptoMbedTLS::create(bool p_notify_postinitialize) {
@@ -328,17 +419,25 @@ void CryptoMbedTLS::finalize_crypto() {
 }
 
 CryptoMbedTLS::CryptoMbedTLS() {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	ERR_FAIL_COND_MSG(CryptoCore::initialize_crypto_library() != OK, "Failed to initialize PSA Crypto.");
+#else
 	mbedtls_ctr_drbg_init(&ctr_drbg);
 	mbedtls_entropy_init(&entropy);
 	int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, nullptr, 0);
 	if (ret != 0) {
 		ERR_PRINT(" failed\n  ! mbedtls_ctr_drbg_seed returned an error" + itos(ret));
 	}
+#endif
 }
 
 CryptoMbedTLS::~CryptoMbedTLS() {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	// The PSA backend is shared and released after core crypto users shut down.
+#else
 	mbedtls_ctr_drbg_free(&ctr_drbg);
 	mbedtls_entropy_free(&entropy);
+#endif
 }
 
 Ref<X509CertificateMbedTLS> CryptoMbedTLS::default_certs;
@@ -380,6 +479,26 @@ void CryptoMbedTLS::load_default_certificates(const String &p_path) {
 }
 
 Ref<CryptoKey> CryptoMbedTLS::generate_rsa(int p_bytes) {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	Ref<CryptoKeyMbedTLS> out;
+	out.instantiate();
+	ERR_FAIL_COND_V(p_bytes <= 0 || p_bytes > PSA_VENDOR_RSA_MAX_KEY_BITS, nullptr);
+	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_set_key_type(&attributes, PSA_KEY_TYPE_RSA_KEY_PAIR);
+	psa_set_key_bits(&attributes, p_bytes);
+	psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_EXPORT | PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_VERIFY_HASH | PSA_KEY_USAGE_ENCRYPT | PSA_KEY_USAGE_DECRYPT);
+	psa_set_key_algorithm(&attributes, PSA_ALG_RSA_PKCS1V15_SIGN(PSA_ALG_ANY_HASH));
+	psa_set_key_enrollment_algorithm(&attributes, PSA_ALG_RSA_PKCS1V15_CRYPT);
+	psa_key_id_t id = 0;
+	psa_status_t status = psa_generate_key(&attributes, &id);
+	psa_reset_key_attributes(&attributes);
+	ERR_FAIL_COND_V(status != PSA_SUCCESS, nullptr);
+	int ret = mbedtls_pk_copy_from_psa(id, &out->pkey);
+	psa_destroy_key(id);
+	ERR_FAIL_COND_V(ret != 0, nullptr);
+	out->public_only = false;
+	return out;
+#else
 	Ref<CryptoKeyMbedTLS> out;
 	out.instantiate();
 	int ret = mbedtls_pk_setup(&(out->pkey), mbedtls_pk_info_from_type(MBEDTLS_PK_RSA));
@@ -388,6 +507,7 @@ Ref<CryptoKey> CryptoMbedTLS::generate_rsa(int p_bytes) {
 	out->public_only = false;
 	ERR_FAIL_COND_V(ret != 0, nullptr);
 	return out;
+#endif
 }
 
 Ref<X509Certificate> CryptoMbedTLS::generate_self_signed_certificate(Ref<CryptoKey> p_key, const String &p_issuer_name, const String &p_not_before, const String &p_not_after) {
@@ -404,7 +524,14 @@ Ref<X509Certificate> CryptoMbedTLS::generate_self_signed_certificate(Ref<CryptoK
 	mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
 
 	uint8_t rand_serial[20];
+#if MBEDTLS_VERSION_MAJOR >= 4
+	if (psa_generate_random(rand_serial, sizeof(rand_serial)) != PSA_SUCCESS) {
+		mbedtls_x509write_crt_free(&crt);
+		return nullptr;
+	}
+#else
 	mbedtls_ctr_drbg_random(&ctr_drbg, rand_serial, sizeof(rand_serial));
+#endif
 
 #if MBEDTLS_VERSION_MAJOR >= 3
 	mbedtls_x509write_crt_set_serial_raw(&crt, rand_serial, sizeof(rand_serial));
@@ -421,7 +548,11 @@ Ref<X509Certificate> CryptoMbedTLS::generate_self_signed_certificate(Ref<CryptoK
 
 	unsigned char buf[4096];
 	memset(buf, 0, 4096);
+#if MBEDTLS_VERSION_MAJOR >= 4
+	int ret = mbedtls_x509write_crt_pem(&crt, buf, sizeof(buf));
+#else
 	int ret = mbedtls_x509write_crt_pem(&crt, buf, 4096, mbedtls_ctr_drbg_random, &ctr_drbg);
+#endif
 #if MBEDTLS_VERSION_MAJOR < 3
 	mbedtls_mpi_free(&serial);
 #endif
@@ -436,6 +567,13 @@ Ref<X509Certificate> CryptoMbedTLS::generate_self_signed_certificate(Ref<CryptoK
 }
 
 PackedByteArray CryptoMbedTLS::generate_random_bytes(int p_bytes) {
+#if MBEDTLS_VERSION_MAJOR >= 4
+	ERR_FAIL_COND_V(p_bytes < 0, PackedByteArray());
+	PackedByteArray out;
+	out.resize(p_bytes);
+	ERR_FAIL_COND_V(psa_generate_random(out.ptrw(), out.size()) != PSA_SUCCESS, PackedByteArray());
+	return out;
+#else
 	ERR_FAIL_COND_V(p_bytes < 0, PackedByteArray());
 	PackedByteArray out;
 	out.resize(p_bytes);
@@ -450,6 +588,7 @@ PackedByteArray CryptoMbedTLS::generate_random_bytes(int p_bytes) {
 		pos += to_read;
 	}
 	return out;
+#endif
 }
 
 mbedtls_md_type_t CryptoMbedTLS::md_type_from_hashtype(HashingContext::HashType p_hash_type, int &r_size) {
@@ -488,7 +627,12 @@ Vector<uint8_t> CryptoMbedTLS::sign(HashingContext::HashType p_hash_type, const 
 #if MBEDTLS_VERSION_MAJOR >= 3
 			sizeof(buf),
 #endif
-			&sig_size, mbedtls_ctr_drbg_random, &ctr_drbg);
+			&sig_size
+#if MBEDTLS_VERSION_MAJOR < 4
+			,
+			mbedtls_ctr_drbg_random, &ctr_drbg
+#endif
+	);
 	ERR_FAIL_COND_V_MSG(ret, out, "Error while signing: " + itos(ret));
 	out.resize(sig_size);
 	memcpy(out.ptrw(), buf, sig_size);
@@ -511,7 +655,23 @@ Vector<uint8_t> CryptoMbedTLS::encrypt(Ref<CryptoKey> p_key, const Vector<uint8_
 	uint8_t buf[1024];
 	size_t size;
 	Vector<uint8_t> out;
+#if MBEDTLS_VERSION_MAJOR >= 4
+	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t id = 0;
+	int ret = mbedtls_pk_get_psa_attributes(&key->pkey, PSA_KEY_USAGE_ENCRYPT, &attributes);
+	if (ret == 0) {
+		ret = mbedtls_pk_import_into_psa(&key->pkey, &attributes, &id);
+	}
+	psa_reset_key_attributes(&attributes);
+	if (ret == 0) {
+		ret = psa_asymmetric_encrypt(id, PSA_ALG_RSA_PKCS1V15_CRYPT, p_plaintext.ptr(), p_plaintext.size(), nullptr, 0, buf, sizeof(buf), &size);
+	}
+	if (id) {
+		psa_destroy_key(id);
+	}
+#else
 	int ret = mbedtls_pk_encrypt(&(key->pkey), p_plaintext.ptr(), p_plaintext.size(), buf, &size, sizeof(buf), mbedtls_ctr_drbg_random, &ctr_drbg);
+#endif
 	ERR_FAIL_COND_V_MSG(ret, out, "Error while encrypting: " + itos(ret));
 	out.resize(size);
 	memcpy(out.ptrw(), buf, size);
@@ -525,7 +685,23 @@ Vector<uint8_t> CryptoMbedTLS::decrypt(Ref<CryptoKey> p_key, const Vector<uint8_
 	uint8_t buf[2048];
 	size_t size;
 	Vector<uint8_t> out;
+#if MBEDTLS_VERSION_MAJOR >= 4
+	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t id = 0;
+	int ret = mbedtls_pk_get_psa_attributes(&key->pkey, PSA_KEY_USAGE_DECRYPT, &attributes);
+	if (ret == 0) {
+		ret = mbedtls_pk_import_into_psa(&key->pkey, &attributes, &id);
+	}
+	psa_reset_key_attributes(&attributes);
+	if (ret == 0) {
+		ret = psa_asymmetric_decrypt(id, PSA_ALG_RSA_PKCS1V15_CRYPT, p_ciphertext.ptr(), p_ciphertext.size(), nullptr, 0, buf, sizeof(buf), &size);
+	}
+	if (id) {
+		psa_destroy_key(id);
+	}
+#else
 	int ret = mbedtls_pk_decrypt(&(key->pkey), p_ciphertext.ptr(), p_ciphertext.size(), buf, &size, sizeof(buf), mbedtls_ctr_drbg_random, &ctr_drbg);
+#endif
 	ERR_FAIL_COND_V_MSG(ret, out, "Error while decrypting: " + itos(ret));
 	out.resize(size);
 	memcpy(out.ptrw(), buf, size);

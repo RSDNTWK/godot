@@ -1,0 +1,1131 @@
+--- a/thirdparty/sdl/hidapi/hidapi/hidapi.h
++++ b/thirdparty/sdl/hidapi/hidapi/hidapi.h
+@@ -105,6 +105,8 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++#ifndef DEFINED_HID_TYPES
++#define DEFINED_HID_TYPES
+ 		/** A structure to hold the version numbers. */
+ 		struct hid_api_version {
+ 			int major; /**< major version number */
+@@ -184,7 +186,15 @@
+ 			    Since version 0.13.0, @ref HID_API_VERSION >= HID_API_MAKE_VERSION(0, 13, 0)
+ 			*/
+ 			hid_bus_type bus_type;
++
++			/** Additional information about the USB interface.
++			    (libusb only) */
++			int interface_class;
++			int interface_subclass;
++			int interface_protocol;
+ 		};
++
++#endif /* DEFINED_HID_TYPES */
+ 
+ 
+ 		/** @brief Initialize the HIDAPI library.
+--- a/thirdparty/sdl/hidapi/linux/hid.c
++++ b/thirdparty/sdl/hidapi/linux/hid.c
+@@ -40,9 +40,43 @@
+ #include <linux/hidraw.h>
+ #include <linux/version.h>
+ #include <linux/input.h>
+-#include <libudev.h>
+-
+-#include "hidapi.h"
++// #include <libudev.h>
++#include "SDL_udev.h"
++extern SDL_UDEV_PrivateData *SDL_UDEV_PrivateData_this;
++#define udev_device_get_action (SDL_UDEV_PrivateData_this->syms.udev_device_get_action)
++#define udev_device_get_devnode (SDL_UDEV_PrivateData_this->syms.udev_device_get_devnode)
++#define udev_device_get_syspath (SDL_UDEV_PrivateData_this->syms.udev_device_get_syspath)
++#define udev_device_get_subsystem (SDL_UDEV_PrivateData_this->syms.udev_device_get_subsystem)
++#define udev_device_get_parent_with_subsystem_devtype (SDL_UDEV_PrivateData_this->syms.udev_device_get_parent_with_subsystem_devtype)
++#define udev_device_get_property_value (SDL_UDEV_PrivateData_this->syms.udev_device_get_property_value)
++#define udev_device_get_sysattr_value (SDL_UDEV_PrivateData_this->syms.udev_device_get_sysattr_value)
++#define udev_device_new_from_syspath (SDL_UDEV_PrivateData_this->syms.udev_device_new_from_syspath)
++#define udev_device_unref (SDL_UDEV_PrivateData_this->syms.udev_device_unref)
++#define udev_enumerate_add_match_property (SDL_UDEV_PrivateData_this->syms.udev_enumerate_add_match_property)
++#define udev_enumerate_add_match_subsystem (SDL_UDEV_PrivateData_this->syms.udev_enumerate_add_match_subsystem)
++#define udev_enumerate_get_list_entry (SDL_UDEV_PrivateData_this->syms.udev_enumerate_get_list_entry)
++#define udev_enumerate_new (SDL_UDEV_PrivateData_this->syms.udev_enumerate_new)
++#define udev_enumerate_scan_devices (SDL_UDEV_PrivateData_this->syms.udev_enumerate_scan_devices)
++#define udev_enumerate_unref (SDL_UDEV_PrivateData_this->syms.udev_enumerate_unref)
++#define udev_list_entry_get_name (SDL_UDEV_PrivateData_this->syms.udev_list_entry_get_name)
++#define udev_list_entry_get_next (SDL_UDEV_PrivateData_this->syms.udev_list_entry_get_next)
++#define udev_monitor_enable_receiving (SDL_UDEV_PrivateData_this->syms.udev_monitor_enable_receiving)
++#define udev_monitor_filter_add_match_subsystem_devtype (SDL_UDEV_PrivateData_this->syms.udev_monitor_filter_add_match_subsystem_devtype)
++#define udev_monitor_get_fd (SDL_UDEV_PrivateData_this->syms.udev_monitor_get_fd)
++#define udev_monitor_new_from_netlink (SDL_UDEV_PrivateData_this->syms.udev_monitor_new_from_netlink)
++#define udev_monitor_receive_device (SDL_UDEV_PrivateData_this->syms.udev_monitor_receive_device)
++#define udev_monitor_unref (SDL_UDEV_PrivateData_this->syms.udev_monitor_unref)
++#define udev_new (SDL_UDEV_PrivateData_this->syms.udev_new)
++#define udev_unref (SDL_UDEV_PrivateData_this->syms.udev_unref)
++#define udev_device_new_from_devnum (SDL_UDEV_PrivateData_this->syms.udev_device_new_from_devnum)
++#define udev_device_get_devnum (SDL_UDEV_PrivateData_this->syms.udev_device_get_devnum)
++#undef SDL_UDEV_SYM
++
++#include "../hidapi/hidapi.h"
++
++#ifndef BUS_SPI
++#define BUS_SPI 0x1C
++#endif
+ 
+ #ifdef HIDAPI_ALLOW_BUILD_WORKAROUND_KERNEL_2_6_39
+ /* This definitions first appeared in Linux Kernel 2.6.39 in linux/hidraw.h.
+@@ -74,6 +108,7 @@
+ struct hid_device_ {
+ 	int device_handle;
+ 	int blocking;
++	int needs_ble_hack;
+ 	wchar_t *last_error_str;
+ 	wchar_t *last_read_error_str;
+ 	struct hid_device_info* device_info;
+@@ -134,11 +169,20 @@
+  * Use register_error_str(NULL) to free the error message completely. */
+ static void register_error_str(wchar_t **error_str, const char *msg)
+ {
++#ifdef HIDAPI_USING_SDL_RUNTIME
++	/* Thread-safe error handling */
++	if (msg) {
++		SDL_SetError("%s", msg);
++	} else {
++		SDL_ClearError();
++	}
++#else
+ 	free(*error_str);
+ 	*error_str = utf8_to_wchar_t(msg);
+-}
+-
+-/* Semilar to register_error_str, but allows passing a format string with va_list args into this function. */
++#endif
++}
++
++/* Similar to register_error_str, but allows passing a format string with va_list args into this function. */
+ static void register_error_str_vformat(wchar_t **error_str, const char *format, va_list args)
+ {
+ 	char msg[256];
+@@ -243,7 +287,7 @@
+ 		*data_len = 0;
+ 		*key_size = 0;
+ 		break;
+-	};
++	}
+ 
+ 	/* malformed report */
+ 	return 0;
+@@ -282,7 +326,7 @@
+  * Skips all nested Collection, i.e. iterates until the end of current level Collection.
+  *
+  * The return value is non-0 when an end of current Collection is found,
+- * 0 when error is occured (broken Descriptor, end of a Collection is found before its begin,
++ * 0 when error is occurred (broken Descriptor, end of a Collection is found before its begin,
+  *  or no Collection is found at all).
+  */
+ static int hid_iterate_over_collection(const __u8 *report_descriptor, __u32 size, unsigned int *pos, int *data_len, int *key_size)
+@@ -402,8 +446,8 @@
+ 	/* If no top-level application collection is found and usage page/usage pair is found, pair is valid
+ 	   https://docs.microsoft.com/en-us/windows-hardware/drivers/hid/top-level-collections */
+ 	if (initial && usage_found && ctx->usage_page_found) {
+-		*usage_page = ctx->usage_page;
+-		return 0; /* success */
++			*usage_page = ctx->usage_page;
++			return 0; /* success */
+ 	}
+ 
+ 	return 1; /* finished processing */
+@@ -631,6 +675,69 @@
+ 	return (found_id && found_name && found_serial);
+ }
+ 
++static int is_BLE(hid_device *dev)
++{
++	struct udev *udev;
++	struct udev_device *udev_dev, *hid_dev;
++	struct stat s;
++	int ret;
++
++	/* Create the udev object */
++	udev = udev_new();
++	if (!udev) {
++		printf("Can't create udev\n");
++		return -1;
++	}
++
++	/* Get the dev_t (major/minor numbers) from the file handle. */
++	if (fstat(dev->device_handle, &s) < 0) {
++		udev_unref(udev);
++		return -1;
++	}
++
++	/* Open a udev device from the dev_t. 'c' means character device. */
++	ret = 0;
++	udev_dev = udev_device_new_from_devnum(udev, 'c', s.st_rdev);
++	if (udev_dev) {
++		hid_dev = udev_device_get_parent_with_subsystem_devtype(
++			udev_dev,
++			"hid",
++			NULL);
++		if (hid_dev) {
++			unsigned short dev_vid = 0;
++			unsigned short dev_pid = 0;
++			unsigned bus_type = 0;
++			char *serial_number_utf8 = NULL;
++			char *product_name_utf8 = NULL;
++
++			parse_uevent_info(
++			           udev_device_get_sysattr_value(hid_dev, "uevent"),
++			           &bus_type,
++			           &dev_vid,
++			           &dev_pid,
++			           &serial_number_utf8,
++			           &product_name_utf8);
++			free(serial_number_utf8);
++			free(product_name_utf8);
++
++			if (bus_type == BUS_BLUETOOTH) {
++				/* Right now the Steam Controller is the only BLE device that we send feature reports to */
++				if (dev_vid == 0x28de /* Valve */) {
++					ret = 1;
++				}
++			}
++
++			/* hid_dev doesn't need to be (and can't be) unref'd.
++			   I'm not sure why, but it'll throw double-free() errors. */
++		}
++		udev_device_unref(udev_dev);
++	}
++
++	udev_unref(udev);
++
++	return ret;
++}
++
+ 
+ static struct hid_device_info * create_device_info_for_device(struct udev_device *raw_dev)
+ {
+@@ -836,6 +943,32 @@
+ 			cur_dev->bus_type = prev_dev->bus_type;
+ 		}
+ 	}
++
++#ifdef HIDAPI_IGNORE_DEVICE
++	{
++		struct hid_device_info *prev_dev = NULL;
++
++		cur_dev = root;
++		while (cur_dev) {
++			if (HIDAPI_IGNORE_DEVICE(cur_dev->bus_type, cur_dev->vendor_id, cur_dev->product_id, cur_dev->usage_page, cur_dev->usage, false, false)) {
++				struct hid_device_info *tmp = cur_dev;
++
++				cur_dev = tmp->next;
++				if (prev_dev) {
++					prev_dev->next = cur_dev;
++				} else {
++					root = cur_dev;
++				}
++				tmp->next = NULL;
++			
++				hid_free_enumeration(tmp);
++			} else {
++				prev_dev = cur_dev;
++				cur_dev = cur_dev->next;
++			}
++		}
++	}
++#endif
+ 
+ end:
+ 	free(serial_number_utf8);
+@@ -1077,7 +1210,17 @@
+ 		return NULL;
+ 	}
+ 
+-	dev->device_handle = open(path, O_RDWR | O_CLOEXEC);
++    const int MAX_ATTEMPTS = 50;
++    int attempt;
++    for (attempt = 1; attempt <= MAX_ATTEMPTS; ++attempt) {
++        dev->device_handle = open(path, O_RDWR | O_CLOEXEC);
++        if (dev->device_handle < 0 && errno == EACCES) {
++            /* udev might be setting up permissions, wait a bit and try again */
++            usleep(1 * 1000);
++            continue;
++        }
++        break;
++    }
+ 
+ 	if (dev->device_handle >= 0) {
+ 		int res, desc_size = 0;
+@@ -1089,6 +1232,8 @@
+ 			hid_close(dev);
+ 			return NULL;
+ 		}
++
++		dev->needs_ble_hack = (is_BLE(dev) == 1);
+ 
+ 		return dev;
+ 	}
+@@ -1203,6 +1348,8 @@
+ 
+ int HID_API_EXPORT hid_send_feature_report(hid_device *dev, const unsigned char *data, size_t length)
+ {
++	static const int MAX_RETRIES = 50;
++	int retry;
+ 	int res;
+ 
+ 	if (!data || (length == 0)) {
+@@ -1213,16 +1360,24 @@
+ 
+ 	register_device_error(dev, NULL);
+ 
+-	res = ioctl(dev->device_handle, HIDIOCSFEATURE(length), data);
+-	if (res < 0)
+-		register_device_error_format(dev, "ioctl (SFEATURE): %s", strerror(errno));
+-
++	for (retry = 0; retry < MAX_RETRIES; ++retry) {
++		res = ioctl(dev->device_handle, HIDIOCSFEATURE(length), data);
++		if (res < 0 && errno == EPIPE) {
++			/* Try again... */
++			continue;
++		}
++
++		if (res < 0)
++			register_device_error_format(dev, "ioctl (SFEATURE): %s", strerror(errno));
++		break;
++	}
+ 	return res;
+ }
+ 
+ int HID_API_EXPORT hid_get_feature_report(hid_device *dev, unsigned char *data, size_t length)
+ {
+ 	int res;
++	unsigned char report = data[0];
+ 
+ 	if (!data || (length == 0)) {
+ 		errno = EINVAL;
+@@ -1235,6 +1390,19 @@
+ 	res = ioctl(dev->device_handle, HIDIOCGFEATURE(length), data);
+ 	if (res < 0)
+ 		register_device_error_format(dev, "ioctl (GFEATURE): %s", strerror(errno));
++	else if (dev->needs_ble_hack) {
++		/* Versions of BlueZ before 5.56 don't include the report in the data,
++		 * and versions of BlueZ >= 5.56 include 2 copies of the report.
++		 * We'll fix it so that there is a single copy of the report in both cases
++		 */
++		if (data[0] == report && data[1] == report) {
++			memmove(&data[0], &data[1], res);
++		} else if (data[0] != report) {
++			memmove(&data[1], &data[0], res);
++			data[0] = report;
++			++res;
++		}
++	}
+ 
+ 	return res;
+ }
+--- a/thirdparty/sdl/hidapi/mac/hid.c
++++ b/thirdparty/sdl/hidapi/mac/hid.c
+@@ -212,6 +212,7 @@
+ }
+ 
+ 
++#ifndef HIDAPI_USING_SDL_RUNTIME
+ /* The caller must free the returned string with free(). */
+ static wchar_t *utf8_to_wchar_t(const char *utf8)
+ {
+@@ -233,6 +234,7 @@
+ 
+ 	return ret;
+ }
++#endif
+ 
+ 
+ /* Makes a copy of the given error message (and decoded according to the
+@@ -242,7 +244,16 @@
+ static void register_error_str(wchar_t **error_str, const char *msg)
+ {
+ 	free(*error_str);
++#ifdef HIDAPI_USING_SDL_RUNTIME
++	/* Thread-safe error handling */
++	if (msg) {
++		SDL_SetError("%s", msg);
++	} else {
++		SDL_ClearError();
++	}
++#else
+ 	*error_str = utf8_to_wchar_t(msg);
++#endif
+ }
+ 
+ /* Similar to register_error_str, but allows passing a format string with va_list args into this function. */
+@@ -540,10 +551,33 @@
+ 	return result;
+ }
+ 
++#ifdef HIDAPI_IGNORE_DEVICE
++static hid_bus_type get_bus_type(IOHIDDeviceRef dev)
++{
++	hid_bus_type bus_type = HID_API_BUS_UNKNOWN;
++
++	CFTypeRef transport_prop = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDTransportKey));
++
++	if (transport_prop != NULL && CFGetTypeID(transport_prop) == CFStringGetTypeID()) {
++		if (CFStringCompare((CFStringRef)transport_prop, CFSTR(kIOHIDTransportUSBValue), 0) == kCFCompareEqualTo) {
++			bus_type = HID_API_BUS_USB;
++		} else if (CFStringHasPrefix((CFStringRef)transport_prop, CFSTR(kIOHIDTransportBluetoothValue))) {
++			bus_type = HID_API_BUS_BLUETOOTH;
++		} else if (CFStringCompare((CFStringRef)transport_prop, CFSTR(kIOHIDTransportI2CValue), 0) == kCFCompareEqualTo) {
++			bus_type = HID_API_BUS_I2C;
++		} else  if (CFStringCompare((CFStringRef)transport_prop, CFSTR(kIOHIDTransportSPIValue), 0) == kCFCompareEqualTo) {
++			bus_type = HID_API_BUS_SPI;
++		}
++	}
++	return bus_type;
++}
++#endif /* HIDAPI_IGNORE_DEVICE */
++
+ static struct hid_device_info *create_device_info_with_usage(IOHIDDeviceRef dev, int32_t usage_page, int32_t usage)
+ {
+ 	unsigned short dev_vid;
+ 	unsigned short dev_pid;
++	unsigned short dev_version;
+ 	int BUF_LEN = 256;
+ 	wchar_t buf[BUF_LEN];
+ 	CFTypeRef transport_prop;
+@@ -564,6 +598,24 @@
+ 
+ 	dev_vid = get_vendor_id(dev);
+ 	dev_pid = get_product_id(dev);
++	dev_version = get_int_property(dev, CFSTR(kIOHIDVersionNumberKey));
++
++#ifdef HIDAPI_IGNORE_DEVICE
++	/* See if there are any devices we should skip in enumeration */
++	if (HIDAPI_IGNORE_DEVICE(get_bus_type(dev), dev_vid, dev_pid, usage_page, usage, false, false)) {
++		free(cur_dev);
++		return NULL;
++	}
++#endif
++
++#ifdef HIDAPI_USING_SDL_RUNTIME
++	if (SDL_IsJoystickSteamVirtualGamepad(dev_vid, dev_pid, dev_version)) {
++		if (IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDVirtualHIDevice)) != kCFBooleanTrue) {
++			/* This is a real Xbox 360 controller, adjust the version so it's not detected as a Steam virtual gamepad */
++			dev_version = 1;
++		}
++	}
++#endif
+ 
+ 	cur_dev->usage_page = usage_page;
+ 	cur_dev->usage = usage;
+@@ -612,7 +664,7 @@
+ 	cur_dev->product_id = dev_pid;
+ 
+ 	/* Release Number */
+-	cur_dev->release_number = get_int_property(dev, CFSTR(kIOHIDVersionNumberKey));
++	cur_dev->release_number = dev_version;
+ 
+ 	/* Interface Number.
+ 	 * We can only retrieve the interface number for USB HID devices.
+@@ -661,9 +713,6 @@
+ 	/* Primary should always be first, to match previous behavior. */
+ 	struct hid_device_info *root = create_device_info_with_usage(device, primary_usage_page, primary_usage);
+ 	struct hid_device_info *cur = root;
+-
+-	if (!root)
+-		return NULL;
+ 
+ 	CFArrayRef usage_pairs = get_usage_pairs(device);
+ 
+@@ -690,9 +739,13 @@
+ 				continue; /* Already added. */
+ 
+ 			next = create_device_info_with_usage(device, usage_page, usage);
+-			cur->next = next;
+-			if (next != NULL) {
+-				cur = next;
++			if (cur) {
++				if (next != NULL) {
++					cur->next = next;
++					cur = next;
++				}
++			} else {
++				root = cur = next;
+ 			}
+ 		}
+ 	}
+@@ -1100,6 +1153,8 @@
+ 
+ static int set_report(hid_device *dev, IOHIDReportType type, const unsigned char *data, size_t length)
+ {
++	const char *pass_through_magic = "MAGIC0";
++	size_t pass_through_magic_length = strlen(pass_through_magic);
+ 	const unsigned char *data_to_send = data;
+ 	CFIndex length_to_send = length;
+ 	IOReturn res;
+@@ -1119,6 +1174,11 @@
+ 		   Don't send the report number. */
+ 		data_to_send = data+1;
+ 		length_to_send = length-1;
++	}
++	else if (length > 6 && memcmp(data, pass_through_magic, pass_through_magic_length) == 0) {
++		report_id = data[pass_through_magic_length];
++		data_to_send = data+pass_through_magic_length;
++		length_to_send = length-pass_through_magic_length;
+ 	}
+ 
+ 	/* Avoid crash if the device has been unplugged. */
+@@ -1411,7 +1471,7 @@
+ 
+ 	   UPD: The crash part was true in/until some version of macOS.
+ 	   Starting with macOS 10.15, there is an opposite effect in some environments:
+-	   crash happenes if IOHIDDeviceClose() is not called.
++	   crash happens if IOHIDDeviceClose() is not called.
+ 	   Not leaking a resource in all tested environments.
+ 	*/
+ 	if (is_macos_10_10_or_greater || !dev->disconnected) {
+@@ -1573,7 +1633,7 @@
+ 		}
+ 
+ 		memcpy(buf, descriptor_buf, copy_len);
+-		return copy_len;
++		return (int)copy_len;
+ 	}
+ 	else {
+ 		register_device_error(dev, "Failed to get kIOHIDReportDescriptorKey property");
+--- a/thirdparty/sdl/hidapi/mac/hidapi_darwin.h
++++ b/thirdparty/sdl/hidapi/mac/hidapi_darwin.h
+@@ -28,7 +28,7 @@
+ 
+ #include <stdint.h>
+ 
+-#include "hidapi.h"
++#include "../hidapi/hidapi.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+--- a/thirdparty/sdl/hidapi/windows/hid.c
++++ b/thirdparty/sdl/hidapi/windows/hid.c
+@@ -38,10 +38,11 @@
+ typedef LONG NTSTATUS;
+ #endif
+ 
+-#ifdef __MINGW32__
+-#include <ntdef.h>
+-#include <winbase.h>
++#ifndef WC_ERR_INVALID_CHARS
+ #define WC_ERR_INVALID_CHARS 0x00000080
++#endif
++#ifndef _WIN32_WINNT_WIN8
++#define _WIN32_WINNT_WIN8 0x0602
+ #endif
+ 
+ #ifdef __CYGWIN__
+@@ -56,9 +57,11 @@
+ #include "hidapi_hidclass.h"
+ #include "hidapi_hidsdi.h"
+ 
++#ifndef HIDAPI_USING_SDL_RUNTIME
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#endif
+ 
+ #ifdef MIN
+ #undef MIN
+@@ -104,6 +107,7 @@
+ static HidD_FreePreparsedData_ HidD_FreePreparsedData;
+ static HidP_GetCaps_ HidP_GetCaps;
+ static HidD_SetNumInputBuffers_ HidD_SetNumInputBuffers;
++static HidD_SetOutputReport_ HidD_SetOutputReport;
+ 
+ static CM_Locate_DevNodeW_ CM_Locate_DevNodeW = NULL;
+ static CM_Get_Parent_ CM_Get_Parent = NULL;
+@@ -116,7 +120,7 @@
+ static HMODULE cfgmgr32_lib_handle = NULL;
+ static BOOLEAN hidapi_initialized = FALSE;
+ 
+-static void free_library_handles()
++static void free_library_handles(void)
+ {
+ 	if (hid_lib_handle)
+ 		FreeLibrary(hid_lib_handle);
+@@ -126,7 +130,12 @@
+ 	cfgmgr32_lib_handle = NULL;
+ }
+ 
+-static int lookup_functions()
++#if defined(__GNUC__) && __GNUC__ >= 8
++# pragma GCC diagnostic push
++# pragma GCC diagnostic ignored "-Wcast-function-type"
++#endif
++
++static int lookup_functions(void)
+ {
+ 	hid_lib_handle = LoadLibraryW(L"hid.dll");
+ 	if (hid_lib_handle == NULL) {
+@@ -138,10 +147,6 @@
+ 		goto err;
+ 	}
+ 
+-#if defined(__GNUC__)
+-# pragma GCC diagnostic push
+-# pragma GCC diagnostic ignored "-Wcast-function-type"
+-#endif
+ #define RESOLVE(lib_handle, x) x = (x##_)GetProcAddress(lib_handle, #x); if (!x) goto err;
+ 
+ 	RESOLVE(hid_lib_handle, HidD_GetHidGuid);
+@@ -158,6 +163,7 @@
+ 	RESOLVE(hid_lib_handle, HidD_FreePreparsedData);
+ 	RESOLVE(hid_lib_handle, HidP_GetCaps);
+ 	RESOLVE(hid_lib_handle, HidD_SetNumInputBuffers);
++	RESOLVE(hid_lib_handle, HidD_SetOutputReport);
+ 
+ 	RESOLVE(cfgmgr32_lib_handle, CM_Locate_DevNodeW);
+ 	RESOLVE(cfgmgr32_lib_handle, CM_Get_Parent);
+@@ -167,9 +173,6 @@
+ 	RESOLVE(cfgmgr32_lib_handle, CM_Get_Device_Interface_ListW);
+ 
+ #undef RESOLVE
+-#if defined(__GNUC__)
+-# pragma GCC diagnostic pop
+-#endif
+ 
+ 	return 0;
+ 
+@@ -177,6 +180,10 @@
+ 	free_library_handles();
+ 	return -1;
+ }
++
++#if defined(__GNUC__) && __GNUC__ >= 8
++# pragma GCC diagnostic pop
++#endif
+ 
+ #endif /* HIDAPI_USE_DDK */
+ 
+@@ -195,10 +202,30 @@
+ 		OVERLAPPED ol;
+ 		OVERLAPPED write_ol;
+ 		struct hid_device_info* device_info;
++		BOOL use_hid_write_output_report;
+ 		DWORD write_timeout_ms;
+ };
+ 
+-static hid_device *new_hid_device()
++static BOOL IsWindowsVersionOrGreater(WORD wMajorVersion, WORD wMinorVersion, WORD wServicePackMajor)
++{
++	OSVERSIONINFOEXW osvi;
++	DWORDLONG const dwlConditionMask = VerSetConditionMask(
++		VerSetConditionMask(
++			VerSetConditionMask(
++				0, VER_MAJORVERSION, VER_GREATER_EQUAL ),
++			VER_MINORVERSION, VER_GREATER_EQUAL ),
++		VER_SERVICEPACKMAJOR, VER_GREATER_EQUAL );
++
++	memset(&osvi, 0, sizeof(osvi));
++	osvi.dwOSVersionInfoSize = sizeof( osvi );
++	osvi.dwMajorVersion = wMajorVersion;
++	osvi.dwMinorVersion = wMinorVersion;
++	osvi.wServicePackMajor = wServicePackMajor;
++
++	return VerifyVersionInfoW(&osvi, VER_MAJORVERSION | VER_MINORVERSION | VER_SERVICEPACKMAJOR, dwlConditionMask) != FALSE;
++}
++
++static hid_device *new_hid_device(void)
+ {
+ 	hid_device *dev = (hid_device*) calloc(1, sizeof(hid_device));
+ 
+@@ -245,16 +272,21 @@
+ 
+ static void register_winapi_error_to_buffer(wchar_t **error_buffer, const WCHAR *op)
+ {
++	WCHAR system_err_buf[1024];
++	DWORD error_code = GetLastError();
++
+ 	free(*error_buffer);
+ 	*error_buffer = NULL;
++
++#ifdef HIDAPI_USING_SDL_RUNTIME
++	/* Thread-safe error handling */
++	SDL_ClearError();
++#endif
+ 
+ 	/* Only clear out error messages if NULL is passed into op */
+ 	if (!op) {
+ 		return;
+ 	}
+-
+-	WCHAR system_err_buf[1024];
+-	DWORD error_code = GetLastError();
+ 
+ 	DWORD system_err_len = FormatMessageW(
+ 		FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+@@ -275,8 +307,7 @@
+ 		+ system_err_len
+ 		;
+ 
+-	*error_buffer = (WCHAR *)calloc(msg_len + 1, sizeof (WCHAR));
+-	WCHAR *msg = *error_buffer;
++	WCHAR *msg = (WCHAR *)calloc(msg_len + 1, sizeof (WCHAR));
+ 
+ 	if (!msg)
+ 		return;
+@@ -297,9 +328,21 @@
+ 		msg[msg_len-1] = L'\0';
+ 		msg_len--;
+ 	}
+-}
+-
+-#if defined(__GNUC__)
++
++#ifdef HIDAPI_USING_SDL_RUNTIME
++	/* Thread-safe error handling */
++	char *error_utf8 = SDL_iconv_wchar_utf8(msg);
++	if (error_utf8) {
++		SDL_SetError("%s", error_utf8);
++		SDL_free(error_utf8);
++	}
++	free(msg);
++#else
++	*error_buffer = msg;
++#endif
++}
++
++#if defined(__GNUC__) && (__GNUC__ + (__GNUC_MINOR__ >= 6) > 4)
+ # pragma GCC diagnostic push
+ # pragma GCC diagnostic ignored "-Warray-bounds"
+ #endif
+@@ -313,12 +356,23 @@
+ 	free(*error_buffer);
+ 	*error_buffer = NULL;
+ 
++#ifdef HIDAPI_USING_SDL_RUNTIME
++	/* Thread-safe error handling */
++	char *error_utf8 = string_error ? SDL_iconv_wchar_utf8(string_error) : NULL;
++	if (error_utf8) {
++		SDL_SetError("%s", error_utf8);
++		SDL_free(error_utf8);
++	} else {
++		SDL_ClearError();
++	}
++#else
+ 	if (string_error) {
+ 		*error_buffer = _wcsdup(string_error);
+ 	}
+-}
+-
+-#if defined(__GNUC__)
++#endif /* HIDAPI_USING_SDL_RUNTIME */
++}
++
++#if defined(__GNUC__) && (__GNUC__ + (__GNUC_MINOR__ >= 6) > 4)
+ # pragma GCC diagnostic pop
+ #endif
+ 
+@@ -694,16 +748,31 @@
+ 	return result;
+ }
+ 
++#ifdef HIDAPI_IGNORE_DEVICE
++static hid_bus_type get_bus_type(const wchar_t *interface_path)
++{
++    return hid_internal_detect_bus_type(interface_path).bus_type;
++}
++#endif
++
+ static char *hid_internal_UTF16toUTF8(const wchar_t *src)
+ {
+ 	char *dst = NULL;
++#ifdef HIDAPI_USING_SDL_RUNTIME
++	int len = WIN_WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, src, -1, NULL, 0, NULL, NULL);
++#else
+ 	int len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, src, -1, NULL, 0, NULL, NULL);
++#endif
+ 	if (len) {
+ 		dst = (char*)calloc(len, sizeof(char));
+ 		if (dst == NULL) {
+ 			return NULL;
+ 		}
++#ifdef HIDAPI_USING_SDL_RUNTIME
++		WIN_WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, src, -1, dst, len, NULL, NULL);
++#else
+ 		WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, src, -1, dst, len, NULL, NULL);
++#endif
+ 	}
+ 
+ 	return dst;
+@@ -811,6 +880,29 @@
+ 	return dev;
+ }
+ 
++static int hid_blacklist(unsigned short vendor_id, unsigned short product_id)
++{
++	size_t i;
++	static const struct { unsigned short vid; unsigned short pid; } known_bad[] = {
++		{ 0x045E, 0x0822 },  /* Microsoft Precision Mouse - causes deadlock asking for device details */
++		{ 0x0738, 0x2217 },  /* SPEEDLINK COMPETITION PRO - turns into an Android controller when enumerated */
++		{ 0x0D8C, 0x0014 },  /* Sharkoon Skiller SGH2 headset - causes deadlock asking for device details */
++		{ 0x1532, 0x0109 },  /* Razer Lycosa Gaming keyboard - causes deadlock asking for device details */
++		{ 0x1532, 0x010B },  /* Razer Arctosa Gaming keyboard - causes deadlock asking for device details */
++		{ 0x1532, 0x0227 },  /* Razer Huntsman Gaming keyboard - long delay asking for device details */
++		{ 0x1B1C, 0x1B3D },  /* Corsair Gaming keyboard - causes deadlock asking for device details */
++		{ 0x1CCF, 0x0000 }  /* All Konami Amusement Devices - causes deadlock asking for device details */
++	};
++
++	for (i = 0; i < (sizeof(known_bad)/sizeof(known_bad[0])); i++) {
++		if ((vendor_id == known_bad[i].vid) && (product_id == known_bad[i].pid || known_bad[i].pid == 0x0000)) {
++			return 1;
++		}
++	}
++
++	return 0;
++}
++
+ struct hid_device_info HID_API_EXPORT * HID_API_CALL hid_enumerate(unsigned short vendor_id, unsigned short product_id)
+ {
+ 	struct hid_device_info *root = NULL; /* return object */
+@@ -839,9 +931,7 @@
+ 			break;
+ 		}
+ 
+-		if (device_interface_list != NULL) {
+-			free(device_interface_list);
+-		}
++		free(device_interface_list); // This should NOT be SDL_free()
+ 
+ 		device_interface_list = (wchar_t*)calloc(len, sizeof(wchar_t));
+ 		if (device_interface_list == NULL) {
+@@ -863,6 +953,11 @@
+ 		HANDLE device_handle = INVALID_HANDLE_VALUE;
+ 		HIDD_ATTRIBUTES attrib;
+ 
++        /* XInput devices don't get real HID reports and are better handled by the raw input driver */
++        if (wcsstr(device_interface, L"&IG_") != NULL) {
++            continue;
++        }
++
+ 		/* Open read-only handle to the device */
+ 		device_handle = open_device(device_interface, FALSE);
+ 
+@@ -872,16 +967,35 @@
+ 			continue;
+ 		}
+ 
++#ifdef HIDAPI_IGNORE_DEVICE
++		hid_bus_type bus_type = HID_API_BUS_UNKNOWN;
++		PHIDP_PREPARSED_DATA pp_data = NULL;
++		HIDP_CAPS caps = { 0 };
++#endif
++
+ 		/* Get the Vendor ID and Product ID for this device. */
+ 		attrib.Size = sizeof(HIDD_ATTRIBUTES);
+ 		if (!HidD_GetAttributes(device_handle, &attrib)) {
+ 			goto cont_close;
+ 		}
+ 
++#ifdef HIDAPI_IGNORE_DEVICE
++		/* See if there are any devices we should skip in enumeration */
++		bus_type = get_bus_type(device_interface);
++		if (HidD_GetPreparsedData(device_handle, &pp_data)) {
++			HidP_GetCaps(pp_data, &caps);
++			HidD_FreePreparsedData(pp_data);
++		}
++		if (HIDAPI_IGNORE_DEVICE(bus_type, attrib.VendorID, attrib.ProductID, caps.UsagePage, caps.Usage, false, false)) {
++			goto cont_close;
++		}
++#endif
++
+ 		/* Check the VID/PID to see if we should add this
+ 		   device to the enumeration list. */
+ 		if ((vendor_id == 0x0 || attrib.VendorID == vendor_id) &&
+-		    (product_id == 0x0 || attrib.ProductID == product_id)) {
++		    (product_id == 0x0 || attrib.ProductID == product_id) &&
++		    !hid_blacklist(attrib.VendorID, attrib.ProductID)) {
+ 
+ 			/* VID/PID match. Create the record. */
+ 			struct hid_device_info *tmp = hid_internal_get_device_info(device_interface, device_handle);
+@@ -1047,6 +1161,11 @@
+ 	dev->read_buf = (char*) malloc(dev->input_report_length);
+ 	dev->device_info = hid_internal_get_device_info(interface_path, dev->device_handle);
+ 
++	/* On Windows 7, we need to use hid_write_output_report() over Bluetooth */
++	if (dev->output_report_length > 512) {
++		dev->use_hid_write_output_report = !IsWindowsVersionOrGreater( HIBYTE( _WIN32_WINNT_WIN8 ), LOBYTE( _WIN32_WINNT_WIN8 ), 0 );
++	}
++
+ end_of_function:
+ 	free(interface_path);
+ 
+@@ -1059,6 +1178,16 @@
+ 	}
+ 
+ 	return dev;
++}
++
++static int hid_write_output_report(hid_device *dev, const unsigned char *data, size_t length)
++{
++	BOOL res;
++	res = HidD_SetOutputReport(dev->device_handle, (void *)data, (ULONG)length);
++	if (res)
++		return (int)length;
++	else
++		return -1;
+ }
+ 
+ void HID_API_EXPORT_CALL hid_winapi_set_write_timeout(hid_device *dev, unsigned long timeout)
+@@ -1081,6 +1210,10 @@
+ 	}
+ 
+ 	register_string_error(dev, NULL);
++
++	if (dev->use_hid_write_output_report) {
++		return hid_write_output_report(dev, data, length);
++	}
+ 
+ 	/* Make sure the right number of bytes are passed to WriteFile. Windows
+ 	   expects the number of bytes which are in the _longest_ report (plus
+@@ -1223,6 +1356,11 @@
+ 		}
+ 	}
+ 	if (!res) {
++		if (GetLastError() == ERROR_OPERATION_ABORTED) {
++			/* The read request was issued on another thread.
++			   This is harmless, so just ignore it. */
++			return 0;
++		}
+ 		register_winapi_error_to_buffer(&dev->last_read_error_str, L"hid_read_timeout/GetOverlappedResult");
+ 	}
+ 
+@@ -1405,14 +1543,33 @@
+ 	return hid_get_report(dev, IOCTL_HID_GET_INPUT_REPORT, data, length);
+ }
+ 
++#if defined(__GNUC__) && __GNUC__ >= 8
++# pragma GCC diagnostic push
++# pragma GCC diagnostic ignored "-Wcast-function-type"
++#endif
+ void HID_API_EXPORT HID_API_CALL hid_close(hid_device *dev)
+ {
++	typedef BOOL (WINAPI *CancelIoEx_t)(HANDLE hFile, LPOVERLAPPED lpOverlapped);
++	CancelIoEx_t CancelIoExFunc = (CancelIoEx_t)GetProcAddress(GetModuleHandle(TEXT("kernel32.dll")), "CancelIoEx");
++
+ 	if (!dev)
+ 		return;
+ 
+-	CancelIo(dev->device_handle);
++	if (CancelIoExFunc) {
++		CancelIoExFunc(dev->device_handle, NULL);
++	} else {
++		/* Windows XP, this will only cancel I/O on the current thread */
++		CancelIo(dev->device_handle);
++	}
++	if (dev->read_pending) {
++		DWORD bytes_read = 0;
++		GetOverlappedResult(dev->device_handle, &dev->ol, &bytes_read, TRUE/*wait*/);
++	}
+ 	free_hid_device(dev);
+ }
++#if defined(__GNUC__) && __GNUC__ >= 8
++# pragma GCC diagnostic pop
++#endif
+ 
+ int HID_API_EXPORT_CALL HID_API_CALL hid_get_manufacturer_string(hid_device *dev, wchar_t *string, size_t maxlen)
+ {
+--- a/thirdparty/sdl/hidapi/windows/hidapi_cfgmgr32.h
++++ b/thirdparty/sdl/hidapi/windows/hidapi_cfgmgr32.h
+@@ -32,9 +32,20 @@
+ /* This part of the header mimics cfgmgr32.h,
+     but only what is used by HIDAPI */
+ 
+-#include <initguid.h>
++//#include <initguid.h>
+ #include <devpropdef.h>
+-#include <propkeydef.h>
++//#include <propkeydef.h>
++
++#ifndef PROPERTYKEY_DEFINED
++#define PROPERTYKEY_DEFINED
++
++typedef struct
++{
++    GUID fmtid;
++    DWORD pid;
++} PROPERTYKEY;
++
++#endif /* PROPERTYKEY_DEFINED */
+ 
+ typedef DWORD RETURN_TYPE;
+ typedef RETURN_TYPE CONFIGRET;
+@@ -55,20 +66,20 @@
+ typedef CONFIGRET(__stdcall* CM_Get_DevNode_PropertyW_)(DEVINST dnDevInst, CONST DEVPROPKEY* PropertyKey, DEVPROPTYPE* PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
+ typedef CONFIGRET(__stdcall* CM_Get_Device_Interface_PropertyW_)(LPCWSTR pszDeviceInterface, CONST DEVPROPKEY* PropertyKey, DEVPROPTYPE* PropertyType, PBYTE PropertyBuffer, PULONG PropertyBufferSize, ULONG ulFlags);
+ typedef CONFIGRET(__stdcall* CM_Get_Device_Interface_List_SizeW_)(PULONG pulLen, LPGUID InterfaceClassGuid, DEVINSTID_W pDeviceID, ULONG ulFlags);
+-typedef CONFIGRET(__stdcall* CM_Get_Device_Interface_ListW_)(LPGUID InterfaceClassGuid, DEVINSTID_W pDeviceID, PZZWSTR Buffer, ULONG BufferLen, ULONG ulFlags);
++typedef CONFIGRET(__stdcall* CM_Get_Device_Interface_ListW_)(LPGUID InterfaceClassGuid, DEVINSTID_W pDeviceID, WCHAR* /*PZZWSTR*/ Buffer, ULONG BufferLen, ULONG ulFlags);
+ 
+ // from devpkey.h
+-DEFINE_DEVPROPKEY(DEVPKEY_NAME, 0xb725f130, 0x47ef, 0x101a, 0xa5, 0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac, 10); // DEVPROP_TYPE_STRING
+-DEFINE_DEVPROPKEY(DEVPKEY_Device_Manufacturer, 0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0, 13); // DEVPROP_TYPE_STRING
+-DEFINE_DEVPROPKEY(DEVPKEY_Device_InstanceId, 0x78c34fc8, 0x104a, 0x4aca, 0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57, 256); // DEVPROP_TYPE_STRING
+-DEFINE_DEVPROPKEY(DEVPKEY_Device_HardwareIds, 0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0, 3); // DEVPROP_TYPE_STRING_LIST
+-DEFINE_DEVPROPKEY(DEVPKEY_Device_CompatibleIds, 0xa45c254e, 0xdf1c, 0x4efd, 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0, 4); // DEVPROP_TYPE_STRING_LIST
+-DEFINE_DEVPROPKEY(DEVPKEY_Device_ContainerId, 0x8c7ed206, 0x3f8a, 0x4827, 0xb3, 0xab, 0xae, 0x9e, 0x1f, 0xae, 0xfc, 0x6c, 2); // DEVPROP_TYPE_GUID
++static DEVPROPKEY DEVPKEY_NAME = { { 0xb725f130, 0x47ef, 0x101a, {0xa5, 0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac} }, 10 }; // DEVPROP_TYPE_STRING
++static DEVPROPKEY DEVPKEY_Device_Manufacturer = { { 0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0} }, 13 }; // DEVPROP_TYPE_STRING
++static DEVPROPKEY DEVPKEY_Device_InstanceId = { { 0x78c34fc8, 0x104a, 0x4aca, {0x9e, 0xa4, 0x52, 0x4d, 0x52, 0x99, 0x6e, 0x57} }, 256 }; // DEVPROP_TYPE_STRING
++static DEVPROPKEY DEVPKEY_Device_HardwareIds = { { 0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0} }, 3 }; // DEVPROP_TYPE_STRING_LIST
++static DEVPROPKEY DEVPKEY_Device_CompatibleIds = { { 0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0} }, 4 }; // DEVPROP_TYPE_STRING_LIST
++static DEVPROPKEY DEVPKEY_Device_ContainerId = { { 0x8c7ed206, 0x3f8a, 0x4827, {0xb3, 0xab, 0xae, 0x9e, 0x1f, 0xae, 0xfc, 0x6c} }, 2 }; // DEVPROP_TYPE_GUID
+ 
+ // from propkey.h
+-DEFINE_PROPERTYKEY(PKEY_DeviceInterface_Bluetooth_DeviceAddress, 0x2BD67D8B, 0x8BEB, 0x48D5, 0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A, 1); // DEVPROP_TYPE_STRING
+-DEFINE_PROPERTYKEY(PKEY_DeviceInterface_Bluetooth_Manufacturer, 0x2BD67D8B, 0x8BEB, 0x48D5, 0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A, 4); // DEVPROP_TYPE_STRING
+-DEFINE_PROPERTYKEY(PKEY_DeviceInterface_Bluetooth_ModelNumber, 0x2BD67D8B, 0x8BEB, 0x48D5, 0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A, 5); // DEVPROP_TYPE_STRING
++static PROPERTYKEY PKEY_DeviceInterface_Bluetooth_DeviceAddress = { { 0x2bd67d8b, 0x8beb, 0x48d5, {0x87, 0xe0, 0x6c, 0xda, 0x34, 0x28, 0x04, 0x0a} }, 1 }; // DEVPROP_TYPE_STRING
++static PROPERTYKEY PKEY_DeviceInterface_Bluetooth_Manufacturer = { { 0x2bd67d8b, 0x8beb, 0x48d5, {0x87, 0xe0, 0x6c, 0xda, 0x34, 0x28, 0x04, 0x0a} }, 4 }; // DEVPROP_TYPE_STRING
++static PROPERTYKEY PKEY_DeviceInterface_Bluetooth_ModelNumber = { { 0x2BD67D8B, 0x8BEB, 0x48D5, {0x87, 0xE0, 0x6C, 0xDA, 0x34, 0x28, 0x04, 0x0A} }, 5 }; // DEVPROP_TYPE_STRING
+ 
+ #endif
+ 
+--- a/thirdparty/sdl/hidapi/windows/hidapi_descriptor_reconstruct.c
++++ b/thirdparty/sdl/hidapi/windows/hidapi_descriptor_reconstruct.c
+@@ -187,11 +187,10 @@
+ 		return -1;
+ 	}
+ 
+-	struct rd_buffer rpt_desc = {
+-		.buf = buf,
+-		.buf_size = buf_size,
+-		.byte_idx = 0
+-	};
++	struct rd_buffer rpt_desc;
++	rpt_desc.buf = buf;
++	rpt_desc.buf_size = buf_size;
++	rpt_desc.byte_idx = 0;
+ 
+ 	// Set pointer to the first node of link_collection_nodes
+ 	phid_pp_link_collection_node link_collection_nodes = (phid_pp_link_collection_node)(((unsigned char*)&pp_data->caps[0]) + pp_data->FirstByteOfLinkCollectionArray);
+@@ -307,7 +306,8 @@
+ 	// Determine child collection order of the whole hierarchy, based on previously determined bit ranges
+ 	// and store it this index coll_child_order[COLLECTION_INDEX][DIRECT_CHILD_INDEX]
+ 	// **************************************************************************************************
+-	USHORT **coll_child_order = (USHORT **)malloc(pp_data->NumberLinkCollectionNodes * sizeof(*coll_child_order));
++	USHORT **coll_child_order;
++	coll_child_order = malloc(pp_data->NumberLinkCollectionNodes * sizeof(*coll_child_order));
+ 	{
+ 		BOOLEAN *coll_parsed_flag = (BOOLEAN *)malloc(pp_data->NumberLinkCollectionNodes * sizeof(coll_parsed_flag[0]));
+ 		for (USHORT collection_node_idx = 0; collection_node_idx < pp_data->NumberLinkCollectionNodes; collection_node_idx++) {
+@@ -526,9 +526,11 @@
+ 	//  report descriptors seem to have it, as assumed here.
+ 	// ***********************************************************
+ 	{
+-		int last_bit_position[NUM_OF_HIDP_REPORT_TYPES][256];
+-		struct rd_main_item_node *last_report_item_lookup[NUM_OF_HIDP_REPORT_TYPES][256];
+-		for (int rt_idx = 0; rt_idx < NUM_OF_HIDP_REPORT_TYPES; rt_idx++) {
++		int *last_bit_position[NUM_OF_HIDP_REPORT_TYPES];
++		struct rd_main_item_node **last_report_item_lookup[NUM_OF_HIDP_REPORT_TYPES];
++		for (HIDP_REPORT_TYPE rt_idx = 0; rt_idx < NUM_OF_HIDP_REPORT_TYPES; rt_idx++) {
++			last_bit_position[rt_idx] = malloc(256 * sizeof(*last_bit_position[rt_idx]));
++			last_report_item_lookup[rt_idx] = malloc(256 * sizeof(*last_report_item_lookup[rt_idx]));
+ 			for (int reportid_idx = 0; reportid_idx < 256; reportid_idx++) {
+ 				last_bit_position[rt_idx][reportid_idx] = -1;
+ 				last_report_item_lookup[rt_idx][reportid_idx] = NULL;
+@@ -583,6 +585,8 @@
+ 					}
+ 				}
+ 			}
++			free(last_bit_position[rt_idx]);
++			free(last_report_item_lookup[rt_idx]);
+ 		}
+ 
+ 		// Add full byte padding at the end of the report descriptor (only reconstructable, for devices without Report IDs)
+--- a/thirdparty/sdl/hidapi/windows/hidapi_descriptor_reconstruct.h
++++ b/thirdparty/sdl/hidapi/windows/hidapi_descriptor_reconstruct.h
+@@ -16,6 +16,8 @@
+  code repository located at:
+         https://github.com/libusb/hidapi .
+ ********************************************************/
++#include "SDL_internal.h"
++
+ #ifndef HIDAPI_DESCRIPTOR_RECONSTRUCT_H__
+ #define HIDAPI_DESCRIPTOR_RECONSTRUCT_H__
+ 
+@@ -37,7 +39,7 @@
+ #include <windows.h>
+ 
+ #include "hidapi_hidsdi.h"
+-#include <assert.h>
++/*#include <assert.h>*/
+ 
+ #define NUM_OF_HIDP_REPORT_TYPES 3
+ 
+@@ -108,7 +110,7 @@
+ 
+ typedef struct hid_pp_caps_info_ {
+ 	USHORT FirstCap;
+-	USHORT NumberOfCaps; // Includes empty caps after LastCap 
++	USHORT NumberOfCaps; // Includes empty caps after LastCap
+ 	USHORT LastCap;
+ 	USHORT ReportByteLength;
+ } hid_pp_caps_info, *phid_pp_caps_info;
+@@ -130,8 +132,9 @@
+ //       Although very unlikely, it might still be possible that the compiler creates a memory layout that is
+ //       not binary compatile.
+ //       Other structs are not checked at the time of writing.
+-static_assert(sizeof(struct hid_pp_link_collection_node_) == 16,
+-    "Size of struct hid_pp_link_collection_node_ not as expected. This might break binary compatibility");
++//static_assert(sizeof(struct hid_pp_link_collection_node_) == 16,
++//    "Size of struct hid_pp_link_collection_node_ not as expected. This might break binary compatibility");
++SDL_COMPILE_TIME_ASSERT(hid_pp_link_collection_node_, sizeof(struct hid_pp_link_collection_node_) == 16);
+ 
+ typedef struct hidp_unknown_token_ {
+ 	UCHAR Token; /* Specifies the one-byte prefix of a global item. */
+@@ -225,11 +228,15 @@
+ 	// MINGW fails with: Flexible array member in union not supported
+ 	// Solution: https://gcc.gnu.org/onlinedocs/gcc/Zero-Length.html
+ 	union {
++#ifdef HAVE_GCC_DIAGNOSTIC_PRAGMA
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wpedantic"
++#endif
+ 		hid_pp_cap caps[0];
+ 		hid_pp_link_collection_node LinkCollectionArray[0];
++#ifdef HAVE_GCC_DIAGNOSTIC_PRAGMA
+ #pragma GCC diagnostic pop
++#endif
+ 	};
+ #else
+ 	union {
+--- a/thirdparty/sdl/hidapi/windows/hidapi_hidclass.h
++++ b/thirdparty/sdl/hidapi/windows/hidapi_hidclass.h
+@@ -25,6 +25,8 @@
+ #include <hidclass.h>
+ 
+ #else
++
++#include <winioctl.h>
+ 
+ /* This part of the header mimics hidclass.h,
+     but only what is used by HIDAPI */
+--- a/thirdparty/sdl/hidapi/windows/hidapi_hidsdi.h
++++ b/thirdparty/sdl/hidapi/windows/hidapi_hidsdi.h
+@@ -53,6 +53,7 @@
+ typedef BOOLEAN (__stdcall *HidD_GetPreparsedData_)(HANDLE handle, PHIDP_PREPARSED_DATA *preparsed_data);
+ typedef BOOLEAN (__stdcall *HidD_FreePreparsedData_)(PHIDP_PREPARSED_DATA preparsed_data);
+ typedef BOOLEAN (__stdcall *HidD_SetNumInputBuffers_)(HANDLE handle, ULONG number_buffers);
++typedef BOOLEAN (__stdcall *HidD_SetOutputReport_)(HANDLE HidDeviceObject, PVOID ReportBuffer, ULONG ReportBufferLength);
+ 
+ #endif
+ 
+--- a/thirdparty/sdl/hidapi/windows/hidapi_winapi.h
++++ b/thirdparty/sdl/hidapi/windows/hidapi_winapi.h
+@@ -30,7 +30,7 @@
+ 
+ #include <guiddef.h>
+ 
+-#include "hidapi.h"
++#include "../hidapi/hidapi.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {

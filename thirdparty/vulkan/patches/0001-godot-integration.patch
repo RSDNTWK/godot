@@ -29,8 +29,8 @@ diff --git a/thirdparty/vulkan/vk_mem_alloc.h b/thirdparty/vulkan/vk_mem_alloc.h
 -    #endif
  #endif
  
- #define VMA_VERSION (VK_MAKE_VERSION(3, 4, 0))
-@@ -1833,6 +1828,19 @@
+ #define VMA_VERSION (VK_MAKE_VERSION(3, 5, 0))
+@@ -1870,6 +1865,19 @@
      VmaAllocator VMA_NOT_NULL allocator,
      VmaTotalStatistics* VMA_NOT_NULL pStats);
  
@@ -50,7 +50,7 @@ diff --git a/thirdparty/vulkan/vk_mem_alloc.h b/thirdparty/vulkan/vk_mem_alloc.h
  /** \brief Retrieves information about current memory usage and budget for all memory heaps.
  
  \param allocator
-@@ -15846,6 +15854,26 @@
+@@ -15921,6 +15929,26 @@
      allocator->CalculateStatistics(pStats);
  }
  

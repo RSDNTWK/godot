@@ -32,9 +32,11 @@
 
 #include "core/crypto/crypto.h"
 
+#include <mbedtls/ssl.h>
+#if MBEDTLS_VERSION_MAJOR < 4
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
-#include <mbedtls/ssl.h>
+#endif
 
 class CryptoMbedTLS;
 class TLSContextMbedTLS;
@@ -130,8 +132,10 @@ public:
 
 class CryptoMbedTLS : public Crypto {
 private:
+#if MBEDTLS_VERSION_MAJOR < 4
 	mbedtls_entropy_context entropy;
 	mbedtls_ctr_drbg_context ctr_drbg;
+#endif
 	static Ref<X509CertificateMbedTLS> default_certs;
 
 public:

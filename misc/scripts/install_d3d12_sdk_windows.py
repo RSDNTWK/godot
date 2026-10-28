@@ -20,6 +20,8 @@ parser.add_argument(
     default=os.getenv("MINGW_PREFIX", ""),
     help="Explicitly specify a path containing the MinGW bin folder.",
 )
+parser.add_argument("--mesa_arch", choices=["x86_64", "arm64", "x86_32"], default=None)
+parser.add_argument("--mesa_toolchain", choices=["msvc", "gcc", "llvm"], default=None)
 args = parser.parse_args()
 
 # Base Godot dependencies path
@@ -33,7 +35,7 @@ else:
 # Mesa NIR
 # Sync with `drivers/d3d12/SCsub` when updating Mesa.
 # Check for latest version: https://github.com/godotengine/godot-nir-static/releases/latest
-mesa_version = "25.3.1-3"
+mesa_version = "26.2.5"
 # WinPixEventRuntime
 # Check for latest version: https://www.nuget.org/api/v2/package/WinPixEventRuntime (check downloaded filename)
 pix_version = "1.0.240308001"
@@ -42,8 +44,8 @@ pix_folder = os.path.join(deps_folder, "pix")
 # DirectX 12 Agility SDK
 # Check for latest version: https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12 (check downloaded filename)
 # After updating this, remember to change the default value of the `rendering/rendering_device/d3d12/agility_sdk_version`
-# project setting to match the minor version (e.g. for `1.618.5`, it should be `618`).
-agility_sdk_version = "1.618.5"
+# project setting to match the minor version (e.g. for `1.619.6`, it should be `619`).
+agility_sdk_version = "1.619.6"
 agility_sdk_archive = os.path.join(deps_folder, f"Agility_SDK_{agility_sdk_version}.nupkg")
 agility_sdk_folder = os.path.join(deps_folder, "agility_sdk")
 
@@ -56,33 +58,25 @@ if not os.path.exists(deps_folder):
 
 # Mesa NIR
 color_print(f"{Ansi.BOLD}[1/3] Mesa NIR")
-for arch in [
-    "arm64-llvm",
-    "arm64-msvc",
-    "x86_32-gcc",
-    "x86_32-llvm",
-    "x86_32-msvc",
-    "x86_64-gcc",
-    "x86_64-llvm",
-    "x86_64-msvc",
-]:
-    mesa_filename = "godot-nir-static-" + arch + "-release.zip"
-    mesa_archive = os.path.join(deps_folder, mesa_filename)
-    mesa_folder = os.path.join(deps_folder, "mesa-" + arch)
-
-    if os.path.isfile(mesa_archive):
-        os.remove(mesa_archive)
-    print(f"Downloading Mesa NIR {mesa_filename} ...")
-    urllib.request.urlretrieve(
-        f"https://github.com/godotengine/godot-nir-static/releases/download/{mesa_version}/{mesa_filename}",
-        mesa_archive,
-    )
-    if os.path.exists(mesa_folder):
-        print(f"Removing existing local Mesa NIR installation in {mesa_folder} ...")
-        shutil.rmtree(mesa_folder)
-    print(f"Extracting Mesa NIR {mesa_filename} to {mesa_folder} ...")
-    shutil.unpack_archive(mesa_archive, mesa_folder)
-    os.remove(mesa_archive)
+# Build the upstream release with the pinned Godot integration patch. The
+# upstream prebuilt package still uses an older Mesa release.
+mesa_arch = args.mesa_arch or ("arm64" if os.environ.get("PROCESSOR_ARCHITECTURE", "").upper() == "ARM64" else "x86_64")
+mesa_toolchain = args.mesa_toolchain or ("gcc" if args.mingw_prefix or os.getenv("MSYSTEM") else "msvc")
+subprocess.run(
+    [
+        sys.executable,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "build_mesa_nir.py"),
+        "--destination",
+        os.path.join(deps_folder, "mesa-" + mesa_arch + "-" + mesa_toolchain),
+        "--arch",
+        mesa_arch,
+        "--toolchain",
+        mesa_toolchain,
+        "--mingw-prefix",
+        args.mingw_prefix,
+    ],
+    check=True,
+)
 print("Mesa NIR installed successfully.\n")
 
 # WinPixEventRuntime
