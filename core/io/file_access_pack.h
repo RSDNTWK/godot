@@ -63,6 +63,12 @@ enum PackFileFlags {
 
 class PackSource;
 
+#ifdef TESTS_ENABLED
+namespace TestPCKSafety {
+struct Access;
+}
+#endif
+
 class PackedData {
 	friend class FileAccessPack;
 	friend class DirAccessPack;
@@ -184,6 +190,9 @@ public:
 };
 
 class FileAccessPack : public FileAccess {
+#ifdef TESTS_ENABLED
+	friend struct TestPCKSafety::Access;
+#endif
 	GDSOFTCLASS(FileAccessPack, FileAccess);
 	PackedData::PackedFile pf;
 
