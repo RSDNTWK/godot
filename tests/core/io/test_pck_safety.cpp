@@ -42,7 +42,6 @@ TEST_FORCE_LINK(test_pck_safety)
 #include "tests/test_utils.h"
 
 #include <cstring>
-#include <limits>
 
 namespace TestPCKSafety {
 
@@ -264,6 +263,8 @@ public:
 	uint64_t limit = 2;
 	bool fail = false;
 	bool stalled = false;
+	bool closed = false;
+	bool is_open() const override { return !closed && FileAccessMemory::is_open(); }
 	uint64_t get_buffer(uint8_t *p_dst, uint64_t p_length) const override {
 		calls++;
 		if (fail) { return uint64_t(-1); }
@@ -328,6 +329,67 @@ TEST_CASE("[B01Read] Logical boundaries and extreme requests never wrap") {
 	CHECK(pack.get_error() == OK);
 }
 
+TEST_CASE("[B01Read] Offset overflow and closed backing never report progress") {
+	Fixture fixture;
+	const Vector<uint8_t> payload = bytes(7);
+	fixture.write(payload, UINT64_MAX);
+	FileAccessPack pack(fixture.logical, fixture.info);
+	ErrorsOff quiet;
+	pack.seek(UINT64_MAX);
+	CHECK(pack.get_position() == 0);
+	CHECK(pack.get_error() == ERR_INVALID_PARAMETER);
+	pack.seek(0);
+	CHECK(pack.get_error() == OK);
+	Ref<PartialReader> reader;
+	reader.instantiate();
+	REQUIRE(reader->open_custom(payload.ptr(), payload.size()) == OK);
+	Access::backing(pack, reader);
+	reader->closed = true;
+	uint8_t output = 0xa7;
+	CHECK(pack.get_buffer(&output, 1) == 0);
+	CHECK(pack.get_position() == 0);
+	CHECK(output == 0xa7);
+	CHECK(pack.get_error() == ERR_FILE_CANT_READ);
+}
+
+TEST_CASE("[B01Init] Sparse backing and truncated encrypted data fail closed") {
+	Fixture sparse;
+	sparse.info.bundle = true;
+	sparse.info.size = 17;
+	ErrorsOff quiet;
+	FileAccessPack absent("res://b01_missing_sparse.bin", sparse.info);
+	CHECK_FALSE(absent.is_open());
+	CHECK(absent.get_error() != OK);
+	Fixture encrypted;
+	encrypted.write(bytes(64), 64, false, true);
+	Ref<FileAccess> file = FileAccess::open(encrypted.filename, FileAccess::READ_WRITE);
+	REQUIRE(file.is_valid());
+	REQUIRE(file->resize(file->get_length() - 1) == OK);
+	file.unref();
+	encrypted.mount();
+	Error error = OK;
+	CHECK(FileAccess::open(encrypted.logical, FileAccess::READ, &error).is_null());
+	CHECK(error != OK);
+}
+
+TEST_CASE("[B01Compatibility] Cold and warm cached reads keep exact logical boundaries") {
+	Fixture fixture;
+	const Vector<uint8_t> payload = bytes(3119);
+	fixture.write(compressed(payload), payload.size(), true);
+	for (int repeat = 0; repeat < 2; repeat++) {
+		FileAccessPack pack(fixture.logical, fixture.info);
+		REQUIRE(pack.is_open());
+		Vector<uint8_t> output;
+		output.resize(payload.size());
+		CHECK(pack.get_buffer(output.ptrw(), UINT64_MAX) == uint64_t(payload.size()));
+		CHECK(output == payload);
+		CHECK(pack.eof_reached());
+		pack.seek_end(-7);
+		CHECK(pack.get_error() == OK);
+		CHECK(pack.FileAccess::get_buffer(7) == payload.slice(payload.size() - 7));
+	}
+}
+
 #ifdef B01_ALLOCATION_TESTS
 static thread_local bool allocation_armed = false;
 static thread_local size_t allocation_minimum = 0;
@@ -389,6 +451,26 @@ TEST_CASE("[B01CombinedFault] Allocation failure propagates through packed publi
 	Ref<FileAccess> result;
 	{
 		AllocationFailure fault(250000, 300000);
+		result = FileAccess::open(fixture.logical, FileAccess::READ, &error);
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(result.is_null());
+	CHECK(error == ERR_OUT_OF_MEMORY);
+	result = FileAccess::open(fixture.logical, FileAccess::READ, &error);
+	REQUIRE(result.is_valid());
+	CHECK(error == OK);
+	CHECK(result->get_buffer(payload.size()) == payload);
+}
+TEST_CASE("[B01CombinedFault] Output allocation failure propagates through packed public open") {
+	Fixture fixture;
+	const Vector<uint8_t> payload = bytes(100003);
+	fixture.write(compressed(payload), payload.size(), true);
+	fixture.mount();
+	ErrorsOff quiet;
+	Error error = OK;
+	Ref<FileAccess> result;
+	{
+		AllocationFailure fault(130000, 140000);
 		result = FileAccess::open(fixture.logical, FileAccess::READ, &error);
 	}
 	CHECK(allocation_failures == 1);
