@@ -162,12 +162,9 @@ Ref<FileAccess> FileAccess::open(const String &p_path, int p_mode_flags, Error *
 
 	Ref<FileAccess> ret;
 	if (!(p_mode_flags & WRITE) && !(p_mode_flags & SKIP_PACK) && PackedData::get_singleton() && !PackedData::get_singleton()->is_disabled()) {
-		ret = PackedData::get_singleton()->try_open_path(p_path);
-		if (ret.is_valid()) {
-			if (r_error) {
-				*r_error = OK;
-			}
-			return ret;
+		if (PackedData::get_singleton()->has_path(p_path)) {
+			// A failed packed entry must not fall through to a different provider.
+			return PackedData::get_singleton()->try_open_path(p_path, Vector<uint8_t>(), r_error);
 		}
 	}
 

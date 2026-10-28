@@ -154,7 +154,7 @@ public:
 
 	void clear();
 
-	_FORCE_INLINE_ Ref<FileAccess> try_open_path(const String &p_path, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>());
+	_FORCE_INLINE_ Ref<FileAccess> try_open_path(const String &p_path, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>(), Error *r_error = nullptr);
 	_FORCE_INLINE_ bool has_path(const String &p_path);
 
 	_FORCE_INLINE_ int64_t get_size(const String &p_path);
@@ -193,13 +193,15 @@ class FileAccessPack : public FileAccess {
 	PackedData::PackedFile pf;
 
 	String path;
-	mutable uint64_t pos;
-	mutable bool eof;
-	uint64_t off;
+	mutable uint64_t pos = 0;
+	mutable bool eof = false;
+	uint64_t off = 0;
+	Error open_error = ERR_UNCONFIGURED;
 	bool use_cached_data = false;
 	Vector<uint8_t> cached_data;
 
 	Ref<FileAccess> f;
+	Error _open_pack(const Vector<uint8_t> &p_decryption_key);
 	virtual Error open_internal(const String &p_path, int p_mode_flags) override;
 	virtual uint64_t _get_modified_time(const String &p_file) override { return 0; }
 	virtual uint64_t _get_access_time(const String &p_file) override { return 0; }
@@ -253,13 +255,30 @@ int64_t PackedData::get_size(const String &p_path) {
 	return E->value.size;
 }
 
-Ref<FileAccess> PackedData::try_open_path(const String &p_path, const Vector<uint8_t> &p_decryption_key) {
+Ref<FileAccess> PackedData::try_open_path(const String &p_path, const Vector<uint8_t> &p_decryption_key, Error *r_error) {
 	HashMap<PathMD5, PackedFile, PathMD5>::Iterator E = files.find(_get_simplified_path(p_path));
 	if (!E) {
-		return nullptr; // Not found.
+		if (r_error) {
+			*r_error = ERR_FILE_NOT_FOUND;
+		}
+		return nullptr;
 	}
 
-	return E->value.src->get_file(p_path, &E->value, p_decryption_key);
+	Ref<FileAccess> file = E->value.src->get_file(p_path, &E->value, p_decryption_key);
+	Error error = OK;
+	if (file.is_null()) {
+		error = ERR_FILE_CANT_OPEN;
+	} else if (!file->is_open()) {
+		error = file->get_error();
+		if (error == OK) {
+			error = ERR_FILE_CANT_OPEN;
+		}
+		file.unref();
+	}
+	if (r_error) {
+		*r_error = error;
+	}
+	return file;
 }
 
 bool PackedData::has_path(const String &p_path) {

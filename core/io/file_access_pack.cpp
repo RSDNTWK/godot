@@ -469,6 +469,10 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 
 Ref<FileAccess> PackedSourcePCK::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key) {
 	Ref<FileAccess> file(memnew(FileAccessPack(p_path, *p_file, p_decryption_key)));
+	// Preserve the initialization error for PackedData::try_open_path.
+	if (!file->is_open()) {
+		return file;
+	}
 
 	if (PackedData::get_singleton()->has_delta_patches(p_path)) {
 		Ref<FileAccessPatched> file_patched;
@@ -527,6 +531,9 @@ Error FileAccessPack::open_internal(const String &p_path, int p_mode_flags) {
 }
 
 bool FileAccessPack::is_open() const {
+	if (open_error != OK) {
+		return false;
+	}
 	if (use_cached_data) {
 		return true;
 	}
@@ -538,7 +545,7 @@ bool FileAccessPack::is_open() const {
 }
 
 void FileAccessPack::seek(uint64_t p_position) {
-	ERR_FAIL_COND_MSG(!use_cached_data && f.is_null(), "File must be opened before use.");
+	ERR_FAIL_COND_MSG(!is_open(), "File must be opened before use.");
 
 	if (p_position > pf.size) {
 		eof = true;
@@ -569,7 +576,7 @@ bool FileAccessPack::eof_reached() const {
 }
 
 uint64_t FileAccessPack::get_buffer(uint8_t *p_dst, uint64_t p_length) const {
-	ERR_FAIL_COND_V_MSG(!use_cached_data && f.is_null(), -1, "File must be opened before use.");
+	ERR_FAIL_COND_V_MSG(!is_open(), 0, "File must be opened before use.");
 	ERR_FAIL_COND_V(!p_dst && p_length > 0, -1);
 
 	if (eof) {
@@ -597,7 +604,7 @@ uint64_t FileAccessPack::get_buffer(uint8_t *p_dst, uint64_t p_length) const {
 }
 
 void FileAccessPack::set_big_endian(bool p_big_endian) {
-	ERR_FAIL_COND_MSG(!use_cached_data && f.is_null(), "File must be opened before use.");
+	ERR_FAIL_COND_MSG(!is_open(), "File must be opened before use.");
 
 	FileAccess::set_big_endian(p_big_endian);
 	if (!use_cached_data) {
@@ -606,6 +613,9 @@ void FileAccessPack::set_big_endian(bool p_big_endian) {
 }
 
 Error FileAccessPack::get_error() const {
+	if (open_error != OK) {
+		return open_error;
+	}
 	if (eof) {
 		return ERR_FILE_EOF;
 	}
@@ -625,6 +635,10 @@ bool FileAccessPack::file_exists(const String &p_name) {
 }
 
 void FileAccessPack::close() {
+	open_error = ERR_UNCONFIGURED;
+	pos = 0;
+	off = 0;
+	eof = false;
 	f = Ref<FileAccess>();
 	cached_data.clear();
 	use_cached_data = false;
@@ -633,6 +647,16 @@ void FileAccessPack::close() {
 FileAccessPack::FileAccessPack(const String &p_path, const PackedData::PackedFile &p_file, const Vector<uint8_t> &p_decryption_key) {
 	path = p_path;
 	pf = p_file;
+	open_error = _open_pack(p_decryption_key);
+	if (open_error != OK) {
+		f.unref();
+		cached_data.clear();
+		use_cached_data = false;
+	}
+}
+
+Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
+	const String &p_path = path;
 	if (pf.bundle) {
 		String simplified_path = p_path.simplify_path();
 		String path_to_load = simplified_path;
@@ -649,12 +673,12 @@ FileAccessPack::FileAccessPack(const String &p_path, const PackedData::PackedFil
 #endif
 		Error err = OK;
 		f = FileAccess::open(path_to_load, FileAccess::READ | FileAccess::SKIP_PACK, &err);
-		ERR_FAIL_COND_MSG(err != OK, vformat(R"(Can't open pack-referenced file "%s" from sparse pack "%s" due to error "%s".)", simplified_path, pf.pack, error_names[err]));
+		ERR_FAIL_COND_V_MSG(err != OK, err, vformat(R"(Can't open pack-referenced file "%s" from sparse pack "%s" due to error "%s".)", simplified_path, pf.pack, error_names[err]));
 		off = 0; // For the sparse pack offset is always zero.
 	} else {
 		Error err = OK;
 		f = FileAccess::open(pf.pack, FileAccess::READ, &err);
-		ERR_FAIL_COND_MSG(err != OK, vformat(R"(Can't open pack-referenced file "%s" from pack "%s" due to error "%s".)", p_path, pf.pack, error_names[err]));
+		ERR_FAIL_COND_V_MSG(err != OK, err, vformat(R"(Can't open pack-referenced file "%s" from pack "%s" due to error "%s".)", p_path, pf.pack, error_names[err]));
 		f->seek(pf.offset);
 		off = pf.offset;
 	}
@@ -662,12 +686,12 @@ FileAccessPack::FileAccessPack(const String &p_path, const PackedData::PackedFil
 	if (pf.encrypted) {
 		Ref<FileAccessEncrypted> fae;
 		fae.instantiate();
-		ERR_FAIL_COND_MSG(fae.is_null(), vformat(R"(Can't open encrypted pack-referenced file "%s" from pack "%s".)", p_path, pf.pack));
+		ERR_FAIL_COND_V_MSG(fae.is_null(), ERR_OUT_OF_MEMORY, vformat(R"(Can't open encrypted pack-referenced file "%s" from pack "%s".)", p_path, pf.pack));
 
 		Vector<uint8_t> key;
 #ifdef TOOLS_ENABLED
 		if (!p_decryption_key.is_empty()) {
-			ERR_FAIL_COND_MSG(p_decryption_key.size() != 32, "Decryption key must be 256-bit.");
+			ERR_FAIL_COND_V_MSG(p_decryption_key.size() != 32, ERR_INVALID_PARAMETER, "Decryption key must be 256-bit.");
 			constexpr uint8_t empty_key[32] = {};
 			if (memcmp(script_encryption_key, empty_key, sizeof(empty_key)) == 0) {
 				key = p_decryption_key;
@@ -675,36 +699,36 @@ FileAccessPack::FileAccessPack(const String &p_path, const PackedData::PackedFil
 		} else
 #endif
 		{
-			key.resize(32);
+			const Error allocation_error = key.resize(32);
+			ERR_FAIL_COND_V(allocation_error != OK, allocation_error);
 			memcpy(key.ptrw(), script_encryption_key, 32);
 		}
 
 		Error err = fae->open_and_parse(f, key, FileAccessEncrypted::MODE_READ, false);
-		ERR_FAIL_COND_MSG(err != OK, vformat(R"(Can't open encrypted pack-referenced file "%s" from pack "%s" due to error "%s".)", p_path, pf.pack, error_names[err]));
+		ERR_FAIL_COND_V_MSG(err != OK, err, vformat(R"(Can't open encrypted pack-referenced file "%s" from pack "%s" due to error "%s".)", p_path, pf.pack, error_names[err]));
 		f = fae;
 		off = 0;
 	}
 	if (pf.lzma2) {
 		const String cache_key = _get_pck_lzma_cache_key(pf);
 		if (!_get_pck_lzma_cached_data(cache_key, cached_data)) {
-			ERR_FAIL_COND_MSG(pf.stored_size > INT32_MAX, vformat(R"(Compressed pack-referenced file "%s" is too large to decode in memory.)", p_path));
+			ERR_FAIL_COND_V_MSG(pf.stored_size > INT32_MAX, ERR_FILE_CORRUPT, vformat(R"(Compressed pack-referenced file "%s" is too large to decode in memory.)", p_path));
 			Vector<uint8_t> compressed_data;
 			const Error allocation_error = compressed_data.resize((int)pf.stored_size);
-			ERR_FAIL_COND_MSG(allocation_error != OK, "Failed to allocate compressed pack input buffer.");
+			ERR_FAIL_COND_V_MSG(allocation_error != OK, allocation_error, "Failed to allocate compressed pack input buffer.");
 			if (pf.stored_size > 0) {
 				const uint64_t read_size = f->get_buffer(compressed_data.ptrw(), pf.stored_size);
-				ERR_FAIL_COND_MSG(read_size != pf.stored_size, vformat(R"(Failed to read compressed payload for "%s" from pack "%s".)", p_path, pf.pack));
+				ERR_FAIL_COND_V_MSG(read_size != pf.stored_size, ERR_FILE_CORRUPT, vformat(R"(Failed to read compressed payload for "%s" from pack "%s".)", p_path, pf.pack));
 			}
 			const Error err = decompress_lzma2(compressed_data.ptr(), compressed_data.size(), pf.size, cached_data);
-			ERR_FAIL_COND_MSG(err != OK, vformat(R"(Failed to decompress LZMA2 payload for "%s" from pack "%s".)", p_path, pf.pack));
+			ERR_FAIL_COND_V_MSG(err != OK, err, vformat(R"(Failed to decompress LZMA2 payload for "%s" from pack "%s".)", p_path, pf.pack));
 			_put_pck_lzma_cached_data(cache_key, cached_data);
 		}
 		use_cached_data = true;
 		f.unref();
 		off = 0;
 	}
-	pos = 0;
-	eof = false;
+	return OK;
 }
 
 //////////////////////////////////////////////////////////////////////////////////
