@@ -94,7 +94,7 @@ struct Fixture {
 			memcpy(key.ptrw(), script_encryption_key, 32);
 			Ref<FileAccessEncrypted> encrypted;
 			encrypted.instantiate();
-			REQUIRE(encrypted->open_and_parse(file, key, FileAccessEncrypted::MODE_WRITE, false) == OK);
+			REQUIRE(encrypted->open_and_parse(file, key, FileAccessEncrypted::MODE_WRITE_AES256, false) == OK);
 			REQUIRE(encrypted->store_buffer(p_stored.ptr(), p_stored.size()));
 			encrypted->close();
 		} else {
