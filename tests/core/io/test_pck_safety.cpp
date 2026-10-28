@@ -426,7 +426,12 @@ static thread_local bool allocation_armed = false;
 static thread_local size_t allocation_minimum = 0;
 static thread_local size_t allocation_maximum = SIZE_MAX;
 static thread_local int allocation_failures = 0;
+static thread_local bool allocation_recording = false;
+static thread_local size_t first_allocation_size = 0;
 static bool fail_allocation(size_t p_size) {
+	if (allocation_recording && first_allocation_size == 0) {
+		first_allocation_size = p_size;
+	}
 	if (allocation_armed && p_size >= allocation_minimum && p_size <= allocation_maximum) {
 		allocation_armed = false;
 		allocation_failures++;
@@ -443,6 +448,17 @@ struct AllocationFailure {
 	}
 	~AllocationFailure() { allocation_armed = false; }
 };
+
+static size_t vector_allocation_size(int64_t p_size) {
+	Vector<uint8_t> probe;
+	first_allocation_size = 0;
+	allocation_recording = true;
+	const Error error = probe.resize(p_size);
+	allocation_recording = false;
+	REQUIRE(error == OK);
+	REQUIRE(first_allocation_size >= size_t(p_size));
+	return first_allocation_size;
+}
 
 TEST_CASE("[B01AllocationFault] Real allocator destination failure returns an empty result") {
 	const Vector<uint8_t> payload = bytes(5003);
@@ -465,9 +481,12 @@ TEST_CASE("[B01AllocationFault] Real allocator staging failure occurs before a b
 	fixture.write(compressed(payload), payload.size(), true);
 	ErrorsOff quiet;
 	{
-		AllocationFailure fault(250000, 300000);
+		const size_t allocation_size = vector_allocation_size(fixture.info.stored_size);
+		AllocationFailure fault(allocation_size, allocation_size);
 		FileAccessPack pack(fixture.logical, fixture.info);
 		CHECK(allocation_failures == 1);
+		CHECK_FALSE(pack.is_open());
+		CHECK(pack.get_error() == ERR_OUT_OF_MEMORY);
 		CHECK((Access::backing_position(pack) == 0 || Access::backing_position(pack) == fixture.info.offset));
 	}
 }
@@ -481,7 +500,8 @@ TEST_CASE("[B01CombinedFault] Allocation failure propagates through packed publi
 	Error error = OK;
 	Ref<FileAccess> result;
 	{
-		AllocationFailure fault(250000, 300000);
+		const size_t allocation_size = vector_allocation_size(fixture.info.stored_size);
+		AllocationFailure fault(allocation_size, allocation_size);
 		result = FileAccess::open(fixture.logical, FileAccess::READ, &error);
 	}
 	CHECK(allocation_failures == 1);
@@ -501,7 +521,8 @@ TEST_CASE("[B01CombinedFault] Output allocation failure propagates through packe
 	Error error = OK;
 	Ref<FileAccess> result;
 	{
-		AllocationFailure fault(130000, 140000);
+		const size_t allocation_size = vector_allocation_size(payload.size());
+		AllocationFailure fault(allocation_size, allocation_size);
 		result = FileAccess::open(fixture.logical, FileAccess::READ, &error);
 	}
 	CHECK(allocation_failures == 1);
