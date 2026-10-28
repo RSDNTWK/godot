@@ -132,13 +132,15 @@ Error decompress_lzma2(const uint8_t *p_src, uint64_t p_src_size, uint64_t p_exp
 	r_dst.clear();
 	ERR_FAIL_NULL_V(p_src, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_src_size < 1, ERR_FILE_CORRUPT);
+	ERR_FAIL_COND_V(p_src_size > SIZE_MAX, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_expected_size > INT32_MAX, ERR_INVALID_PARAMETER);
 
 	const Byte prop = p_src[0];
 	const Byte *data = reinterpret_cast<const Byte *>(p_src + 1);
 	SizeT data_size = (SizeT)(p_src_size - 1);
 
-	r_dst.resize((int)p_expected_size);
+	const Error allocation_error = r_dst.resize((int)p_expected_size);
+	ERR_FAIL_COND_V(allocation_error != OK, allocation_error);
 	SizeT dst_size = (SizeT)p_expected_size;
 	ELzmaStatus status = LZMA_STATUS_NOT_SPECIFIED;
 	const SRes res = Lzma2Decode(reinterpret_cast<Byte *>(r_dst.ptrw()), &dst_size, data, &data_size, prop, LZMA_FINISH_END, &status, &g_alloc);

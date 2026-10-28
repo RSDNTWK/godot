@@ -689,7 +689,8 @@ FileAccessPack::FileAccessPack(const String &p_path, const PackedData::PackedFil
 		if (!_get_pck_lzma_cached_data(cache_key, cached_data)) {
 			ERR_FAIL_COND_MSG(pf.stored_size > INT32_MAX, vformat(R"(Compressed pack-referenced file "%s" is too large to decode in memory.)", p_path));
 			Vector<uint8_t> compressed_data;
-			compressed_data.resize((int)pf.stored_size);
+			const Error allocation_error = compressed_data.resize((int)pf.stored_size);
+			ERR_FAIL_COND_MSG(allocation_error != OK, "Failed to allocate compressed pack input buffer.");
 			if (pf.stored_size > 0) {
 				const uint64_t read_size = f->get_buffer(compressed_data.ptrw(), pf.stored_size);
 				ERR_FAIL_COND_MSG(read_size != pf.stored_size, vformat(R"(Failed to read compressed payload for "%s" from pack "%s".)", p_path, pf.pack));
