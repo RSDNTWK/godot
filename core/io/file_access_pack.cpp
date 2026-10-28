@@ -563,6 +563,10 @@ void FileAccessPack::seek(uint64_t p_position) {
 			read_error = error;
 			return;
 		}
+		if (f->get_position() != off + p_position) {
+			read_error = ERR_FILE_CANT_READ;
+			return;
+		}
 	}
 	pos = p_position;
 	eof = false;
@@ -730,6 +734,9 @@ Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
 		f = FileAccess::open(pf.pack, FileAccess::READ, &err);
 		ERR_FAIL_COND_V_MSG(err != OK, err, vformat(R"(Can't open pack-referenced file "%s" from pack "%s" due to error "%s".)", p_path, pf.pack, error_names[err]));
 		f->seek(pf.offset);
+		const Error seek_error = f->get_error();
+		ERR_FAIL_COND_V(seek_error != OK, seek_error);
+		ERR_FAIL_COND_V_MSG(f->get_position() != pf.offset, ERR_FILE_CANT_READ, "Failed to seek to pack entry.");
 		off = pf.offset;
 	}
 

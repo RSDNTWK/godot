@@ -390,6 +390,37 @@ TEST_CASE("[B01Compatibility] Cold and warm cached reads keep exact logical boun
 	}
 }
 
+TEST_CASE("[B01Init] A rejected initial backing seek cannot open an entry") {
+	Fixture fixture;
+	fixture.write(bytes(7), 7);
+	fixture.info.offset = uint64_t(1) << 63;
+	ErrorsOff quiet;
+	for (int repeat = 0; repeat < 2; repeat++) {
+		FileAccessPack pack(fixture.logical, fixture.info);
+		CHECK_FALSE(pack.is_open());
+		CHECK(pack.get_error() != OK);
+		CHECK(pack.get_position() == 0);
+		uint8_t output = 0xa7;
+		CHECK(pack.get_buffer(&output, 1) == 0);
+		CHECK(output == 0xa7);
+	}
+}
+
+TEST_CASE("[B01Read] A rejected backing seek preserves the logical position") {
+	Fixture fixture;
+	const Vector<uint8_t> payload = bytes(7);
+	fixture.write(payload, UINT64_MAX);
+	FileAccessPack pack(fixture.logical, fixture.info);
+	REQUIRE(pack.is_open());
+	ErrorsOff quiet;
+	pack.seek(uint64_t(1) << 63);
+	CHECK(pack.get_position() == 0);
+	CHECK(pack.get_error() != OK);
+	pack.seek(0);
+	CHECK(pack.get_error() == OK);
+	CHECK(pack.FileAccess::get_buffer(payload.size()) == payload);
+}
+
 #ifdef B01_ALLOCATION_TESTS
 static thread_local bool allocation_armed = false;
 static thread_local size_t allocation_minimum = 0;
