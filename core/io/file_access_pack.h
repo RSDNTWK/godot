@@ -197,6 +197,7 @@ class FileAccessPack : public FileAccess {
 	mutable bool eof = false;
 	uint64_t off = 0;
 	Error open_error = ERR_UNCONFIGURED;
+	mutable Error read_error = OK;
 	bool use_cached_data = false;
 	Vector<uint8_t> cached_data;
 

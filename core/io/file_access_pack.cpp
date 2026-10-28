@@ -546,21 +546,45 @@ bool FileAccessPack::is_open() const {
 
 void FileAccessPack::seek(uint64_t p_position) {
 	ERR_FAIL_COND_MSG(!is_open(), "File must be opened before use.");
-
 	if (p_position > pf.size) {
+		pos = p_position;
 		eof = true;
-	} else {
-		eof = false;
+		read_error = ERR_FILE_EOF;
+		return;
 	}
-
 	if (!use_cached_data) {
+		if (p_position > UINT64_MAX - off) {
+			read_error = ERR_INVALID_PARAMETER;
+			ERR_FAIL_MSG("Pack seek offset overflows.");
+		}
 		f->seek(off + p_position);
+		const Error error = f->get_error();
+		if (error != OK && error != ERR_FILE_EOF) {
+			read_error = error;
+			return;
+		}
 	}
 	pos = p_position;
+	eof = false;
+	read_error = OK;
 }
 
 void FileAccessPack::seek_end(int64_t p_position) {
-	seek(pf.size + p_position);
+	ERR_FAIL_COND_MSG(!is_open(), "File must be opened before use.");
+	if (p_position < 0) {
+		const uint64_t distance = uint64_t(-(p_position + 1)) + 1;
+		if (distance > pf.size) {
+			read_error = ERR_INVALID_PARAMETER;
+			ERR_FAIL_MSG("Cannot seek before the start of a pack entry.");
+		}
+		seek(pf.size - distance);
+	} else {
+		if (uint64_t(p_position) > UINT64_MAX - pf.size) {
+			read_error = ERR_INVALID_PARAMETER;
+			ERR_FAIL_MSG("Pack seek offset overflows.");
+		}
+		seek(pf.size + uint64_t(p_position));
+	}
 }
 
 uint64_t FileAccessPack::get_position() const {
@@ -576,31 +600,56 @@ bool FileAccessPack::eof_reached() const {
 }
 
 uint64_t FileAccessPack::get_buffer(uint8_t *p_dst, uint64_t p_length) const {
-	ERR_FAIL_COND_V_MSG(!is_open(), 0, "File must be opened before use.");
-	ERR_FAIL_COND_V(!p_dst && p_length > 0, -1);
-
-	if (eof) {
+	if (!is_open()) {
+		if (open_error == OK) {
+			read_error = ERR_FILE_CANT_READ;
+		}
+		ERR_FAIL_V_MSG(0, "File must be opened before use.");
+	}
+	if (!p_dst && p_length > 0) {
+		read_error = ERR_INVALID_PARAMETER;
+		ERR_FAIL_V(0);
+	}
+	if (p_length == 0 || eof) {
 		return 0;
 	}
-
-	int64_t to_read = p_length;
-	if (to_read + pos > pf.size) {
+	if (pos >= pf.size) {
 		eof = true;
-		to_read = (int64_t)pf.size - (int64_t)pos;
-	}
-
-	pos += to_read;
-
-	if (to_read <= 0) {
+		read_error = ERR_FILE_EOF;
 		return 0;
 	}
-	if (use_cached_data) {
-		memcpy(p_dst, cached_data.ptr() + pos - to_read, to_read);
-	} else {
-		f->get_buffer(p_dst, to_read);
-	}
 
-	return to_read;
+	const uint64_t to_read = MIN(p_length, MIN(pf.size - pos, uint64_t(SIZE_MAX)));
+	uint64_t read = to_read;
+	if (use_cached_data) {
+		memcpy(p_dst, cached_data.ptr() + pos, to_read);
+	} else {
+		read = f->get_buffer(p_dst, to_read);
+		if (read > to_read) {
+			const Error error = f->get_error();
+			read_error = error != OK && error != ERR_FILE_EOF ? error : ERR_FILE_CANT_READ;
+			return 0;
+		}
+		const Error error = f->get_error();
+		if (error != OK && error != ERR_FILE_EOF) {
+			read_error = error;
+		} else if (read < to_read) {
+			if (error == ERR_FILE_EOF || f->eof_reached()) {
+				eof = true;
+				read_error = ERR_FILE_EOF;
+			} else if (read == 0) {
+				read_error = ERR_FILE_CANT_READ;
+			}
+		}
+	}
+	pos += read;
+	if (read == to_read && pos == pf.size && p_length > to_read) {
+		eof = true;
+		if (read_error == OK) {
+			read_error = ERR_FILE_EOF;
+		}
+	}
+	return read;
 }
 
 void FileAccessPack::set_big_endian(bool p_big_endian) {
@@ -616,10 +665,10 @@ Error FileAccessPack::get_error() const {
 	if (open_error != OK) {
 		return open_error;
 	}
-	if (eof) {
-		return ERR_FILE_EOF;
+	if (read_error != OK) {
+		return read_error;
 	}
-	return OK;
+	return eof ? ERR_FILE_EOF : OK;
 }
 
 void FileAccessPack::flush() {
@@ -636,6 +685,7 @@ bool FileAccessPack::file_exists(const String &p_name) {
 
 void FileAccessPack::close() {
 	open_error = ERR_UNCONFIGURED;
+	read_error = OK;
 	pos = 0;
 	off = 0;
 	eof = false;
