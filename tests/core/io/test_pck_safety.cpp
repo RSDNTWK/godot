@@ -37,6 +37,7 @@ TEST_FORCE_LINK(test_pck_safety)
 #include "core/io/file_access_memory.h"
 #include "core/io/file_access_pack.h"
 #include "core/io/pck_lzma.h"
+#include "tests/core/io/pck_lzma2_fixtures.h"
 #include "core/object/script_language.h"
 #include "core/os/os.h"
 #include "tests/test_utils.h"
@@ -120,11 +121,51 @@ struct Fixture {
 };
 
 static Vector<uint8_t> compressed(const Vector<uint8_t> &p_input) {
+	// Decoder tests use recorded streams, independently validated with liblzma.
+	// Encoder instrumentation is exercised separately by PCKEncoderDiagnostic.
+	if (p_input.size() == 200003) {
+		REQUIRE(p_input == bytes(200003, true));
+		Vector<uint8_t> output;
+		output.push_back(16); // LZMA2 property for a 1 MiB dictionary.
+		int64_t offset = 0;
+		while (offset < p_input.size()) {
+			const int64_t chunk_size = MIN(int64_t(65536), p_input.size() - offset);
+			output.push_back(offset == 0 ? 1 : 2); // Uncompressed chunk, reset dictionary on first.
+			output.push_back(uint8_t((chunk_size - 1) >> 8));
+			output.push_back(uint8_t(chunk_size - 1));
+			output.append_array(p_input.slice(offset, offset + chunk_size));
+			offset += chunk_size;
+		}
+		output.push_back(0); // End marker.
+		return output;
+	}
+	const uint8_t *data = nullptr;
+	int64_t size = 0;
+	switch (p_input.size()) {
+		case 1031: data = TestPCKSafetyData::data_1031; size = sizeof(TestPCKSafetyData::data_1031); break;
+		case 2051: data = TestPCKSafetyData::data_2051; size = sizeof(TestPCKSafetyData::data_2051); break;
+		case 3119: data = TestPCKSafetyData::data_3119; size = sizeof(TestPCKSafetyData::data_3119); break;
+		case 4099: data = TestPCKSafetyData::data_4099; size = sizeof(TestPCKSafetyData::data_4099); break;
+		case 5003: data = TestPCKSafetyData::data_5003; size = sizeof(TestPCKSafetyData::data_5003); break;
+		case 100003: data = TestPCKSafetyData::data_100003; size = sizeof(TestPCKSafetyData::data_100003); break;
+		default: FAIL("Missing recorded LZMA2 fixture"); return Vector<uint8_t>();
+	}
+	REQUIRE(p_input == bytes(int(p_input.size())));
+	Vector<uint8_t> output;
+	REQUIRE(output.resize(size) == OK);
+	memcpy(output.ptrw(), data, size);
+	return output;
+}
+
+TEST_CASE("[PCKEncoderDiagnostic] Current SDK encoder round trips an ordinary payload") {
+	const Vector<uint8_t> payload = bytes(1031);
 	PCKLzmaOptions options;
 	options.dictionary_size_mb = 1;
-	Vector<uint8_t> output;
-	REQUIRE(compress_lzma2(p_input, output, options) == OK);
-	return output;
+	Vector<uint8_t> encoded;
+	REQUIRE(compress_lzma2(payload, encoded, options) == OK);
+	Vector<uint8_t> decoded;
+	REQUIRE(decompress_lzma2(encoded.ptr(), encoded.size(), payload.size(), decoded) == OK);
+	CHECK(decoded == payload);
 }
 
 TEST_CASE("[B01Allocation] Decoder sizing and invalid input return bounded errors") {
