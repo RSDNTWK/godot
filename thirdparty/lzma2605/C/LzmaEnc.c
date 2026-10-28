@@ -3074,7 +3074,10 @@ SRes LzmaEnc_WriteProperties(CLzmaEncHandle p, Byte *props, SizeT *size)
       while (v < dictSize);
     }
 
-    SetUi32(props + 1, v)
+    props[1] = (Byte)v;
+    props[2] = (Byte)(v >> 8);
+    props[3] = (Byte)(v >> 16);
+    props[4] = (Byte)(v >> 24);
     return SZ_OK;
   }
 }
