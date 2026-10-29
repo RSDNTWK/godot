@@ -770,14 +770,16 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GET_VARIANT_PTR(b, 1);
 				GET_VARIANT_PTR(dst, 2);
 				// Compute signatures (types of operands) so it can be optimized when matching.
-				uint32_t op_signature = _code_ptr[ip + 5];
+				const int cache_index = _code_ptr[ip + 5];
+				GD_ERR_BREAK(cache_index < 0 || cache_index >= _operator_caches_count);
+				OperatorCache *cache = _operator_caches_ptr != nullptr ? &_operator_caches_ptr[cache_index] : nullptr;
+				uint32_t op_signature = cache != nullptr ? cache->signature.get() : 0xFFFF;
 				uint32_t actual_signature = (a->get_type() << 8) | (b->get_type());
 
 #ifdef DEBUG_ENABLED
 				if (op == Variant::OP_DIVIDE || op == Variant::OP_MODULE) {
 					// Don't optimize division and modulo since there's not check for division by zero with validated calls.
 					op_signature = 0xFFFF;
-					_code_ptr[ip + 5] = op_signature;
 				}
 #endif
 
@@ -802,18 +804,17 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 						op_func(a, b, dst);
 
 						// Check again in case another thread already set it.
-						if (_code_ptr[ip + 5] == 0) {
-							_code_ptr[ip + 5] = actual_signature;
-							_code_ptr[ip + 6] = static_cast<int>(ret_type);
-							Variant::ValidatedOperatorEvaluator *tmp = reinterpret_cast<Variant::ValidatedOperatorEvaluator *>(&_code_ptr[ip + 7]);
-							*tmp = op_func;
+						if (cache->signature.get() == 0) {
+							cache->return_type = ret_type;
+							cache->evaluator = op_func;
+							cache->signature.set(actual_signature);
 						}
 					}
 					initializer_mutex.unlock();
 				} else if (likely(op_signature == actual_signature)) {
 					// If the signature matches, we can use the optimized path.
-					Variant::Type ret_type = static_cast<Variant::Type>(_code_ptr[ip + 6]);
-					Variant::ValidatedOperatorEvaluator op_func = *reinterpret_cast<Variant::ValidatedOperatorEvaluator *>(&_code_ptr[ip + 7]);
+					Variant::Type ret_type = cache->return_type;
+					Variant::ValidatedOperatorEvaluator op_func = cache->evaluator;
 
 					// Make sure the return value has the correct type.
 					VariantInternal::initialize(dst, ret_type);

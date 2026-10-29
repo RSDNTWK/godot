@@ -239,6 +239,11 @@ GDScriptFunction *GDScriptByteCodeGenerator::write_end() {
 		function->_default_arg_ptr = nullptr;
 	}
 
+	if (function->_operator_caches_count > 0 && size_t(function->_operator_caches_count) <= SIZE_MAX / sizeof(GDScriptFunction::OperatorCache)) {
+		function->_operator_caches_ptr = memnew_arr(GDScriptFunction::OperatorCache, function->_operator_caches_count);
+		// Without cache storage, the VM retains generic evaluation semantics.
+	}
+
 	if (operator_func_map.size()) {
 		function->operator_funcs.resize(operator_func_map.size());
 		function->_operator_funcs_count = function->operator_funcs.size();
@@ -576,11 +581,11 @@ void GDScriptByteCodeGenerator::write_unary_operator(const Address &p_target, Va
 	append(Address());
 	append(p_target);
 	append(p_operator);
-	append(0); // Signature storage.
-	append(0); // Return type storage.
+	append(function->_operator_caches_count++); // Typed cache index.
+	append(0); // Reserved to preserve the existing instruction width.
 	constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*(opcodes.ptr()));
 	for (int i = 0; i < _pointer_size; i++) {
-		append(0); // Space for function pointer.
+		append(0); // Reserved legacy evaluator storage.
 	}
 }
 
@@ -633,11 +638,11 @@ void GDScriptByteCodeGenerator::write_binary_operator(const Address &p_target, V
 	append(p_right_operand);
 	append(p_target);
 	append(p_operator);
-	append(0); // Signature storage.
-	append(0); // Return type storage.
+	append(function->_operator_caches_count++); // Typed cache index.
+	append(0); // Reserved to preserve the existing instruction width.
 	constexpr int _pointer_size = sizeof(Variant::ValidatedOperatorEvaluator) / sizeof(*(opcodes.ptr()));
 	for (int i = 0; i < _pointer_size; i++) {
-		append(0); // Space for function pointer.
+		append(0); // Reserved legacy evaluator storage.
 	}
 }
 

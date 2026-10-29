@@ -236,6 +236,10 @@ GDScriptFunction::GDScriptFunction() {
 GDScriptFunction::~GDScriptFunction() {
 	get_script()->member_functions.erase(name);
 
+	if (_operator_caches_ptr != nullptr) {
+		memdelete_arr(_operator_caches_ptr);
+	}
+
 	for (int i = 0; i < lambdas.size(); i++) {
 		memdelete(lambdas[i]);
 	}

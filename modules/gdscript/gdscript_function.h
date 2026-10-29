@@ -43,6 +43,10 @@
 class GDScriptInstance;
 class GDScript;
 
+namespace TestGDScriptOperatorCache {
+struct Access;
+}
+
 class GDScriptDataType {
 public:
 	Vector<GDScriptDataType> container_element_types;
@@ -341,6 +345,7 @@ private:
 	friend class GDScript;
 	friend class GDScriptCompiler;
 	friend class GDScriptByteCodeGenerator;
+	friend struct TestGDScriptOperatorCache::Access;
 	friend class GDScriptLanguage;
 
 	StringName name;
@@ -362,6 +367,14 @@ private:
 	mutable Variant nil;
 	TightLocalVector<Pair<int, Variant::Type>> temporary_slots;
 	List<StackDebug> stack_debug;
+
+	struct OperatorCache {
+		SafeNumeric<uint32_t> signature;
+		Variant::Type return_type = Variant::NIL;
+		Variant::ValidatedOperatorEvaluator evaluator = nullptr;
+	};
+	OperatorCache *_operator_caches_ptr = nullptr;
+	int _operator_caches_count = 0;
 
 	Vector<int> code;
 	Vector<int> default_arguments;
