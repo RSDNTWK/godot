@@ -1,0 +1,11 @@
+Use an unsigned 32-bit left operand when constructing codebook lookup words.
+The loop index is nonnegative and bounded by 2^dec_firsttablen; dec_firsttablen is 5..8.
+Preserve the intended 32-bit bit pattern without signed-left-shift overflow.
+
+--- a/thirdparty/libvorbis/sharedbook.c
++++ b/thirdparty/libvorbis/sharedbook.c
+@@ -424,3 +424,3 @@
+         for(i=0;i<tabn;i++){
+-          ogg_uint32_t word=i<<(32-c->dec_firsttablen);
++          ogg_uint32_t word=(ogg_uint32_t)i<<(32-c->dec_firsttablen);
+           if(c->dec_firsttable[bitreverse(word)]==0){
