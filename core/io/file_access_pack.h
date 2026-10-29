@@ -136,7 +136,7 @@ private:
 	void _free_packed_dirs(PackedDir *p_dir);
 	void _get_file_paths(PackedDir *p_dir, const String &p_parent_dir, HashSet<String> &r_paths) const;
 
-	_FORCE_INLINE_ PathMD5 _get_simplified_path(const String &p_path) {
+	_FORCE_INLINE_ PathMD5 _get_simplified_path(const String &p_path) const {
 		String simplified_path = p_path;
 		if (simplified_path.begins_with("uid://")) {
 			simplified_path = ResourceUID::uid_to_path(simplified_path);
@@ -177,14 +177,15 @@ public:
 class PackSource {
 public:
 	virtual bool try_open_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) = 0;
-	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) = 0;
+	// Metadata pointers are valid for this call; deferred readers must copy them.
+	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>(), const Vector<PackedData::PackedFile> *p_delta_snapshot = nullptr) = 0;
 	virtual ~PackSource() {}
 };
 
 class PackedSourcePCK : public PackSource {
 public:
 	virtual bool try_open_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
-	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
+	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>(), const Vector<PackedData::PackedFile> *p_delta_snapshot = nullptr) override;
 };
 
 class PackedSourceDirectory : public PackSource {
@@ -192,7 +193,7 @@ class PackedSourceDirectory : public PackSource {
 
 public:
 	virtual bool try_open_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
-	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
+	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>(), const Vector<PackedData::PackedFile> *p_delta_snapshot = nullptr) override;
 };
 
 class FileAccessPack : public FileAccess {
@@ -270,6 +271,7 @@ int64_t PackedData::get_size(const String &p_path) {
 Ref<FileAccess> PackedData::try_open_path(const String &p_path, const Vector<uint8_t> &p_decryption_key, Error *r_error) {
 	const PathMD5 path_md5 = _get_simplified_path(p_path);
 	PackedFile packed_file;
+	Vector<PackedFile> patch_snapshot;
 	{
 		MutexLock lock(files_mutex);
 		HashMap<PathMD5, PackedFile, PathMD5>::Iterator entry = files.find(path_md5);
@@ -280,10 +282,14 @@ Ref<FileAccess> PackedData::try_open_path(const String &p_path, const Vector<uin
 			return nullptr;
 		}
 		packed_file = entry->value;
+		const auto patches = delta_patches.find(path_md5);
+		if (patches) {
+			patch_snapshot = patches->value;
+		}
 	}
 	// Provider I/O may recursively open the owning pack. Never hold the
 	// metadata lock while invoking a provider or reading/decompressing data.
-	Ref<FileAccess> file = packed_file.src->get_file(p_path, &packed_file, p_decryption_key);
+	Ref<FileAccess> file = packed_file.src->get_file(p_path, &packed_file, p_decryption_key, &patch_snapshot);
 	Error error = OK;
 	if (file.is_null()) {
 		error = ERR_FILE_CANT_OPEN;

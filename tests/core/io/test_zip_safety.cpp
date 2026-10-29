@@ -140,7 +140,7 @@ public:
 	}
 	~MemorySource() { PackedData::get_singleton()->remove_path(path); }
 	bool try_open_pack(const String &, bool, uint64_t, const Vector<uint8_t> &) override { return false; }
-	Ref<FileAccess> get_file(const String &, PackedData::PackedFile *, const Vector<uint8_t> &) override {
+	Ref<FileAccess> get_file(const String &, PackedData::PackedFile *, const Vector<uint8_t> &, const Vector<PackedData::PackedFile> *) override {
 		Ref<PartialReader> reader;
 		reader.instantiate();
 		reader->limit = &limit;

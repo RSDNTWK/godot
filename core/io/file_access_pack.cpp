@@ -315,8 +315,7 @@ uint8_t *PackedData::get_file_hash(const String &p_path) {
 }
 
 Vector<PackedData::PackedFile> PackedData::get_delta_patches(const String &p_path) const {
-	String simplified_path = p_path.simplify_path().trim_prefix("res://");
-	PathMD5 pmd5(simplified_path.md5_buffer());
+	const PathMD5 pmd5 = _get_simplified_path(p_path);
 	MutexLock lock(files_mutex);
 	HashMap<PathMD5, Vector<PackedFile>, PathMD5>::ConstIterator E = delta_patches.find(pmd5);
 	if (!E) {
@@ -327,8 +326,7 @@ Vector<PackedData::PackedFile> PackedData::get_delta_patches(const String &p_pat
 }
 
 bool PackedData::has_delta_patches(const String &p_path) const {
-	String simplified_path = p_path.simplify_path().trim_prefix("res://");
-	PathMD5 pmd5(simplified_path.md5_buffer());
+	const PathMD5 pmd5 = _get_simplified_path(p_path);
 	MutexLock lock(files_mutex);
 	HashMap<PathMD5, Vector<PackedFile>, PathMD5>::ConstIterator E = delta_patches.find(pmd5);
 	if (!E) {
@@ -546,17 +544,23 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 	return true;
 }
 
-Ref<FileAccess> PackedSourcePCK::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key) {
+Ref<FileAccess> PackedSourcePCK::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key, const Vector<PackedData::PackedFile> *p_delta_snapshot) {
+	Vector<PackedData::PackedFile> patches;
+	if (p_delta_snapshot) {
+		patches = *p_delta_snapshot;
+	} else if (PackedData::get_singleton()) {
+		patches = PackedData::get_singleton()->get_delta_patches(p_path);
+	}
 	Ref<FileAccess> file(memnew(FileAccessPack(p_path, *p_file, p_decryption_key)));
 	// Preserve the initialization error for PackedData::try_open_path.
 	if (!file->is_open()) {
 		return file;
 	}
 
-	if (PackedData::get_singleton()->has_delta_patches(p_path)) {
+	if (!patches.is_empty()) {
 		Ref<FileAccessPatched> file_patched;
 		file_patched.instantiate();
-		Error err = file_patched->open_custom(file, p_decryption_key);
+		Error err = file_patched->open_custom(file, p_decryption_key, &patches);
 		ERR_FAIL_COND_V(err != OK, Ref<FileAccess>());
 		file = file_patched;
 	}
@@ -577,7 +581,7 @@ bool PackedSourceDirectory::try_open_pack(const String &p_path, bool p_replace_f
 	return true;
 }
 
-Ref<FileAccess> PackedSourceDirectory::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key) {
+Ref<FileAccess> PackedSourceDirectory::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key, const Vector<PackedData::PackedFile> *p_delta_snapshot) {
 	Ref<FileAccess> ret = FileAccess::create_for_path(p_path);
 	ret->reopen(p_path, FileAccess::READ);
 	return ret;

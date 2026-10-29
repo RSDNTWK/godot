@@ -527,6 +527,105 @@ TEST_CASE("[N009][PCKKey] Eligible invalid overrides clear output and valid alia
 	CHECK(PCKEncryption::select_key(selected, empty, true, selected) == OK);
 	CHECK(selected == provided);
 }
+
+struct DeltaSnapshotFixture {
+	ScopedPackedData isolated;
+	Fixture base_a;
+	Fixture base_b;
+	Fixture patch_a;
+	Fixture patch_b;
+	MountedPath mounted;
+	Vector<uint8_t> expected_a;
+	Vector<uint8_t> expected_b;
+	DeltaSnapshotFixture() : mounted(base_a.logical) {
+		const Vector<uint8_t> original_a = bytes(1031);
+		const Vector<uint8_t> original_b = bytes(2051);
+		expected_a = bytes(3119);
+		expected_b = bytes(4099);
+		base_a.write(original_a, original_a.size());
+		base_b.write(original_b, original_b.size());
+		const Vector<uint8_t> first = encoded_delta(original_a, expected_a);
+		const Vector<uint8_t> second = encoded_delta(original_b, expected_b);
+		patch_a.write(literal_lzma2(first), first.size(), true);
+		patch_b.write(literal_lzma2(second), second.size(), true);
+		patch_a.info.delta = true;
+		patch_b.info.delta = true;
+	}
+	void first() {
+		map_entry(base_a.logical, base_a.info);
+		map_entry(base_a.logical, patch_a.info);
+	}
+	void second() {
+		map_entry(base_a.logical, base_b.info);
+		map_entry(base_a.logical, patch_b.info);
+	}
+};
+class RemountingPCKSource : public PackedSourcePCK {
+public:
+	DeltaSnapshotFixture *fixture = nullptr;
+	bool remounted = false;
+	Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_key, const Vector<PackedData::PackedFile> *p_delta_snapshot) override {
+		if (!remounted) {
+			remounted = true;
+			fixture->second();
+		}
+		return PackedSourcePCK::get_file(p_path, p_file, p_key, p_delta_snapshot);
+	}
+};
+TEST_CASE("[N010][PCKSnapshot] Open readers retain coherent chains across deferred reads and provider remounts") {
+	for (bool during_provider : { false, true }) {
+		DeltaSnapshotFixture fixture;
+		RemountingPCKSource source;
+		source.fixture = &fixture;
+		if (during_provider) { fixture.base_a.info.src = &source; }
+		fixture.first();
+		Ref<FileAccess> old_reader = FileAccess::open(fixture.base_a.logical, FileAccess::READ);
+		REQUIRE(old_reader.is_valid());
+		if (during_provider) {
+			CHECK(source.remounted);
+		} else {
+			fixture.second();
+		}
+		// Application is deliberately deferred until after the valid remount.
+		CHECK(old_reader->get_length() == uint64_t(fixture.expected_a.size()));
+		CHECK(old_reader->get_buffer(fixture.expected_a.size()) == fixture.expected_a);
+		Ref<FileAccess> new_reader = FileAccess::open(fixture.base_a.logical, FileAccess::READ);
+		REQUIRE(new_reader.is_valid());
+		CHECK(new_reader->get_length() == uint64_t(fixture.expected_b.size()));
+		CHECK(new_reader->get_buffer(fixture.expected_b.size()) == fixture.expected_b);
+	}
+}
+struct UIDMapping {
+	ResourceUID::ID id = ResourceUID::INVALID_ID;
+	explicit UIDMapping(const String &p_path) {
+		id = ResourceUID::get_singleton()->create_id_for_path(p_path);
+		REQUIRE(id != ResourceUID::INVALID_ID);
+		ResourceUID::get_singleton()->add_id(id, p_path);
+		REQUIRE(ResourceUID::get_singleton()->has_id(id));
+	}
+	~UIDMapping() {
+		if (ResourceUID::get_singleton()->has_id(id)) { ResourceUID::get_singleton()->remove_id(id); }
+	}
+};
+TEST_CASE("[N010][PCKSnapshot] UID aliases select the matching chain and retained readers survive alias removal") {
+	DeltaSnapshotFixture fixture;
+	fixture.first();
+	UIDMapping mapping(fixture.base_a.logical);
+	const String uid = ResourceUID::get_singleton()->id_to_text(mapping.id);
+	CHECK(PackedData::get_singleton()->has_delta_patches(uid));
+	CHECK(PackedData::get_singleton()->get_delta_patches(uid).size() == 1);
+	Error error = FAILED;
+	Ref<FileAccess> old_reader = PackedData::get_singleton()->try_open_path(uid, Vector<uint8_t>(), &error);
+	REQUIRE(error == OK);
+	REQUIRE(old_reader.is_valid());
+	fixture.second();
+	ResourceUID::get_singleton()->remove_id(mapping.id);
+	CHECK(old_reader->get_length() == uint64_t(fixture.expected_a.size()));
+	CHECK(old_reader->get_buffer(fixture.expected_a.size()) == fixture.expected_a);
+	Ref<FileAccess> new_reader = FileAccess::open(fixture.base_a.logical, FileAccess::READ);
+	REQUIRE(new_reader.is_valid());
+	CHECK(new_reader->get_buffer(new_reader->get_length()) == fixture.expected_b);
+}
 TEST_CASE("[F08][PCK] Ordinary encryption and LZMA2 combinations preserve logical entry bytes") {
 	for (int size : { 1031, 2051, 3119, 4099, 5003 }) {
 		const Vector<uint8_t> payload = bytes(size);

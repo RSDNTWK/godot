@@ -219,7 +219,7 @@ bool ZipArchive::file_exists(const String &p_name) const {
 	return files.has(p_name);
 }
 
-Ref<FileAccess> ZipArchive::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key) {
+Ref<FileAccess> ZipArchive::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key, const Vector<PackedData::PackedFile> *p_delta_snapshot) {
 	return memnew(FileAccessZip(p_path, *p_file));
 }
 

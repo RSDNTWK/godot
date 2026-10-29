@@ -32,12 +32,14 @@
 
 #include "core/io/file_access.h"
 #include "core/io/file_access_memory.h"
+#include "core/io/file_access_pack.h"
 
 class FileAccessPatched : public FileAccess {
 	GDSOFTCLASS(FileAccessPatched, FileAccess);
 
 	Ref<FileAccess> old_file;
 	Vector<uint8_t> decryption_key;
+	Vector<PackedData::PackedFile> delta_patches;
 	mutable Vector<uint8_t> patched_file_data;
 	mutable Ref<FileAccessMemory> patched_file;
 	mutable Error last_error = OK;
@@ -62,7 +64,7 @@ protected:
 	virtual Error open_internal(const String &p_path, int p_mode_flags) override { return ERR_UNAVAILABLE; }
 
 public:
-	Error open_custom(const Ref<FileAccess> &p_old_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>());
+	Error open_custom(const Ref<FileAccess> &p_old_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>(), const Vector<PackedData::PackedFile> *p_delta_snapshot = nullptr);
 
 	virtual bool is_open() const override;
 

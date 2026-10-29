@@ -62,7 +62,7 @@ public:
 	bool file_exists(const String &p_name) const;
 
 	virtual bool try_open_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
-	Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
+	Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>(), const Vector<PackedData::PackedFile> *p_delta_snapshot = nullptr) override;
 
 	static ZipArchive *get_singleton();
 

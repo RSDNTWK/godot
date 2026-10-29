@@ -60,7 +60,6 @@ Error FileAccessPatched::_apply_patch() const {
 	ERR_FAIL_COND_V(!is_open(), FAILED);
 
 	String path = old_file->get_path();
-	Vector<PackedData::PackedFile> delta_patches = PackedData::get_singleton()->get_delta_patches(path);
 	Vector<uint8_t> old_file_data;
 	const Error base_error = _read_complete_patch_input(old_file, old_file_data);
 	ERR_FAIL_COND_V(base_error != OK, base_error);
@@ -128,7 +127,7 @@ bool FileAccessPatched::_try_apply_patch() const {
 	return last_error == OK;
 }
 
-Error FileAccessPatched::open_custom(const Ref<FileAccess> &p_old_file, const Vector<uint8_t> &p_decryption_key) {
+Error FileAccessPatched::open_custom(const Ref<FileAccess> &p_old_file, const Vector<uint8_t> &p_decryption_key, const Vector<PackedData::PackedFile> *p_delta_snapshot) {
 	close();
 
 	if (p_old_file.is_null() || !p_old_file->is_open()) {
@@ -138,6 +137,11 @@ Error FileAccessPatched::open_custom(const Ref<FileAccess> &p_old_file, const Ve
 
 	old_file = p_old_file;
 	decryption_key = p_decryption_key;
+	if (p_delta_snapshot) {
+		delta_patches = *p_delta_snapshot;
+	} else if (PackedData::get_singleton()) {
+		delta_patches = PackedData::get_singleton()->get_delta_patches(old_file->get_path());
+	}
 
 	return OK;
 }
@@ -228,6 +232,7 @@ void FileAccessPatched::flush() {
 void FileAccessPatched::close() {
 	old_file = Ref<FileAccess>();
 	decryption_key.clear();
+	delta_patches.clear();
 	patched_file = Ref<FileAccessMemory>();
 	patched_file_data.clear();
 	last_error = OK;
