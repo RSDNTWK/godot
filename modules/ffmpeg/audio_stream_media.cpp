@@ -1,11 +1,13 @@
+#include "ffmpeg_file_io.h"
+#include "ffmpeg_ogg_helpers.h"
 #include "video_stream_media.h"
 
-#include "ffmpeg_file_io.h"
 #include "core/io/file_access.h"
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
-#include "modules/ogg/ogg_packet_sequence.h"
 #include "servers/audio/audio_server.h"
+
+#include "modules/ogg/ogg_packet_sequence.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -536,18 +538,18 @@ Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPac
 		}
 		ogg_page page;
 		while (ogg_stream_pageout(&stream, &page) > 0) {
-			int old_size = ogg_data.size();
-			ogg_data.resize(old_size + page.header_len + page.body_len);
-			memcpy(ogg_data.ptrw() + old_size, page.header, page.header_len);
-			memcpy(ogg_data.ptrw() + old_size + page.header_len, page.body, page.body_len);
+			if (ffmpeg_append_ogg_page(ogg_data, page) != OK) {
+				ogg_stream_clear(&stream);
+				return Ref<AudioStreamPlayback>();
+			}
 		}
 	}
 	ogg_page page;
 	while (ogg_stream_flush(&stream, &page) > 0) {
-		int old_size = ogg_data.size();
-		ogg_data.resize(old_size + page.header_len + page.body_len);
-		memcpy(ogg_data.ptrw() + old_size, page.header, page.header_len);
-		memcpy(ogg_data.ptrw() + old_size + page.header_len, page.body, page.body_len);
+		if (ffmpeg_append_ogg_page(ogg_data, page) != OK) {
+			ogg_stream_clear(&stream);
+			return Ref<AudioStreamPlayback>();
+		}
 	}
 	ogg_stream_clear(&stream);
 	return ffmpeg_audio_playback_from_buffer(ogg_data, nullptr, String(), p_loop_stream);
