@@ -31,7 +31,9 @@
 #include "audio_stream_ogg_vorbis.h"
 #include "modules/modules_enabled.gen.h"
 
+#ifdef MODULE_FFMPEG_ENABLED
 #include "modules/ffmpeg/video_stream_media.h"
+#endif
 
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
@@ -420,10 +422,11 @@ AudioStreamPlaybackOggVorbis::~AudioStreamPlaybackOggVorbis() {
 #endif
 
 Ref<AudioStreamPlayback> AudioStreamOggVorbis::instantiate_playback() {
+#ifdef MODULE_FFMPEG_ENABLED
 	// Preserve the legacy packet resource while using FFmpeg for decoding.
 	return ffmpeg_audio_playback_from_ogg_packets(packet_sequence, Ref<AudioStream>(this));
 
-#ifndef MODULE_FFMPEG_ENABLED
+#else
 	Ref<AudioStreamPlaybackOggVorbis> ovs;
 
 	ERR_FAIL_COND_V(packet_sequence.is_null(), nullptr);

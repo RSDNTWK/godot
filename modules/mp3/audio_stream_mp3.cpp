@@ -37,7 +37,9 @@
 #include "audio_stream_mp3.h"
 #include "modules/modules_enabled.gen.h"
 
+#ifdef MODULE_FFMPEG_ENABLED
 #include "modules/ffmpeg/video_stream_media.h"
+#endif
 
 #include "core/io/file_access.h"
 #include "core/object/class_db.h"
@@ -199,10 +201,11 @@ AudioStreamPlaybackMP3::~AudioStreamPlaybackMP3() {
 #endif
 
 Ref<AudioStreamPlayback> AudioStreamMP3::instantiate_playback() {
+#ifdef MODULE_FFMPEG_ENABLED
 	// Keep the serialized AudioStreamMP3 resource, but use FFmpeg for decoding.
 	return ffmpeg_audio_playback_from_buffer(get_data(), nullptr, String(), Ref<AudioStream>(this));
 
-#ifndef MODULE_FFMPEG_ENABLED
+#else
 	Ref<AudioStreamPlaybackMP3> mp3s;
 
 	ERR_FAIL_COND_V_MSG(data.is_empty(), mp3s,
