@@ -220,11 +220,11 @@ TEST_CASE("[Image] Saving and loading") {
 			"The BMP image should load successfully.");
 #endif // MODULE_BMP_ENABLED
 
-#ifdef MODULE_EXR_ENABLED
+#ifdef MODULE_TINYEXR_ENABLED
 	// Load EXR
 	Ref<Image> image_exr;
 	image_exr.instantiate();
-	Ref<FileAccess> f_exr = FileAccess::open(TestUtils::get_data_path("images/icon.exr"), FileAccess::READ, &err);
+	Ref<FileAccess> f_exr = FileAccess::open(TestUtils::get_data_path("images/f03_legacy_rgba.exr"), FileAccess::READ, &err);
 	REQUIRE(f_exr.is_valid());
 	PackedByteArray data_exr;
 	data_exr.resize(f_exr->get_length() + 1);
@@ -232,7 +232,7 @@ TEST_CASE("[Image] Saving and loading") {
 	CHECK_MESSAGE(
 			image_exr->load_exr_from_buffer(data_exr) == OK,
 			"The EXR image should load successfully.");
-#endif // MODULE_EXR_ENABLED
+#endif // MODULE_TINYEXR_ENABLED
 
 #ifdef MODULE_JPG_ENABLED
 	// Load JPG

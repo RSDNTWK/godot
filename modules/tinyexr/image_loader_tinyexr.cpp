@@ -52,11 +52,21 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 	// their API usage in LoadEXRFromMemory.
 
 	EXRVersion exr_version;
-	EXRImage exr_image;
-	EXRHeader exr_header;
+	struct EXRResources {
+		EXRImage image;
+		EXRHeader header;
+		EXRResources() {
+			InitEXRImage(&image);
+			InitEXRHeader(&header);
+		}
+		~EXRResources() {
+			FreeEXRImage(&image);
+			FreeEXRHeader(&header);
+		}
+	} resources;
+	EXRImage &exr_image = resources.image;
+	EXRHeader &exr_header = resources.header;
 	const char *err = nullptr;
-
-	InitEXRHeader(&exr_header);
 
 	int ret = ParseEXRVersionFromMemory(&exr_version, w, src_image_len);
 	if (ret != TINYEXR_SUCCESS) {
@@ -81,7 +91,6 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 		}
 	}
 
-	InitEXRImage(&exr_image);
 	ret = LoadEXRImageFromMemory(&exr_image, &exr_header, w, src_image_len, &err);
 	if (ret != TINYEXR_SUCCESS) {
 		if (err) {
@@ -120,6 +129,7 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 
 	int channel_size = use_float16 ? 2 : 4;
 	if (idxA != -1) {
+		ERR_FAIL_COND_V(idxR == -1 || idxG == -1 || idxB == -1, ERR_FILE_CORRUPT);
 		imgdata.resize(exr_image.width * exr_image.height * 4 * channel_size); //RGBA
 		format = use_float16 ? Image::FORMAT_RGBAH : Image::FORMAT_RGBAF;
 		output_channels = 4;
@@ -282,9 +292,6 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 	}
 
 	p_image->set_data(exr_image.width, exr_image.height, false, format, imgdata);
-
-	FreeEXRHeader(&exr_header);
-	FreeEXRImage(&exr_image);
 
 	return OK;
 }
