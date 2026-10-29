@@ -698,6 +698,16 @@ void FileAccessPack::close() {
 	use_cached_data = false;
 }
 
+FileAccessPack::FileAccessPack(const Ref<FileAccess> &p_base, uint64_t p_offset, uint64_t p_length) :
+		pf{}, f(p_base) {
+	path = p_base->get_path();
+	pf.size = p_length;
+	pf.stored_size = p_length;
+	off = p_offset;
+	open_error = OK;
+	FileAccess::set_big_endian(p_base->is_big_endian());
+}
+
 FileAccessPack::FileAccessPack(const String &p_path, const PackedData::PackedFile &p_file, const Vector<uint8_t> &p_decryption_key) {
 	path = p_path;
 	pf = p_file;
@@ -740,6 +750,24 @@ Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
 		off = pf.offset;
 	}
 
+	// Version 5 LZMA2 metadata describes physical ordinary entries, but
+	// plaintext compressed bytes in sparse bundles. Bound the encrypted view
+	// before the common parser validates its inner length and padding.
+	if (pf.encrypted && pf.lzma2) {
+		uint64_t physical_size = pf.stored_size;
+		if (pf.bundle) {
+			ERR_FAIL_COND_V(pf.stored_size > INT32_MAX, ERR_FILE_CORRUPT);
+			const uint64_t padding = (16 - pf.stored_size % 16) % 16;
+			physical_size = 40 + pf.stored_size + padding;
+		} else {
+			ERR_FAIL_COND_V(physical_size > uint64_t(INT32_MAX) + 40 + 15, ERR_FILE_CORRUPT);
+		}
+		const uint64_t backing_size = f->get_length();
+		ERR_FAIL_COND_V(off > backing_size || physical_size > backing_size - off, ERR_FILE_CORRUPT);
+		f = Ref<FileAccess>(memnew(FileAccessPack(f, off, physical_size)));
+		off = 0;
+	}
+
 	if (pf.encrypted) {
 		Ref<FileAccessEncrypted> fae;
 		fae.instantiate();
@@ -767,15 +795,19 @@ Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
 		off = 0;
 	}
 	if (pf.lzma2) {
+		const uint64_t compressed_size = pf.encrypted ? f->get_length() : pf.stored_size;
+		ERR_FAIL_COND_V(pf.encrypted && pf.bundle && compressed_size != pf.stored_size, ERR_FILE_CORRUPT);
+		ERR_FAIL_COND_V_MSG(compressed_size > INT32_MAX, ERR_FILE_CORRUPT, vformat(R"(Compressed pack-referenced file "%s" is too large to decode in memory.)", p_path));
 		const String cache_key = _get_pck_lzma_cache_key(pf);
 		if (!_get_pck_lzma_cached_data(cache_key, cached_data)) {
-			ERR_FAIL_COND_V_MSG(pf.stored_size > INT32_MAX, ERR_FILE_CORRUPT, vformat(R"(Compressed pack-referenced file "%s" is too large to decode in memory.)", p_path));
 			Vector<uint8_t> compressed_data;
-			const Error allocation_error = compressed_data.resize((int)pf.stored_size);
+			const Error allocation_error = compressed_data.resize(compressed_size);
 			ERR_FAIL_COND_V_MSG(allocation_error != OK, allocation_error, "Failed to allocate compressed pack input buffer.");
-			if (pf.stored_size > 0) {
-				const uint64_t read_size = f->get_buffer(compressed_data.ptrw(), pf.stored_size);
-				ERR_FAIL_COND_V_MSG(read_size != pf.stored_size, ERR_FILE_CORRUPT, vformat(R"(Failed to read compressed payload for "%s" from pack "%s".)", p_path, pf.pack));
+			if (compressed_size > 0) {
+				const uint64_t read_size = f->get_buffer(compressed_data.ptrw(), compressed_size);
+				const Error input_error = f->get_error();
+				ERR_FAIL_COND_V(input_error != OK && input_error != ERR_FILE_EOF, input_error);
+				ERR_FAIL_COND_V_MSG(read_size != compressed_size, ERR_FILE_CORRUPT, vformat(R"(Failed to read compressed payload for "%s" from pack "%s".)", p_path, pf.pack));
 			}
 			const Error err = decompress_lzma2(compressed_data.ptr(), compressed_data.size(), pf.size, cached_data);
 			ERR_FAIL_COND_V_MSG(err != OK, err, vformat(R"(Failed to decompress LZMA2 payload for "%s" from pack "%s".)", p_path, pf.pack));

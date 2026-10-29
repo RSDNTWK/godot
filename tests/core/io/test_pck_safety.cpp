@@ -168,6 +168,150 @@ static Vector<uint8_t> compressed(const Vector<uint8_t> &p_input) {
 	return output;
 }
 
+
+TEST_CASE("[F08][PCK] Ordinary encryption and LZMA2 combinations preserve logical entry bytes") {
+	for (int size : { 1031, 2051, 3119, 4099, 5003 }) {
+		const Vector<uint8_t> payload = bytes(size);
+		for (bool compressed_entry : { false, true }) {
+			const Vector<uint8_t> stored = compressed_entry ? compressed(payload) : payload;
+			for (bool encrypted_entry : { false, true }) {
+				Fixture fixture;
+				fixture.write(stored, payload.size(), compressed_entry, encrypted_entry);
+				for (int repeat = 0; repeat < 2; repeat++) {
+					FileAccessPack reader(fixture.logical, fixture.info);
+					REQUIRE(reader.is_open());
+					CHECK(reader.get_error() == OK);
+					CHECK(reader.get_length() == uint64_t(size));
+					CHECK(reader.FileAccess::get_buffer(size) == payload);
+					CHECK(reader.get_position() == uint64_t(size));
+					reader.seek_end(-3);
+					CHECK(reader.FileAccess::get_buffer(3) == payload.slice(size - 3));
+				}
+				fixture.mount();
+				Error error = FAILED;
+				Ref<FileAccess> reader = FileAccess::open(fixture.logical, FileAccess::READ, &error);
+				REQUIRE(reader.is_valid());
+				CHECK(error == OK);
+				CHECK(reader->get_buffer(size) == payload);
+			}
+		}
+	}
+}
+TEST_CASE("[F08][PCK] Sparse entries retain plaintext compressed-size metadata") {
+	const Vector<uint8_t> payload = bytes(2051);
+	for (bool compressed_entry : { false, true }) {
+		const Vector<uint8_t> stored = compressed_entry ? compressed(payload) : payload;
+		for (bool encrypted_entry : { false, true }) {
+			Fixture fixture;
+			Ref<FileAccess> output = FileAccess::open(fixture.filename, FileAccess::WRITE);
+			REQUIRE(output.is_valid());
+			if (encrypted_entry) {
+				Vector<uint8_t> key;
+				REQUIRE(key.resize(32) == OK);
+				memcpy(key.ptrw(), script_encryption_key, 32);
+				FileAccessEncrypted writer;
+				REQUIRE(writer.open_and_parse(output, key, FileAccessEncrypted::MODE_WRITE_AES256, false) == OK);
+				REQUIRE(writer.store_buffer(stored.ptr(), stored.size()));
+				writer.close();
+			} else {
+				REQUIRE(output->store_buffer(stored.ptr(), stored.size()));
+			}
+			output->close();
+			fixture.info.bundle = true;
+			fixture.info.size = payload.size();
+			fixture.info.stored_size = stored.size();
+			fixture.info.lzma2 = compressed_entry;
+			fixture.info.encrypted = encrypted_entry;
+#ifdef TOOLS_ENABLED
+			const String logical = "res://entry.bin";
+#else
+			const String logical = fixture.filename;
+#endif
+			for (int repeat = 0; repeat < 2; repeat++) {
+				FileAccessPack reader(logical, fixture.info);
+				REQUIRE(reader.is_open());
+				CHECK(reader.FileAccess::get_buffer(payload.size()) == payload);
+			}
+			if (encrypted_entry && compressed_entry) {
+				fixture.info.stored_size--;
+				ErrorsOff quiet;
+				FileAccessPack mismatched(logical, fixture.info);
+				CHECK_FALSE(mismatched.is_open());
+				CHECK(mismatched.get_error() == ERR_FILE_CORRUPT);
+			}
+		}
+	}
+}
+TEST_CASE("[F08][PCK] Encrypted compressed parsing cannot exceed the declared physical entry") {
+	const Vector<uint8_t> payload = bytes(1031);
+	Fixture fixture;
+	fixture.write(compressed(payload), payload.size(), true, true);
+	const uint64_t physical_size = fixture.info.stored_size;
+	REQUIRE(physical_size > 40);
+	ErrorsOff quiet;
+	for (uint64_t extent : { uint64_t(0), uint64_t(39), uint64_t(40), physical_size - 1, physical_size + 1, UINT64_MAX }) {
+		fixture.info.stored_size = extent;
+		FileAccessPack reader(fixture.logical, fixture.info);
+		CHECK_FALSE(reader.is_open());
+		CHECK(reader.get_error() == ERR_FILE_CORRUPT);
+		uint8_t output = 0xa7;
+		CHECK(reader.get_buffer(&output, 1) == 0);
+		CHECK(output == 0xa7);
+	}
+	fixture.info.stored_size = physical_size;
+	FileAccessPack reader(fixture.logical, fixture.info);
+	REQUIRE(reader.is_open());
+	CHECK(reader.FileAccess::get_buffer(payload.size()) == payload);
+}
+
+TEST_CASE("[F08][PCK] Existing version 5 directory layout loads encrypted compressed entries with embedded offsets") {
+	for (int prefix : { 0, 17 }) {
+		Fixture fixture;
+		const Vector<uint8_t> payload = bytes(3119);
+		fixture.write(compressed(payload), payload.size(), true, true);
+		const Vector<uint8_t> encrypted = FileAccess::get_file_as_bytes(fixture.filename).slice(1);
+		fixture.logical = "res://f08_legacy_" + uitos(OS::get_singleton()->get_ticks_usec()) + ".bin";
+		Ref<FileAccess> pack = FileAccess::open(fixture.filename, FileAccess::WRITE);
+		REQUIRE(pack.is_valid());
+		for (int i = 0; i < prefix; i++) { REQUIRE(pack->store_8(0xa7)); }
+		// Match the pre-remediation V5 exporter layout: physical encrypted
+		// stored_size excludes the outer entry padding.
+		REQUIRE(pack->store_32(PACK_HEADER_MAGIC));
+		REQUIRE(pack->store_32(PACK_FORMAT_VERSION_V5));
+		REQUIRE(pack->store_32(4));
+		REQUIRE(pack->store_32(0));
+		REQUIRE(pack->store_32(0));
+		REQUIRE(pack->store_32(PACK_REL_FILEBASE));
+		REQUIRE(pack->store_64(104));
+		REQUIRE(pack->store_64(104 + encrypted.size() + 5));
+		for (int i = 0; i < 16; i++) { REQUIRE(pack->store_32(0)); }
+		REQUIRE(pack->get_position() == uint64_t(prefix + 104));
+		REQUIRE(pack->store_buffer(encrypted.ptr(), encrypted.size()));
+		for (int i = 0; i < 5; i++) { REQUIRE(pack->store_8(0)); }
+		REQUIRE(pack->store_32(1));
+		const CharString path = fixture.logical.trim_prefix("res://").utf8();
+		REQUIRE(pack->store_32(path.length()));
+		REQUIRE(pack->store_buffer(reinterpret_cast<const uint8_t *>(path.ptr()), path.length()));
+		REQUIRE(pack->store_64(0));
+		REQUIRE(pack->store_64(payload.size()));
+		REQUIRE(pack->store_64(encrypted.size()));
+		uint8_t digest[16];
+		REQUIRE(CryptoCore::md5(payload.ptr(), payload.size(), digest) == OK);
+		REQUIRE(pack->store_buffer(digest, sizeof(digest)));
+		REQUIRE(pack->store_32(PACK_FILE_ENCRYPTED | PACK_FILE_LZMA2));
+		pack->close();
+		REQUIRE(PackedData::get_singleton()->add_pack(fixture.filename, true, prefix) == OK);
+		fixture.registered = true;
+		for (int repeat = 0; repeat < 2; repeat++) {
+			Error error = FAILED;
+			Ref<FileAccess> reader = FileAccess::open(fixture.logical, FileAccess::READ, &error);
+			REQUIRE(error == OK);
+			REQUIRE(reader.is_valid());
+			CHECK(reader->get_length() == uint64_t(payload.size()));
+			CHECK(reader->get_buffer(payload.size()) == payload);
+		}
+	}
+}
 TEST_CASE("[PCKEncoderDiagnostic] Current SDK encoder round trips an ordinary payload") {
 	const Vector<uint8_t> payload = bytes(1031);
 	PCKLzmaOptions options;

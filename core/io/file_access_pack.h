@@ -203,6 +203,7 @@ class FileAccessPack : public FileAccess {
 
 	Ref<FileAccess> f;
 	Error _open_pack(const Vector<uint8_t> &p_decryption_key);
+	FileAccessPack(const Ref<FileAccess> &p_base, uint64_t p_offset, uint64_t p_length);
 	virtual Error open_internal(const String &p_path, int p_mode_flags) override;
 	virtual uint64_t _get_modified_time(const String &p_file) override { return 0; }
 	virtual uint64_t _get_access_time(const String &p_file) override { return 0; }
