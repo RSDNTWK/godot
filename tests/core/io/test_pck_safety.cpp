@@ -34,6 +34,7 @@ TEST_FORCE_LINK(test_pck_safety)
 
 #include "core/io/dir_access.h"
 #include "core/io/file_access_encrypted.h"
+#include "tests/core/io/encrypted_test_helpers.h"
 #include "core/io/file_access_memory.h"
 #include "core/io/file_access_pack.h"
 #include "core/io/pck_lzma.h"
@@ -632,6 +633,56 @@ TEST_CASE("[F02AllocationFault][JPEG] Pixel-limit boundary reaches checked alloc
 	}
 }
 #endif // MODULE_JPG_ENABLED
+
+TEST_CASE("[N008][EncryptedAllocation] IV and payload allocation failures clear state and permit retry") {
+	ErrorsOff quiet;
+	const Vector<uint8_t> data = TestEncryptedSafety::stream(1031);
+	const Vector<uint8_t> key = TestEncryptedSafety::key();
+	for (int size : { 16, 1040 }) {
+		Ref<FileAccessMemory> source;
+		source.instantiate();
+		REQUIRE(source->open_custom(data.ptr(), data.size()) == OK);
+		FileAccessEncrypted reader;
+		const size_t allocation_size = vector_allocation_size(size);
+		Error error;
+		{
+			AllocationFailure fault(allocation_size, allocation_size);
+			error = reader.open_and_parse(source, key, FileAccessEncrypted::MODE_READ);
+		}
+		CHECK(allocation_failures == 1);
+		CHECK(error == ERR_OUT_OF_MEMORY);
+		CHECK_FALSE(reader.is_open());
+		CHECK(reader.get_length() == 0);
+		CHECK(reader.get_iv().is_empty());
+		CHECK(source->get_position() <= 44);
+		source->seek(0);
+		REQUIRE(reader.open_and_parse(source, key, FileAccessEncrypted::MODE_READ) == OK);
+		CHECK(reader.get_length() == 1031);
+	}
+}
+TEST_CASE("[N008][EncryptedAllocation] Password key allocation fails before parser input is consumed") {
+	ErrorsOff quiet;
+	const Vector<uint8_t> data = TestEncryptedSafety::stream(17);
+	Ref<FileAccessMemory> source;
+	source.instantiate();
+	REQUIRE(source->open_custom(data.ptr(), data.size()) == OK);
+	FileAccessEncrypted reader;
+	REQUIRE(reader.open_and_parse(source, TestEncryptedSafety::key(), FileAccessEncrypted::MODE_READ) == OK);
+	reader.close();
+	source->seek(0);
+	const size_t allocation_size = vector_allocation_size(32);
+	Error error;
+	{
+		AllocationFailure fault(allocation_size, allocation_size);
+		error = reader.open_and_parse_password(source, "ordinary-test-password", FileAccessEncrypted::MODE_READ);
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(error == ERR_OUT_OF_MEMORY);
+	CHECK_FALSE(reader.is_open());
+	CHECK(reader.get_length() == 0);
+	CHECK(reader.get_iv().is_empty());
+	CHECK(source->get_position() == 0);
+}
 #endif
 
 

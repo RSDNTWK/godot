@@ -42,87 +42,143 @@ void FileAccessEncrypted::deinitialize() {
 }
 
 Error FileAccessEncrypted::open_and_parse(Ref<FileAccess> p_base, const Vector<uint8_t> &p_key, Mode p_mode, bool p_with_magic, const Vector<uint8_t> &p_iv) {
-	ERR_FAIL_COND_V_MSG(file.is_valid(), ERR_ALREADY_IN_USE, vformat("Can't open file while another file from path '%s' is open.", file->get_path_absolute()));
-	ERR_FAIL_COND_V(p_key.size() != 32, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(file.is_valid(), ERR_ALREADY_IN_USE);
 
 	pos = 0;
 	eofed = false;
 	use_magic = p_with_magic;
-
-	if (p_mode == MODE_WRITE_AES256) {
+	length = 0;
+	base = 0;
+	data.clear();
+	iv.clear();
+	key.clear();
+	auto fail = [&](Error p_error) {
 		data.clear();
+		iv.clear();
+		key.clear();
+		length = 0;
+		base = 0;
+		pos = 0;
+		eofed = false;
+		writing = false;
+		return p_error;
+	};
+	if (p_base.is_null() || !p_base->is_open() || p_key.size() != 32 || p_mode < MODE_READ || p_mode >= MODE_MAX) {
+		return fail(ERR_INVALID_PARAMETER);
+	}
+	key = p_key;
+	if (p_mode == MODE_WRITE_AES256) {
 		writing = true;
-		file = p_base;
-		key = p_key;
+		if (!p_iv.is_empty() && p_iv.size() != 16) {
+			return fail(ERR_INVALID_PARAMETER);
+		}
+		const Error allocation = iv.resize(16);
+		if (allocation != OK) {
+			return fail(allocation);
+		}
 		if (p_iv.is_empty()) {
-			iv.resize(16);
 			if (unlikely(!_fae_static_rng)) {
 				_fae_static_rng = memnew(CryptoCore::RandomGenerator);
-				if (_fae_static_rng->init() != OK) {
+				const Error initialized = _fae_static_rng->init();
+				if (initialized != OK) {
 					memdelete(_fae_static_rng);
 					_fae_static_rng = nullptr;
-					ERR_FAIL_V_MSG(FAILED, "Failed to initialize random number generator.");
+					return fail(initialized);
 				}
 			}
-			Error err = _fae_static_rng->get_random_bytes(iv.ptrw(), 16);
-			ERR_FAIL_COND_V(err != OK, err);
+			const Error randomized = _fae_static_rng->get_random_bytes(iv.ptrw(), 16);
+			if (randomized != OK) {
+				return fail(randomized);
+			}
 		} else {
-			ERR_FAIL_COND_V(p_iv.size() != 16, ERR_INVALID_PARAMETER);
-			iv = p_iv;
+			memcpy(iv.ptrw(), p_iv.ptr(), 16);
 		}
-
-	} else if (p_mode == MODE_READ) {
-		writing = false;
-		key = p_key;
-
-		if (use_magic) {
-			uint32_t magic = p_base->get_32();
-			ERR_FAIL_COND_V(magic != ENCRYPTED_HEADER_MAGIC, ERR_FILE_UNRECOGNIZED);
-		}
-
-		unsigned char md5d[16];
-		p_base->get_buffer(md5d, 16);
-		length = p_base->get_64();
-
-		iv.resize(16);
-		p_base->get_buffer(iv.ptrw(), 16);
-
-		base = p_base->get_position();
-		ERR_FAIL_COND_V(p_base->get_length() < base + length, ERR_FILE_CORRUPT);
-		uint64_t ds = length;
-		if (ds % 16) {
-			ds += 16 - (ds % 16);
-		}
-		data.resize(ds);
-
-		uint64_t blen = p_base->get_buffer(data.ptrw(), ds);
-		ERR_FAIL_COND_V(blen != ds, ERR_FILE_CORRUPT);
-
-		{
-			CryptoCore::AESContext ctx;
-
-			ctx.set_encode_key(key.ptrw(), 256); // Due to the nature of CFB, same key schedule is used for both encryption and decryption!
-			ctx.decrypt_cfb(ds, iv.ptrw(), data.ptrw(), data.ptrw());
-		}
-
-		data.resize(length);
-
-		unsigned char hash[16];
-		ERR_FAIL_COND_V(CryptoCore::md5(data.ptr(), data.size(), hash) != OK, ERR_BUG);
-
-		ERR_FAIL_COND_V_MSG(String::md5(hash) != String::md5(md5d), ERR_FILE_CORRUPT, "The MD5 sum of the decrypted file does not match the expected value. It could be that the file is corrupt, or that the provided decryption key is invalid.");
-
 		file = p_base;
+		return OK;
 	}
-
+	writing = false;
+	const uint64_t start = p_base->get_position();
+	const uint64_t source_length = p_base->get_length();
+	const uint64_t header_size = use_magic ? 44 : 40;
+	if (start > source_length || header_size > source_length - start) {
+		return fail(ERR_FILE_CORRUPT);
+	}
+	auto read_exact = [&](uint8_t *p_target, uint64_t p_count) {
+		const uint64_t read = p_base->get_buffer(p_target, p_count);
+		const Error error = p_base->get_error();
+		if (read != p_count) {
+			return error != OK && error != ERR_FILE_EOF ? error : ERR_FILE_CORRUPT;
+		}
+		return error == ERR_FILE_EOF ? OK : error;
+	};
+	if (use_magic) {
+		uint32_t marker = 0;
+		const Error error = read_exact(reinterpret_cast<uint8_t *>(&marker), sizeof(marker));
+		if (error != OK) { return fail(error); }
+		if (p_base->is_big_endian()) { marker = BSWAP32(marker); }
+		if (marker != ENCRYPTED_HEADER_MAGIC) { return fail(ERR_FILE_UNRECOGNIZED); }
+	}
+	uint8_t expected_hash[16];
+	Error error = read_exact(expected_hash, sizeof(expected_hash));
+	if (error != OK) { return fail(error); }
+	error = read_exact(reinterpret_cast<uint8_t *>(&length), sizeof(length));
+	if (error != OK) { return fail(error); }
+	if (p_base->is_big_endian()) { length = BSWAP64(length); }
+	error = iv.resize(16);
+	if (error != OK) { return fail(error); }
+	error = read_exact(iv.ptrw(), 16);
+	if (error != OK) { return fail(error); }
+	base = p_base->get_position();
+	if (base != start + header_size || base > source_length) {
+		return fail(ERR_FILE_CORRUPT);
+	}
+	const uint64_t available = source_length - base;
+	const uint64_t padding = (16 - length % 16) % 16;
+	if (length > available || padding > available - length) {
+		return fail(ERR_FILE_CORRUPT);
+	}
+	const uint64_t stored_length = length + padding;
+	if (stored_length > uint64_t(INT64_MAX) || stored_length > SIZE_MAX) {
+		return fail(ERR_FILE_CORRUPT);
+	}
+	error = data.resize(stored_length);
+	if (error != OK) { return fail(error); }
+	if (stored_length > 0) {
+		error = read_exact(data.ptrw(), stored_length);
+		if (error != OK) { return fail(error); }
+		CryptoCore::AESContext context;
+		error = context.set_encode_key(key.ptr(), 256);
+		if (error != OK) { return fail(error); }
+		error = context.decrypt_cfb(stored_length, iv.ptrw(), data.ptrw(), data.ptrw());
+		if (error != OK) { return fail(error); }
+	}
+	error = data.resize(length);
+	if (error != OK) { return fail(error); }
+	uint8_t actual_hash[16];
+	error = CryptoCore::md5(data.ptr(), data.size(), actual_hash);
+	if (error != OK) { return fail(error); }
+	if (memcmp(actual_hash, expected_hash, sizeof(actual_hash)) != 0) {
+		return fail(ERR_FILE_CORRUPT);
+	}
+	file = p_base;
 	return OK;
 }
 
 Error FileAccessEncrypted::open_and_parse_password(Ref<FileAccess> p_base, const String &p_key, Mode p_mode) {
+	ERR_FAIL_COND_V(file.is_valid(), ERR_ALREADY_IN_USE);
+	data.clear();
+	iv.clear();
+	key.clear();
+	length = 0;
+	base = 0;
+	pos = 0;
+	eofed = false;
+	writing = false;
 	String cs = p_key.md5_text();
 	ERR_FAIL_COND_V(cs.length() != 32, ERR_INVALID_PARAMETER);
 	Vector<uint8_t> key_md5;
-	key_md5.resize(32);
+	const Error allocation = key_md5.resize(32);
+	ERR_FAIL_COND_V(allocation != OK, allocation);
 	for (int i = 0; i < 32; i++) {
 		key_md5.write[i] = cs[i];
 	}
@@ -150,8 +206,12 @@ void FileAccessEncrypted::_close() {
 		ERR_FAIL_COND(CryptoCore::md5(data.ptr(), data.size(), hash) != OK); // Bug?
 
 		compressed.resize(len);
-		memcpy(compressed.ptr(), data.ptr(), data.size());
-		memset(compressed.ptr() + data.size(), 0, len - data.size());
+		if (!data.is_empty()) {
+			memcpy(compressed.ptr(), data.ptr(), data.size());
+		}
+		if (len > uint64_t(data.size())) {
+			memset(compressed.ptr() + data.size(), 0, len - data.size());
+		}
 
 		CryptoCore::AESContext ctx;
 		ctx.set_encode_key(key.ptrw(), 256);
@@ -164,9 +224,10 @@ void FileAccessEncrypted::_close() {
 		file->store_64(data.size());
 		file->store_buffer(iv.ptr(), 16);
 
-		ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptr(), compressed.ptr());
-
-		file->store_buffer(compressed.ptr(), compressed.size());
+		if (len > 0) {
+			ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptr(), compressed.ptr());
+			file->store_buffer(compressed.ptr(), compressed.size());
+		}
 		data.clear();
 	}
 
@@ -229,7 +290,9 @@ uint64_t FileAccessEncrypted::get_buffer(uint8_t *p_dst, uint64_t p_length) cons
 
 	uint64_t to_copy = MIN(p_length, get_length() - pos);
 
-	memcpy(p_dst, data.ptr() + pos, to_copy);
+	if (to_copy > 0) {
+		memcpy(p_dst, data.ptr() + pos, to_copy);
+	}
 	pos += to_copy;
 
 	if (to_copy < p_length) {
