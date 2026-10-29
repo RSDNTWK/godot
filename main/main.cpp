@@ -992,6 +992,15 @@ int Main::test_entrypoint(int argc, char *argv[], bool &tests_need_run) {
 			// TODO: need to come up with different test contexts.
 			// Not every test requires high-level functionality like `ClassDB`.
 			test_setup();
+			// Tests bypass normal setup, so apply this optional tracker explicitly.
+			for (int i = 0; i < argc; i++) {
+				if (strcmp(argv[i], "--") == 0 || strcmp(argv[i], "++") == 0) {
+					break;
+				}
+				if (strcmp(argv[i], "--extra-gpu-memory-tracking") == 0) {
+					engine->extra_gpu_memory_tracking = true;
+				}
+			}
 			int status = test_main(argc, argv);
 			test_cleanup();
 			return status;

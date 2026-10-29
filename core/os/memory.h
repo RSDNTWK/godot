@@ -192,14 +192,15 @@ _FORCE_INLINE_ uint64_t *_get_element_count_ptr(uint8_t *p_ptr) {
 }
 
 template <typename T>
-T *memnew_arr_template(size_t p_elements) {
+T *memnew_arr_template(uint64_t p_elements) {
 	if (p_elements == 0) {
 		return nullptr;
 	}
 	/** overloading operator new[] cannot be done , because it may not return the real allocated address (it may pad the 'element count' before the actual array). Because of that, it must be done by hand. This is the
 	same strategy used by std::vector, and the Vector class, so it should be safe.*/
 
-	size_t len = sizeof(T) * p_elements;
+	ERR_FAIL_COND_V(p_elements > SIZE_MAX / sizeof(T), nullptr);
+	size_t len = sizeof(T) * size_t(p_elements);
 	uint8_t *mem = (uint8_t *)Memory::alloc_static(len, true);
 	T *failptr = nullptr; //get rid of a warning
 	ERR_FAIL_NULL_V(mem, failptr);

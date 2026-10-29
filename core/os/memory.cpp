@@ -33,10 +33,6 @@
 #include "core/profiling/profiling.h"
 #include "core/templates/safe_refcount.h"
 
-#ifdef DEV_ENABLED
-#include "core/math/math_funcs_binary.h"
-#endif
-
 #include <cstdlib>
 
 #ifdef DEBUG_ENABLED
@@ -53,17 +49,25 @@ void *operator new(size_t p_size, void *(*p_allocfunc)(size_t p_size)) {
 }
 
 void *Memory::alloc_aligned_static(size_t p_bytes, size_t p_alignment) {
-	DEV_ASSERT(Math::is_power_of_2(p_alignment));
+	DEV_ASSERT(p_alignment && !(p_alignment & (p_alignment - 1)));
+	ERR_FAIL_COND_V(!p_alignment || (p_alignment & (p_alignment - 1)), nullptr);
+	ERR_FAIL_COND_V(p_alignment - 1 > SIZE_MAX - sizeof(uint32_t), nullptr);
+	const size_t overhead = p_alignment - 1 + sizeof(uint32_t);
+	ERR_FAIL_COND_V(p_bytes > SIZE_MAX - overhead, nullptr);
 
-	void *p1, *p2;
-	if ((p1 = (void *)malloc(p_bytes + p_alignment - 1 + sizeof(uint32_t))) == nullptr) {
+	void *base = malloc(p_bytes + overhead);
+	if (base == nullptr) {
 		return nullptr;
 	}
-	GodotProfileAlloc(p1, p_bytes + p_alignment - 1 + sizeof(uint32_t));
-
-	p2 = (void *)(((uintptr_t)p1 + sizeof(uint32_t) + p_alignment - 1) & ~((p_alignment)-1));
-	*((uint32_t *)p2 - 1) = (uint32_t)((uintptr_t)p2 - (uintptr_t)p1);
-	return p2;
+	void *aligned = (void *)(((uintptr_t)base + sizeof(uint32_t) + p_alignment - 1) & ~(p_alignment - 1));
+	const uintptr_t offset = (uintptr_t)aligned - (uintptr_t)base;
+	if (offset > UINT32_MAX) {
+		free(base);
+		return nullptr;
+	}
+	*((uint32_t *)aligned - 1) = (uint32_t)offset;
+	GodotProfileAlloc(base, p_bytes + overhead);
+	return aligned;
 }
 
 void *Memory::realloc_aligned_static(void *p_memory, size_t p_bytes, size_t p_prev_bytes, size_t p_alignment) {
@@ -72,9 +76,10 @@ void *Memory::realloc_aligned_static(void *p_memory, size_t p_bytes, size_t p_pr
 	}
 
 	void *ret = alloc_aligned_static(p_bytes, p_alignment);
-	if (ret) {
-		memcpy(ret, p_memory, p_prev_bytes);
+	if (ret == nullptr) {
+		return nullptr;
 	}
+	memcpy(ret, p_memory, MIN(p_prev_bytes, p_bytes));
 	free_aligned_static(p_memory);
 	return ret;
 }
@@ -88,11 +93,13 @@ void Memory::free_aligned_static(void *p_memory) {
 
 template <bool p_ensure_zero>
 void *Memory::alloc_static(size_t p_bytes, bool p_pad_align) {
-#ifdef DEBUG_ENABLED
+#if defined(DEBUG_ENABLED) || defined(GODOT_PROFILER_TRACK_MEMORY)
 	bool prepad = true;
 #else
 	bool prepad = p_pad_align;
 #endif
+
+	ERR_FAIL_COND_V(prepad && p_bytes > SIZE_MAX - DATA_OFFSET, nullptr);
 
 	void *mem;
 	if constexpr (p_ensure_zero) {
@@ -130,43 +137,44 @@ void *Memory::realloc_static(void *p_memory, size_t p_bytes, bool p_pad_align) {
 
 	uint8_t *mem = (uint8_t *)p_memory;
 
-#ifdef DEBUG_ENABLED
+#if defined(DEBUG_ENABLED) || defined(GODOT_PROFILER_TRACK_MEMORY)
 	bool prepad = true;
 #else
 	bool prepad = p_pad_align;
 #endif
 
+	ERR_FAIL_COND_V(prepad && p_bytes > SIZE_MAX - DATA_OFFSET, nullptr);
 	if (prepad) {
 		mem -= DATA_OFFSET;
-		uint64_t *s = (uint64_t *)(mem + SIZE_OFFSET);
-
-#ifdef DEBUG_ENABLED
-		if (p_bytes > *s) {
-			uint64_t new_mem_usage = _current_mem_usage.add(p_bytes - *s);
-			_max_mem_usage.exchange_if_greater(new_mem_usage);
-		} else {
-			_current_mem_usage.sub(*s - p_bytes);
-		}
-#endif
+		[[maybe_unused]] const uint64_t previous_size = *(uint64_t *)(mem + SIZE_OFFSET);
 
 		if (p_bytes == 0) {
+#ifdef DEBUG_ENABLED
+			_current_mem_usage.sub(previous_size);
+#endif
 			GodotProfileFree(mem);
 			free(mem);
 			return nullptr;
-		} else {
-			*s = p_bytes;
-
-			GodotProfileFree(mem);
-			mem = (uint8_t *)realloc(mem, p_bytes + DATA_OFFSET);
-			ERR_FAIL_NULL_V(mem, nullptr);
-			GodotProfileAlloc(mem, p_bytes + DATA_OFFSET);
-
-			s = (uint64_t *)(mem + SIZE_OFFSET);
-
-			*s = p_bytes;
-
-			return mem + DATA_OFFSET;
 		}
+
+		// A failed realloc retains the allocation and its metadata.
+		GodotProfileFree(mem);
+		uint8_t *replacement = (uint8_t *)realloc(mem, p_bytes + DATA_OFFSET);
+		if (replacement == nullptr) {
+			GodotProfileAlloc(mem, previous_size + DATA_OFFSET);
+			ERR_FAIL_V(nullptr);
+		}
+		GodotProfileAlloc(replacement, p_bytes + DATA_OFFSET);
+#ifdef DEBUG_ENABLED
+		if (p_bytes > previous_size) {
+			uint64_t new_mem_usage = _current_mem_usage.add(p_bytes - previous_size);
+			_max_mem_usage.exchange_if_greater(new_mem_usage);
+		} else {
+			_current_mem_usage.sub(previous_size - p_bytes);
+		}
+#endif
+		*(uint64_t *)(replacement + SIZE_OFFSET) = p_bytes;
+		return replacement + DATA_OFFSET;
 	} else {
 		GodotProfileFree(mem);
 		mem = (uint8_t *)realloc(mem, p_bytes);
@@ -183,7 +191,7 @@ void Memory::free_static(void *p_ptr, bool p_pad_align) {
 
 	uint8_t *mem = (uint8_t *)p_ptr;
 
-#ifdef DEBUG_ENABLED
+#if defined(DEBUG_ENABLED) || defined(GODOT_PROFILER_TRACK_MEMORY)
 	bool prepad = true;
 #else
 	bool prepad = p_pad_align;

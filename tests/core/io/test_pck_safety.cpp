@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "tests/test_macros.h"
+#include "tests/core/io/allocation_test_helpers.h"
 
 TEST_FORCE_LINK(test_pck_safety)
 
@@ -1080,6 +1081,7 @@ static thread_local bool allocation_armed = false;
 static thread_local size_t allocation_minimum = 0;
 static thread_local size_t allocation_maximum = SIZE_MAX;
 static thread_local int allocation_failures = 0;
+static thread_local int allocation_skip = 0;
 static thread_local bool allocation_recording = false;
 static thread_local size_t first_allocation_size = 0;
 static bool fail_allocation(size_t p_size) {
@@ -1087,6 +1089,10 @@ static bool fail_allocation(size_t p_size) {
 		first_allocation_size = p_size;
 	}
 	if (allocation_armed && p_size >= allocation_minimum && p_size <= allocation_maximum) {
+		if (allocation_skip > 0) {
+			allocation_skip--;
+			return false;
+		}
 		allocation_armed = false;
 		allocation_failures++;
 		return true;
@@ -1096,6 +1102,7 @@ static bool fail_allocation(size_t p_size) {
 struct AllocationFailure {
 	AllocationFailure(size_t p_min = 0, size_t p_max = SIZE_MAX) {
 		allocation_failures = 0;
+		allocation_skip = 0;
 		allocation_minimum = p_min;
 		allocation_maximum = p_max;
 		allocation_armed = true;
@@ -1450,6 +1457,28 @@ TEST_CASE("[SceneTree][F07][WebPAllocation] Animated canvas copy failure cleans 
 #endif
 
 } // namespace TestPCKSafety
+
+#ifdef B01_ALLOCATION_TESTS
+namespace TestAllocation {
+void begin_failure(size_t p_minimum, size_t p_maximum, int p_skip) {
+	TestPCKSafety::allocation_failures = 0;
+	TestPCKSafety::allocation_skip = p_skip;
+	TestPCKSafety::allocation_minimum = p_minimum;
+	TestPCKSafety::allocation_maximum = p_maximum;
+	TestPCKSafety::allocation_armed = true;
+}
+void end_failure() { TestPCKSafety::allocation_armed = false; }
+int failures() { return TestPCKSafety::allocation_failures; }
+void begin_recording() {
+	TestPCKSafety::first_allocation_size = 0;
+	TestPCKSafety::allocation_recording = true;
+}
+size_t end_recording() {
+	TestPCKSafety::allocation_recording = false;
+	return TestPCKSafety::first_allocation_size;
+}
+} // namespace TestAllocation
+#endif
 
 #ifdef B01_ALLOCATION_TESTS
 extern "C" {

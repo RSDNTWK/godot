@@ -583,6 +583,7 @@ void Image::convert(Format p_new_format) {
 	if (!_are_formats_compatible(format, p_new_format)) {
 		// Use put/set pixel which is slower but works with non-byte formats.
 		Image new_img(width, height, mipmaps, p_new_format);
+		ERR_FAIL_COND(new_img.is_empty());
 
 		for (int mip = 0; mip < mipmap_count; mip++) {
 			int64_t src_mip_ofs, dst_mip_ofs;
@@ -607,6 +608,7 @@ void Image::convert(Format p_new_format) {
 
 	// Convert the formats in an optimized way by removing/adding color channels if necessary.
 	Image new_img(width, height, mipmaps, p_new_format);
+	ERR_FAIL_COND(new_img.is_empty());
 
 	const int conversion_type = format | p_new_format << 8;
 
@@ -1261,21 +1263,40 @@ void Image::resize(int p_width, int p_height, Interpolation p_interpolation) {
 	ERR_FAIL_COND_MSG(p_height <= 0, "Image height must be greater than 0.");
 	ERR_FAIL_COND_MSG(p_width > MAX_WIDTH, vformat("Image width cannot be greater than %d pixels.", MAX_WIDTH));
 	ERR_FAIL_COND_MSG(p_height > MAX_HEIGHT, vformat("Image height cannot be greater than %d pixels.", MAX_HEIGHT));
-	ERR_FAIL_COND_MSG(p_width * p_height > MAX_PIXELS, vformat("Too many pixels for image, maximum is %d pixels.", MAX_PIXELS));
+	ERR_FAIL_COND_MSG(int64_t(p_width) * p_height > MAX_PIXELS, vformat("Too many pixels for image, maximum is %d pixels.", MAX_PIXELS));
 
 	if (p_width == width && p_height == height) {
 		return;
 	}
 
 	// Convert the image to 'standard' RGB(A) formats that may be resized.
-	Format original_format = format;
+	const Format original_format = format;
+	const Vector<uint8_t> original_data = data;
+	const bool original_mipmaps = mipmaps;
+	auto restore_source = [&]() {
+		data = original_data;
+		format = original_format;
+		mipmaps = original_mipmaps;
+	};
+	Format resize_format = original_format;
 	if (original_format == FORMAT_RGB565 || original_format == FORMAT_RGBA4444) {
-		convert(FORMAT_RGBA8);
+		resize_format = FORMAT_RGBA8;
 	} else if (original_format == FORMAT_RGBE9995) {
-		convert(FORMAT_RGBH);
+		resize_format = FORMAT_RGBH;
+	}
+	if (resize_format != format) {
+		convert(resize_format);
+		if (format != resize_format) {
+			restore_source();
+			ERR_FAIL_MSG("Could not convert the source image for resizing.");
+		}
 	}
 
 	Image dst(p_width, p_height, false, format);
+	if (dst.is_empty()) {
+		restore_source();
+		ERR_FAIL_MSG("Could not allocate the resized image.");
+	}
 
 	// Setup mipmap-aware scaling
 	bool mipmap_aware = p_interpolation == INTERPOLATE_TRILINEAR /* || p_interpolation == INTERPOLATE_TRICUBIC */;
@@ -1298,6 +1319,10 @@ void Image::resize(int p_width, int p_height, Interpolation p_interpolation) {
 	bool interpolate_mipmaps = mipmap_aware && mip1 != mip2;
 	if (interpolate_mipmaps) {
 		dst2.initialize_data(p_width, p_height, false, format);
+		if (dst2.is_empty()) {
+			restore_source();
+			ERR_FAIL_MSG("Could not allocate the second mipmap interpolation image.");
+		}
 	}
 
 	bool had_mipmaps = mipmaps;
@@ -1622,12 +1647,15 @@ void Image::resize(int p_width, int p_height, Interpolation p_interpolation) {
 		dst.generate_mipmaps();
 	}
 
-	_copy_internals_from(dst);
-
-	// Reconvert the image to its original format.
-	if (original_format != format) {
-		convert(original_format);
+	// Reconvert before committing so initialization failure preserves the source.
+	if (original_format != dst.format) {
+		dst.convert(original_format);
+		if (dst.format != original_format) {
+			restore_source();
+			ERR_FAIL_MSG("Could not restore the resized image's original format.");
+		}
 	}
+	_copy_internals_from(dst);
 }
 
 void Image::crop_from_point(int p_x, int p_y, int p_width, int p_height) {
@@ -1636,8 +1664,8 @@ void Image::crop_from_point(int p_x, int p_y, int p_width, int p_height) {
 	ERR_FAIL_COND_MSG(p_y < 0, "Start y position cannot be smaller than 0.");
 	ERR_FAIL_COND_MSG(p_width <= 0, "Width of image must be greater than 0.");
 	ERR_FAIL_COND_MSG(p_height <= 0, "Height of image must be greater than 0.");
-	ERR_FAIL_COND_MSG(p_x + p_width > MAX_WIDTH, vformat("End x position cannot be greater than %d.", MAX_WIDTH));
-	ERR_FAIL_COND_MSG(p_y + p_height > MAX_HEIGHT, vformat("End y position cannot be greater than %d.", MAX_HEIGHT));
+	ERR_FAIL_COND_MSG(int64_t(p_x) + p_width > MAX_WIDTH, vformat("End x position cannot be greater than %d.", MAX_WIDTH));
+	ERR_FAIL_COND_MSG(int64_t(p_y) + p_height > MAX_HEIGHT, vformat("End y position cannot be greater than %d.", MAX_HEIGHT));
 
 	/* to save memory, cropping should be done in-place, however, since this function
 	   will most likely either not be used much, or in critical areas, for now it won't, because
@@ -1651,6 +1679,7 @@ void Image::crop_from_point(int p_x, int p_y, int p_width, int p_height) {
 	uint32_t pixel_size = get_format_pixel_size(format);
 
 	Image dst(p_width, p_height, false, format);
+	ERR_FAIL_COND(dst.is_empty());
 
 	{
 		const uint8_t *r = data.ptr();
@@ -2406,19 +2435,19 @@ void Image::initialize_data(int p_width, int p_height, bool p_use_mipmaps, Forma
 			vformat("The Image width specified (%d pixels) cannot be greater than %d pixels.", p_width, MAX_WIDTH));
 	ERR_FAIL_COND_MSG(p_height > MAX_HEIGHT,
 			vformat("The Image height specified (%d pixels) cannot be greater than %d pixels.", p_height, MAX_HEIGHT));
-	ERR_FAIL_COND_MSG(p_width * p_height > MAX_PIXELS,
+	ERR_FAIL_COND_MSG(int64_t(p_width) * p_height > MAX_PIXELS,
 			vformat("Too many pixels for Image. Maximum is %dx%d = %d pixels.", MAX_WIDTH, MAX_HEIGHT, MAX_PIXELS));
 	ERR_FAIL_INDEX_MSG(p_format, FORMAT_MAX, vformat("The Image format specified (%d) is out of range. See Image's Format enum.", p_format));
 
 	int mm = 0;
 	int64_t size = _get_dst_image_size(p_width, p_height, p_format, mm, p_use_mipmaps ? -1 : 0);
-	data.resize(size);
+	// Build a unique buffer before replacing the old image. A same-size resize
+	// would otherwise leave a shared buffer whose writable COW can fail.
+	Vector<uint8_t> new_data;
+	ERR_FAIL_COND(new_data.resize(size) != OK);
+	memset(new_data.ptrw(), 0, size);
 
-	{
-		uint8_t *w = data.ptrw();
-		memset(w, 0, size);
-	}
-
+	data = std::move(new_data);
 	width = p_width;
 	height = p_height;
 	mipmaps = p_use_mipmaps;
@@ -2432,7 +2461,7 @@ void Image::initialize_data(int p_width, int p_height, bool p_use_mipmaps, Forma
 			vformat("The Image width specified (%d pixels) cannot be greater than %d pixels.", p_width, MAX_WIDTH));
 	ERR_FAIL_COND_MSG(p_height > MAX_HEIGHT,
 			vformat("The Image height specified (%d pixels) cannot be greater than %d pixels.", p_height, MAX_HEIGHT));
-	ERR_FAIL_COND_MSG(p_width * p_height > MAX_PIXELS,
+	ERR_FAIL_COND_MSG(int64_t(p_width) * p_height > MAX_PIXELS,
 			vformat("Too many pixels for Image. Maximum is %dx%d = %d pixels.", MAX_WIDTH, MAX_HEIGHT, MAX_PIXELS));
 	ERR_FAIL_INDEX_MSG(p_format, FORMAT_MAX, vformat("The Image format specified (%d) is out of range. See Image's Format enum.", p_format));
 
@@ -2467,7 +2496,7 @@ void Image::initialize_data(const char **p_xpm) {
 	int size_width = 0;
 	int size_height = 0;
 	int pixelchars = 0;
-	mipmaps = false;
+	Image parsed;
 	bool has_alpha = false;
 
 	enum Status {
@@ -2578,8 +2607,9 @@ void Image::initialize_data(const char **p_xpm) {
 				}
 				if (line == colormap_size) {
 					status = READING_PIXELS;
-					initialize_data(size_width, size_height, false, has_alpha ? FORMAT_RGBA8 : FORMAT_RGB8);
-					data_write = data.ptrw();
+					parsed.initialize_data(size_width, size_height, false, has_alpha ? FORMAT_RGBA8 : FORMAT_RGB8);
+					ERR_FAIL_COND(parsed.is_empty());
+					data_write = parsed.data.ptrw();
 					pixel_size = has_alpha ? 4 : 3;
 				}
 			} break;
@@ -2597,7 +2627,7 @@ void Image::initialize_data(const char **p_xpm) {
 					for (uint32_t i = 0; i < pixel_size; i++) {
 						pixel[i] = CLAMP((*colorptr)[i] * 255, 0, 255);
 					}
-					_put_pixelb(x, y, pixel_size, data_write, pixel);
+					parsed._put_pixelb(x, y, pixel_size, data_write, pixel);
 				}
 
 				if (y == (size_height - 1)) {
@@ -2610,6 +2640,7 @@ void Image::initialize_data(const char **p_xpm) {
 
 		line++;
 	}
+	_copy_internals_from(parsed);
 }
 #define DETECT_ALPHA_MAX_THRESHOLD 254
 #define DETECT_ALPHA_MIN_THRESHOLD 2

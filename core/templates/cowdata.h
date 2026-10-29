@@ -309,7 +309,10 @@ Error CowData<T>::insert(Size p_pos, T &&p_val) {
 	ERR_FAIL_INDEX_V(p_pos, new_size, ERR_INVALID_PARAMETER);
 
 	if (!_ptr) {
-		_alloc_exact(next_capacity(0, 1));
+		const Error error = _alloc_exact(next_capacity(0, 1));
+		if (error) {
+			return error;
+		}
 		*_get_size() = 1;
 	} else if (_get_refcount()->get() == 1) {
 		if ((USize)new_size > capacity()) {
@@ -345,7 +348,10 @@ Error CowData<T>::push_back(T &&p_val) {
 
 	if (!_ptr) {
 		// Grow by allocating.
-		_alloc_exact(next_capacity(0, 1));
+		const Error error = _alloc_exact(next_capacity(0, 1));
+		if (error) {
+			return error;
+		}
 		*_get_size() = 1;
 	} else if (_get_refcount()->get() == 1) {
 		// Grow in-place.
@@ -471,6 +477,7 @@ Error CowData<T>::resize(Size p_size) {
 template <typename T>
 Error CowData<T>::_alloc_exact(USize p_capacity) {
 	DEV_ASSERT(!_ptr);
+	ERR_FAIL_COND_V(p_capacity > (SIZE_MAX - DATA_OFFSET) / sizeof(T), ERR_OUT_OF_MEMORY);
 
 	uint8_t *mem_new = (uint8_t *)Memory::alloc_static(p_capacity * sizeof(T) + DATA_OFFSET, false);
 	ERR_FAIL_NULL_V(mem_new, ERR_OUT_OF_MEMORY);
@@ -489,6 +496,7 @@ Error CowData<T>::_alloc_exact(USize p_capacity) {
 template <typename T>
 Error CowData<T>::_realloc_exact(USize p_capacity) {
 	DEV_ASSERT(_ptr);
+	ERR_FAIL_COND_V(p_capacity > (SIZE_MAX - DATA_OFFSET) / sizeof(T), ERR_OUT_OF_MEMORY);
 
 	uint8_t *mem_new = (uint8_t *)Memory::realloc_static(((uint8_t *)_ptr) - DATA_OFFSET, p_capacity * sizeof(T) + DATA_OFFSET, false);
 	ERR_FAIL_NULL_V(mem_new, ERR_OUT_OF_MEMORY);

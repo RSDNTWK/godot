@@ -253,7 +253,7 @@ VkAllocationCallbacks *RenderingContextDriverVulkan::get_allocation_callbacks(Vk
 		VkSystemAllocationScope allocation_scope;
 		VkTrackedObjectType type;
 	};
-	VkAllocationCallbacks tracking_callbacks = {
+	static const VkAllocationCallbacks tracking_callbacks = {
 		// Allocation function
 		nullptr,
 		[](
@@ -264,17 +264,18 @@ VkAllocationCallbacks *RenderingContextDriverVulkan::get_allocation_callbacks(Vk
 			static constexpr size_t tracking_data_size = 32;
 			VkTrackedObjectType type = static_cast<VkTrackedObjectType>(*reinterpret_cast<VkTrackedObjectType *>(p_user_data));
 
-			driver_memory_total_memory.add(size);
-			driver_memory_total_alloc_count.increment();
-			driver_memory_tracker[type][allocation_scope].add(size);
-			driver_memory_allocation_count[type][allocation_scope].increment();
-
 			alignment = MAX(alignment, tracking_data_size);
+			ERR_FAIL_COND_V(size > SIZE_MAX - alignment, nullptr);
 
 			uint8_t *ret = reinterpret_cast<uint8_t *>(Memory::alloc_aligned_static(size + alignment, alignment));
 			if (ret == nullptr) {
 				return nullptr;
 			}
+
+			driver_memory_total_memory.add(size);
+			driver_memory_total_alloc_count.increment();
+			driver_memory_tracker[type][allocation_scope].add(size);
+			driver_memory_allocation_count[type][allocation_scope].increment();
 
 			// Track allocation
 			TrackedMemHeader *header = reinterpret_cast<TrackedMemHeader *>(ret);
@@ -294,9 +295,12 @@ VkAllocationCallbacks *RenderingContextDriverVulkan::get_allocation_callbacks(Vk
 				size_t size,
 				size_t alignment,
 				VkSystemAllocationScope allocation_scope) LAMBDA_VK_CALL_CONV -> void * {
+			if (size == 0) {
+				tracking_callbacks.pfnFree(p_user_data, p_original);
+				return nullptr;
+			}
 			if (p_original == nullptr) {
-				VkObjectType type = static_cast<VkObjectType>(*reinterpret_cast<uint32_t *>(p_user_data));
-				return get_allocation_callbacks(type)->pfnAllocation(p_user_data, size, alignment, allocation_scope);
+				return tracking_callbacks.pfnAllocation(p_user_data, size, alignment, allocation_scope);
 			}
 
 			uint8_t *mem = reinterpret_cast<uint8_t *>(p_original);
@@ -305,19 +309,27 @@ VkAllocationCallbacks *RenderingContextDriverVulkan::get_allocation_callbacks(Vk
 			// Retrieve allocation data
 			TrackedMemHeader *header = reinterpret_cast<TrackedMemHeader *>(mem - alignment);
 
-			// Update allocation size
-			driver_memory_total_memory.sub(header->size);
-			driver_memory_total_memory.add(size);
-			driver_memory_tracker[header->type][header->allocation_scope].sub(header->size);
-			driver_memory_tracker[header->type][header->allocation_scope].add(size);
+			ERR_FAIL_COND_V(size > SIZE_MAX - alignment || header->size > SIZE_MAX - alignment, nullptr);
+			const size_t previous_size = header->size;
+			const VkSystemAllocationScope previous_scope = header->allocation_scope;
+			const VkTrackedObjectType type = header->type;
 
-			uint8_t *ret = reinterpret_cast<uint8_t *>(Memory::realloc_aligned_static(header, size + alignment, header->size + alignment, alignment));
+			uint8_t *ret = reinterpret_cast<uint8_t *>(Memory::realloc_aligned_static(header, size + alignment, previous_size + alignment, alignment));
 			if (ret == nullptr) {
 				return nullptr;
 			}
-			// Update tracker
+
+			driver_memory_total_memory.sub(previous_size);
+			driver_memory_total_memory.add(size);
+			driver_memory_tracker[type][previous_scope].sub(previous_size);
+			driver_memory_tracker[type][allocation_scope].add(size);
+			if (previous_scope != allocation_scope) {
+				driver_memory_allocation_count[type][previous_scope].decrement();
+				driver_memory_allocation_count[type][allocation_scope].increment();
+			}
 			header = reinterpret_cast<TrackedMemHeader *>(ret);
 			header->size = size;
+			header->allocation_scope = allocation_scope;
 			return ret + alignment;
 		},
 
