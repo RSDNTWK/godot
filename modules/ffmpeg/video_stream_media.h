@@ -1,8 +1,8 @@
 #ifndef VIDEO_STREAM_MEDIA_H
 #define VIDEO_STREAM_MEDIA_H
 
-#include "scene/resources/video_stream.h"
 #include "core/io/resource_loader.h"
+#include "scene/resources/video_stream.h"
 #include "servers/audio/audio_stream.h"
 
 class OggPacketSequence;
@@ -16,13 +16,13 @@ struct FFmpegAudioMetadata {
 };
 
 class VideoStreamMedia : public VideoStream {
-    GDCLASS(VideoStreamMedia, VideoStream);
+	GDCLASS(VideoStreamMedia, VideoStream);
 
 protected:
-    static void _bind_methods();
+	static void _bind_methods();
 
 public:
-    Ref<VideoStreamPlayback> instantiate_playback() override;
+	Ref<VideoStreamPlayback> instantiate_playback() override;
 };
 
 class AudioStreamMedia : public AudioStream {
@@ -42,19 +42,33 @@ public:
 	double get_length() const override;
 };
 
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String(), const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>());
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String(), const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>(), bool p_embedded_video = false, double p_timeline_origin = 0.0);
 Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPacketSequence> &p_sequence, const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>());
+// Unlike the live mixer return, this excludes a temporary work-yield padding tail.
+int ffmpeg_audio_mix_for_video(const Ref<AudioStreamPlayback> &p_playback, AudioFrame *p_buffer, int p_frames);
+
 bool ffmpeg_probe_audio_buffer(const Vector<uint8_t> &p_data, FFmpegAudioMetadata &r_metadata);
 
+#ifdef DEV_ENABLED
+struct FFmpegAudioWorkStats {
+	int64_t work_used = 0;
+	int64_t work_limit = 0;
+	int decoder_opens = 0;
+	int indexed_seeks = 0;
+	int64_t seek_io_bytes = 0;
+};
+bool ffmpeg_audio_get_work_stats(const Ref<AudioStreamPlayback> &p_playback, FFmpegAudioWorkStats &r_stats);
+#endif
+
 class ResourceFormatLoaderMedia : public ResourceFormatLoader {
-    GDCLASS(ResourceFormatLoaderMedia, ResourceFormatLoader);
+	GDCLASS(ResourceFormatLoaderMedia, ResourceFormatLoader);
 
 public:
-    Ref<Resource> load(const String &p_path, const String &p_original_path = "", Error *r_error = nullptr, bool p_use_sub_threads = false, float *r_progress = nullptr, CacheMode p_cache_mode = CACHE_MODE_REUSE) override;
-    void get_recognized_extensions(List<String> *p_extensions) const override;
-    bool recognize_path(const String &p_path, const String &p_for_type = String()) const override;
-    bool handles_type(const String &p_type) const override;
-    String get_resource_type(const String &p_path) const override;
+	Ref<Resource> load(const String &p_path, const String &p_original_path = "", Error *r_error = nullptr, bool p_use_sub_threads = false, float *r_progress = nullptr, CacheMode p_cache_mode = CACHE_MODE_REUSE) override;
+	void get_recognized_extensions(List<String> *p_extensions) const override;
+	bool recognize_path(const String &p_path, const String &p_for_type = String()) const override;
+	bool handles_type(const String &p_type) const override;
+	String get_resource_type(const String &p_path) const override;
 };
 
 #endif

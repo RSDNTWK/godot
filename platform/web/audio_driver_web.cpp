@@ -243,6 +243,8 @@ void AudioDriverWeb::register_sample(const Ref<AudioSample> &p_sample) {
 		Ref<AudioStreamPlayback> stream_playback = p_sample->stream->instantiate_playback();
 		frames.resize(frames_total);
 		AudioFrame *frames_ptr = frames.ptrw();
+		// This private playback renders an offline sample, outside live stream mixing.
+		stream_playback->set_is_sample(true);
 		stream_playback->start();
 		stream_playback->mix(frames_ptr, 1.0f, frames_total);
 	}
