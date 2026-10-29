@@ -32,8 +32,6 @@
 
 #include "core/io/config_file.h"
 #include "core/io/dir_access.h"
-#include "scene/resources/animated_texture.h"
-#include "scene/resources/texture.h"
 
 #include "modules/webp/texture_loader_webp.h"
 
@@ -108,24 +106,19 @@ bool ResourceImporterWebPTexture::get_option_visibility(const String &p_path, co
 }
 
 Error ResourceImporterWebPTexture::import(ResourceUID::ID p_source_id, const String &p_source_file, const String &p_save_path, const HashMap<StringName, Variant> &p_options, List<String> *r_platform_variants, List<String> *r_gen_files, Variant *r_metadata) {
-	Error err = OK;
-	Ref<Resource> resource = ResourceFormatWebP::load_texture(p_source_file, &err);
-	ERR_FAIL_COND_V_MSG(resource.is_null(), err != OK ? err : ERR_FILE_CORRUPT, vformat("Failed to import WebP texture from '%s'.", p_source_file));
-
-	Ref<Texture2D> texture = resource;
-	ERR_FAIL_COND_V_MSG(texture.is_null(), ERR_FILE_CORRUPT, vformat("Imported WebP resource at '%s' is not a Texture2D.", p_source_file));
+	bool animated = false;
+	const Error err = ResourceFormatWebP::validate_texture_source(p_source_file, animated);
+	ERR_FAIL_COND_V_MSG(err != OK, err, vformat("Failed to import WebP texture from '%s'.", p_source_file));
 
 	if (r_metadata) {
 		Dictionary meta;
-		meta["animated_webp"] = Object::cast_to<AnimatedTexture>(texture.ptr()) != nullptr;
+		meta["animated_webp"] = animated;
 		meta["format_version"] = get_format_version();
 		*r_metadata = meta;
 	}
 
 	// The runtime WebP loader creates the same AnimatedTexture directly. Retain the
 	// original compressed animation instead of serializing every decoded RGBA frame.
-	texture.unref();
-	resource.unref();
 	return DirAccess::copy_absolute(p_source_file, p_save_path + ".webp");
 }
 

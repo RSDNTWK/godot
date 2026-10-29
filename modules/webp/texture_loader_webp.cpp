@@ -38,6 +38,7 @@
 #include "scene/resources/image_texture.h"
 
 #include <webp/demux.h>
+
 #include <cstring>
 
 static Error _read_webp_file(const String &p_path, Vector<uint8_t> &r_data) {
@@ -84,17 +85,26 @@ static Ref<Resource> _load_static_webp_texture(const uint8_t *p_data, int p_size
 	return texture;
 }
 
+static Error _check_webp_animation_size(uint32_t p_frames, uint32_t p_width, uint32_t p_height) {
+	if (p_frames == 0 || p_frames > AnimatedTexture::MAX_FRAMES) {
+		return ERR_UNAVAILABLE;
+	}
+	if (p_width == 0 || p_height == 0 || p_width > Image::MAX_WIDTH || p_height > Image::MAX_HEIGHT || uint64_t(p_width) * p_height > Image::MAX_PIXELS) {
+		return ERR_FILE_CORRUPT;
+	}
+	return OK;
+}
+
 static Ref<Resource> _load_animated_webp_texture(const uint8_t *p_data, size_t p_size, uint32_t frames, uint32_t width, uint32_t height, Error *r_error) {
 	WebPData webp_data;
 	webp_data.bytes = p_data;
 	webp_data.size = p_size;
 
-	if (frames == 0 || frames > AnimatedTexture::MAX_FRAMES) {
-		if (r_error) { *r_error = ERR_UNAVAILABLE; }
-		return Ref<Resource>();
-	}
-	if (width == 0 || height == 0 || width > Image::MAX_WIDTH || height > Image::MAX_HEIGHT || uint64_t(width) * height > Image::MAX_PIXELS) {
-		if (r_error) { *r_error = ERR_FILE_CORRUPT; }
+	const Error size_error = _check_webp_animation_size(frames, width, height);
+	if (size_error != OK) {
+		if (r_error) {
+			*r_error = size_error;
+		}
 		return Ref<Resource>();
 	}
 
@@ -143,7 +153,9 @@ static Ref<Resource> _load_animated_webp_texture(const uint8_t *p_data, size_t p
 		const Error allocation_error = frame_data.resize(image_data_size);
 		if (allocation_error != OK) {
 			WebPAnimDecoderDelete(decoder);
-			if (r_error) { *r_error = allocation_error; }
+			if (r_error) {
+				*r_error = allocation_error;
+			}
 			return Ref<Resource>();
 		}
 		memcpy(frame_data.ptrw(), frame_rgba, image_data_size);
@@ -215,11 +227,66 @@ Error ResourceFormatWebP::is_animated_webp(const String &p_path, bool &r_is_anim
 	return OK;
 }
 
+Error ResourceFormatWebP::validate_texture_source(const String &p_path, bool &r_is_animated) {
+	r_is_animated = false;
+	Vector<uint8_t> data;
+	const Error read_error = _read_webp_file(p_path, data);
+	if (read_error != OK) {
+		return read_error;
+	}
+
+	WebPData webp_data = { data.ptr(), size_t(data.size()) };
+	WebPDemuxer *demux = WebPDemux(&webp_data);
+	uint32_t frames = 0;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	if (demux) {
+		frames = WebPDemuxGetI(demux, WEBP_FF_FRAME_COUNT);
+		width = WebPDemuxGetI(demux, WEBP_FF_CANVAS_WIDTH);
+		height = WebPDemuxGetI(demux, WEBP_FF_CANVAS_HEIGHT);
+		WebPDemuxDelete(demux);
+	}
+	if (frames <= 1) {
+		Image image;
+		return WebPCommon::webp_load_image_from_buffer(&image, data.ptr(), data.size());
+	}
+
+	const Error size_error = _check_webp_animation_size(frames, width, height);
+	if (size_error != OK) {
+		return size_error;
+	}
+	WebPAnimDecoder *decoder = WebPAnimDecoderNew(&webp_data, nullptr);
+	if (!decoder) {
+		return ERR_FILE_CORRUPT;
+	}
+	WebPAnimInfo info;
+	if (!WebPAnimDecoderGetInfo(decoder, &info) || info.frame_count != frames || info.canvas_width != width || info.canvas_height != height) {
+		WebPAnimDecoderDelete(decoder);
+		return ERR_FILE_CORRUPT;
+	}
+
+	// Validate every compressed frame, retaining only the decoder's working canvas.
+	// Import copies the compressed source; textures are created only at runtime.
+	for (uint32_t i = 0; i < frames; i++) {
+		uint8_t *frame_rgba = nullptr;
+		int timestamp_msec = 0;
+		if (!WebPAnimDecoderGetNext(decoder, &frame_rgba, &timestamp_msec) || !frame_rgba) {
+			WebPAnimDecoderDelete(decoder);
+			return ERR_FILE_CORRUPT;
+		}
+	}
+	WebPAnimDecoderDelete(decoder);
+	r_is_animated = true;
+	return OK;
+}
+
 Ref<Resource> ResourceFormatWebP::load_texture(const String &p_path, Error *r_error) {
 	Vector<uint8_t> data;
 	const Error err = _read_webp_file(p_path, data);
 	if (err != OK) {
-		if (r_error) { *r_error = err; }
+		if (r_error) {
+			*r_error = err;
+		}
 		return Ref<Resource>();
 	}
 	WebPData webp_data = { data.ptr(), size_t(data.size()) };
