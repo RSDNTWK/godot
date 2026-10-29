@@ -200,7 +200,9 @@ void FileAccessUnix::_close() {
 		return;
 	}
 
-	fclose(f);
+	if (fclose(f) != 0 && (last_error == OK || last_error == ERR_FILE_EOF)) {
+		last_error = (flags & WRITE) ? ERR_FILE_CANT_WRITE : ERR_FILE_CANT_READ;
+	}
 	f = nullptr;
 
 	if (close_notification_func) {
@@ -328,7 +330,9 @@ Error FileAccessUnix::resize(int64_t p_length) {
 
 void FileAccessUnix::flush() {
 	ERR_FAIL_NULL_MSG(f, "File must be opened before use.");
-	fflush(f);
+	if (fflush(f) != 0 && (last_error == OK || last_error == ERR_FILE_EOF)) {
+		last_error = ERR_FILE_CANT_WRITE;
+	}
 }
 
 bool FileAccessUnix::store_buffer(const uint8_t *p_src, uint64_t p_length) {

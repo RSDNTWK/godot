@@ -3968,7 +3968,7 @@ void Main::setup_boot_logo() {
 				}
 			}
 		} else {
-			// Create a 1×1 transparent image. This will effectively hide the splash image.
+			// Create a 1Ã—1 transparent image. This will effectively hide the splash image.
 			boot_logo.instantiate();
 			boot_logo->initialize_data(1, 1, false, Image::FORMAT_RGBA8);
 			boot_logo->set_pixel(0, 0, Color(0, 0, 0, 0));
@@ -4862,6 +4862,10 @@ int Main::start() {
 			}
 		}
 		movie_writer->begin(movie_size, fixed_fps, Engine::get_singleton()->get_write_movie_path());
+		if (movie_writer->get_error() != OK) {
+			OS::get_singleton()->set_exit_code(EXIT_FAILURE);
+			return EXIT_FAILURE;
+		}
 	}
 
 	GDExtensionManager::get_singleton()->startup();
@@ -5158,6 +5162,10 @@ bool Main::iteration() {
 	if (movie_writer) {
 		GodotProfileZoneGrouped(_profile_zone, "movie_writer->add_frame");
 		movie_writer->add_frame();
+		if (movie_writer->get_error() != OK) {
+			OS::get_singleton()->set_exit_code(EXIT_FAILURE);
+			return true;
+		}
 	}
 
 #ifdef TOOLS_ENABLED
@@ -5248,6 +5256,9 @@ void Main::cleanup(bool p_force) {
 
 	if (movie_writer) {
 		movie_writer->end();
+		if (movie_writer->get_error() != OK) {
+			OS::get_singleton()->set_exit_code(EXIT_FAILURE);
+		}
 	}
 
 	ResourceLoader::clear_thread_load_tasks();

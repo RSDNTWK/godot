@@ -82,7 +82,9 @@ Error MovieWriter::write_frame(const Ref<Image> &p_image, const int32_t *p_audio
 }
 
 void MovieWriter::write_end() {
-	GDVIRTUAL_CALL(_write_end);
+	if (!GDVIRTUAL_CALL(_write_end)) {
+		set_error(ERR_UNCONFIGURED);
+	}
 }
 
 bool MovieWriter::handles_file(const String &p_path) const {
@@ -100,39 +102,63 @@ void MovieWriter::get_supported_extensions(List<String> *r_extensions) const {
 }
 
 void MovieWriter::begin(const Size2i &p_movie_size, uint32_t p_fps, const String &p_base_path) {
+	if (begun && !ended) {
+		end();
+	}
+	reset_error();
+	begun = false;
+	ended = true;
+	audio_mix_buffer.clear();
+	if (p_movie_size.width <= 0 || p_movie_size.height <= 0 || p_fps == 0 || p_fps > INT32_MAX) {
+		set_error(ERR_INVALID_PARAMETER);
+		return;
+	}
+	const uint32_t requested_mix_rate = get_audio_mix_rate();
+	const AudioServer::SpeakerMode mode = get_audio_speaker_mode();
+	if (requested_mix_rate == 0 || requested_mix_rate > INT32_MAX || mode < AudioServer::SPEAKER_MODE_STEREO || mode > AudioServer::SPEAKER_SURROUND_71) {
+		set_error(ERR_INVALID_PARAMETER);
+		return;
+	}
+	fps = p_fps;
+	mix_rate = requested_mix_rate;
+	audio_channels = (uint32_t(mode) + 1) * 2;
+	const uint64_t audio_frames = mix_rate / fps;
+	const uint64_t samples = audio_frames * audio_channels;
+	if (audio_frames == 0 || samples > INT32_MAX) {
+		set_error(ERR_INVALID_PARAMETER);
+		return;
+	}
+	if (audio_mix_buffer.resize(samples) != OK) {
+		set_error(ERR_OUT_OF_MEMORY);
+		return;
+	}
 	project_name = GLOBAL_GET("application/config/name");
 	movie_size = p_movie_size;
-
+	cpu_time = 0.0f;
+	gpu_time = 0.0f;
+	encoding_time_usec = 0;
+	AudioDriverDummy::get_dummy_singleton()->set_mix_rate(mix_rate);
+	AudioDriverDummy::get_dummy_singleton()->set_speaker_mode(AudioDriver::SpeakerMode(mode));
+	if ((mix_rate % fps) != 0) {
+		WARN_PRINT("MovieWriter's audio mix rate (" + itos(mix_rate) + ") can not be divided by the recording FPS (" + itos(fps) + "). Audio may go out of sync over time.");
+	}
+	set_error(write_begin(movie_size, p_fps, p_base_path));
+	if (last_error != OK) {
+		ERR_PRINT(vformat("MovieWriter could not start recording (error %d).", last_error));
+		return;
+	}
+	begun = true;
+	ended = false;
 	print_line(vformat(U"Movie Maker mode enabled, recording movie in %s×%s @ %d FPS...", movie_size.width, movie_size.height, p_fps));
 
-	// Check for available disk space and warn the user if needed.
-	Ref<DirAccess> dir = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
 	String path = p_base_path.get_base_dir();
 	if (path.is_relative_path()) {
 		path = "res://" + path;
 	}
-	dir->open(path);
-	if (dir->get_space_left() < 10 * Math::pow(1024.0, 3.0)) {
-		// Less than 10 GiB available.
+	Ref<DirAccess> dir = DirAccess::open(path);
+	if (dir.is_valid() && dir->get_space_left() < 10 * Math::pow(1024.0, 3.0)) {
 		WARN_PRINT(vformat("Current available space on disk is low (%s). MovieWriter will fail during movie recording if the disk runs out of available space.", String::humanize_size(dir->get_space_left())));
 	}
-
-	cpu_time = 0.0f;
-	gpu_time = 0.0f;
-	encoding_time_usec = 0;
-
-	mix_rate = get_audio_mix_rate();
-	AudioDriverDummy::get_dummy_singleton()->set_mix_rate(mix_rate);
-	AudioDriverDummy::get_dummy_singleton()->set_speaker_mode(AudioDriver::SpeakerMode(get_audio_speaker_mode()));
-	fps = p_fps;
-	if ((mix_rate % fps) != 0) {
-		WARN_PRINT("MovieWriter's audio mix rate (" + itos(mix_rate) + ") can not be divided by the recording FPS (" + itos(fps) + "). Audio may go out of sync over time.");
-	}
-
-	audio_channels = AudioDriverDummy::get_dummy_singleton()->get_channels();
-	audio_mix_buffer.resize(mix_rate * audio_channels / fps);
-
-	write_begin(movie_size, p_fps, p_base_path);
 }
 
 void MovieWriter::_bind_methods() {
@@ -184,6 +210,9 @@ void MovieWriter::set_extensions_hint() {
 }
 
 void MovieWriter::add_frame() {
+	if (!begun || ended || last_error != OK) {
+		return;
+	}
 	const int movie_time_seconds = Engine::get_singleton()->get_frames_drawn() / fps;
 	const int frame_remainder = Engine::get_singleton()->get_frames_drawn() % fps;
 	const String movie_time = vformat("%s:%s:%s:%s",
@@ -200,6 +229,10 @@ void MovieWriter::add_frame() {
 	RID main_vp_rid = RenderingServer::get_singleton()->viewport_find_from_screen_attachment(DisplayServerEnums::MAIN_WINDOW_ID);
 	RID main_vp_texture = RenderingServer::get_singleton()->viewport_get_texture(main_vp_rid);
 	Ref<Image> vp_tex = RenderingServer::get_singleton()->texture_2d_get(main_vp_texture);
+	if (vp_tex.is_null() || vp_tex->is_empty()) {
+		set_error(ERR_CANT_ACQUIRE_RESOURCE);
+		return;
+	}
 
 	if (vp_tex->get_size() != movie_size) {
 		// Resize the texture to the output resolution if it differs from the current viewport size.
@@ -228,11 +261,23 @@ void MovieWriter::add_frame() {
 			vp_tex->crop_from_point(crop_x, crop_y, crop_width, crop_height);
 		}
 
+		if (vp_tex->is_empty() || vp_tex->get_width() != crop_width || vp_tex->get_height() != crop_height) {
+			set_error(ERR_CANT_CREATE);
+			return;
+		}
 		vp_tex->resize(movie_size.width, movie_size.height, Image::INTERPOLATE_BILINEAR);
+		if (vp_tex->is_empty() || vp_tex->get_size() != movie_size) {
+			set_error(ERR_CANT_CREATE);
+			return;
+		}
 	}
 
 	if (RenderingServer::get_singleton()->viewport_is_using_hdr_2d(main_vp_rid)) {
 		vp_tex->convert(Image::FORMAT_RGBA8);
+		if (vp_tex->is_empty() || vp_tex->get_format() != Image::FORMAT_RGBA8) {
+			set_error(ERR_CANT_CREATE);
+			return;
+		}
 		vp_tex->linear_to_srgb();
 	}
 
@@ -241,19 +286,28 @@ void MovieWriter::add_frame() {
 	cpu_time += RenderingServer::get_singleton()->get_frame_setup_time_cpu();
 	gpu_time += RenderingServer::get_singleton()->viewport_get_measured_render_time_gpu(main_vp_rid);
 
-	AudioDriverDummy::get_dummy_singleton()->mix_audio(mix_rate / fps, audio_mix_buffer.ptr());
+	AudioDriverDummy::get_dummy_singleton()->mix_audio(mix_rate / fps, audio_mix_buffer.ptrw());
 
 	uint64_t encoding_start_usec = Time::get_singleton()->get_ticks_usec();
-	write_frame(vp_tex, audio_mix_buffer.ptr());
+	set_error(write_frame(vp_tex, audio_mix_buffer.ptr()));
 	uint64_t encoding_end_usec = Time::get_singleton()->get_ticks_usec();
 	encoding_time_usec += encoding_end_usec - encoding_start_usec;
 }
 
 void MovieWriter::end() {
+	if (!begun || ended) {
+		return;
+	}
+	ended = true;
 	uint64_t encoding_start_usec = Time::get_singleton()->get_ticks_usec();
 	write_end();
 	uint64_t encoding_end_usec = Time::get_singleton()->get_ticks_usec();
 	encoding_time_usec += encoding_end_usec - encoding_start_usec;
+
+	if (last_error != OK) {
+		ERR_PRINT(vformat("MovieWriter recording failed (error %d).", last_error));
+		return;
+	}
 
 	// Print a report with various statistics.
 	print_line("--------------------------------------------------------------------------------");
@@ -280,8 +334,8 @@ void MovieWriter::end() {
 			String::num(real_time_seconds % 60, 0).pad_zeros(2));
 
 	print_line(vformat("%d frames at %d FPS (movie length: %s), recorded in %s (%d%% of real-time speed).", Engine::get_singleton()->get_frames_drawn(), fps, movie_time, real_time, (float(MAX(1, movie_time_seconds)) / MAX(1, real_time_seconds)) * 100));
-	print_line(vformat("CPU render time: %.2f seconds (average: %.2f ms/frame)", cpu_time / 1000, cpu_time / Engine::get_singleton()->get_frames_drawn()));
-	print_line(vformat("GPU render time: %.2f seconds (average: %.2f ms/frame)", gpu_time / 1000, gpu_time / Engine::get_singleton()->get_frames_drawn()));
-	print_line(vformat("Encoding time: %.2f seconds (average: %.2f ms/frame)", encoding_time_usec / 1000000.f, encoding_time_usec / 1000.f / Engine::get_singleton()->get_frames_drawn()));
+	print_line(vformat("CPU render time: %.2f seconds (average: %.2f ms/frame)", cpu_time / 1000, cpu_time / MAX(uint64_t(1), Engine::get_singleton()->get_frames_drawn())));
+	print_line(vformat("GPU render time: %.2f seconds (average: %.2f ms/frame)", gpu_time / 1000, gpu_time / MAX(uint64_t(1), Engine::get_singleton()->get_frames_drawn())));
+	print_line(vformat("Encoding time: %.2f seconds (average: %.2f ms/frame)", encoding_time_usec / 1000000.f, encoding_time_usec / 1000.f / MAX(uint64_t(1), Engine::get_singleton()->get_frames_drawn())));
 	print_line("--------------------------------------------------------------------------------");
 }

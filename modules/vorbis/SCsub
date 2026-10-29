@@ -41,7 +41,7 @@ if env["builtin_libvorbis"]:
         "window.c",
     ]
 
-    if env.editor_build:
+    if env.editor_build or (env["tests"] and env["module_theora_enabled"]):
         thirdparty_sources += [
             "analysis.c",
             "vorbisenc.c",

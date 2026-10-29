@@ -16,6 +16,8 @@ env.Depends(force_link_header, "test_builders.py")
 
 tests_obj = []
 tests_env = env.Clone()
+if env["module_theora_enabled"]:
+    tests_env.Prepend(CPPPATH=["#thirdparty/libtheora/", "#thirdparty/libvorbis/", "#thirdparty/libogg/"])
 if env["module_ffmpeg_enabled"]:
     tests_env.Prepend(CPPPATH=["#thirdparty/libogg/"])
 asset_test_source = "platform/android/test_csv_android_asset.cpp"

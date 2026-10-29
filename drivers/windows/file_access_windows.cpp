@@ -239,7 +239,9 @@ void FileAccessWindows::_close() {
 		return;
 	}
 
-	fclose(f);
+	if (fclose(f) != 0 && (last_error == OK || last_error == ERR_FILE_EOF)) {
+		last_error = (flags & WRITE) ? ERR_FILE_CANT_WRITE : ERR_FILE_CANT_READ;
+	}
 	f = nullptr;
 
 	if (!save_path.is_empty()) {
@@ -375,7 +377,9 @@ Error FileAccessWindows::resize(int64_t p_length) {
 void FileAccessWindows::flush() {
 	ERR_FAIL_NULL(f);
 
-	fflush(f);
+	if (fflush(f) != 0 && (last_error == OK || last_error == ERR_FILE_EOF)) {
+		last_error = ERR_FILE_CANT_WRITE;
+	}
 	if (prev_op == WRITE) {
 		prev_op = 0;
 	}

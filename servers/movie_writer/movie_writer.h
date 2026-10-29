@@ -31,7 +31,7 @@
 #pragma once
 
 #include "core/io/image.h"
-#include "core/templates/local_vector.h"
+#include "core/templates/vector.h"
 #include "servers/audio/audio_server.h"
 
 class MovieWriter : public Object {
@@ -51,7 +51,10 @@ class MovieWriter : public Object {
 
 	String project_name;
 
-	LocalVector<int32_t> audio_mix_buffer;
+	Vector<int32_t> audio_mix_buffer;
+	Error last_error = OK;
+	bool begun = false;
+	bool ended = true;
 
 	enum {
 		MAX_WRITERS = 8
@@ -60,6 +63,13 @@ class MovieWriter : public Object {
 	static uint32_t writer_count;
 
 protected:
+	void set_error(Error p_error) {
+		if (last_error == OK && p_error != OK) {
+			last_error = p_error;
+		}
+	}
+	void reset_error() { last_error = OK; }
+
 	virtual uint32_t get_audio_mix_rate() const;
 	virtual AudioServer::SpeakerMode get_audio_speaker_mode() const;
 
@@ -80,6 +90,8 @@ protected:
 	static void _bind_methods();
 
 public:
+	Error get_error() const { return last_error; }
+
 	virtual bool handles_file(const String &p_path) const;
 	virtual void get_supported_extensions(List<String> *r_extensions) const;
 

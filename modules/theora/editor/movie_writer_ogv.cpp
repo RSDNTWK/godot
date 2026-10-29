@@ -34,395 +34,456 @@
 
 #include "core/config/project_settings.h"
 #include "core/io/file_access.h"
+#include "core/os/os.h"
 
-#include <cstdlib>
+#include <cstring>
 
-void MovieWriterOGV::push_audio(const int32_t *p_audio_data) {
-	// Read and process more audio.
-	float **vorbis_buffer = vorbis_analysis_buffer(&vd, audio_frames);
+Error MovieWriterOGV::fail(Error p_error) {
+	set_error(p_error);
+	close();
+	return p_error;
+}
 
-	// Deinterleave samples.
-	uint32_t count = 0;
+void MovieWriterOGV::close() {
+	if (td) {
+		th_encode_free(td);
+		td = nullptr;
+	}
+	if (video_stream_initialized) {
+		ogg_stream_clear(&to);
+		video_stream_initialized = false;
+	}
+	if (audio_stream_initialized) {
+		ogg_stream_clear(&vo);
+		audio_stream_initialized = false;
+	}
+	if (vorbis_block_initialized) {
+		vorbis_block_clear(&vb);
+		vorbis_block_initialized = false;
+	}
+	if (vorbis_dsp_initialized) {
+		vorbis_dsp_clear(&vd);
+		vorbis_dsp_initialized = false;
+	}
+	if (vorbis_comment_initialized) {
+		vorbis_comment_clear(&vc);
+		vorbis_comment_initialized = false;
+	}
+	if (vorbis_info_initialized) {
+		vorbis_info_clear(&vi);
+		vorbis_info_initialized = false;
+	}
+	if (theora_comment_initialized) {
+		th_comment_clear(&tc);
+		theora_comment_initialized = false;
+	}
+	if (f.is_valid()) {
+		f->close();
+		set_error(f->get_error());
+		f.unref();
+	}
+	yuv.clear();
+	backup_page_data.clear();
+	y = u = v = nullptr;
+	audio_page = {};
+	video_page = {};
+	backup_page = {};
+	audio_flag = video_flag = false;
+	active = false;
+	frame_count = 0;
+}
+
+Error MovieWriterOGV::store_page(const ogg_page &p_page) {
+	if (f.is_null() || p_page.header_len < 0 || p_page.body_len < 0 ||
+			(p_page.header_len > 0 && !p_page.header) || (p_page.body_len > 0 && !p_page.body)) {
+		return ERR_INVALID_DATA;
+	}
+	if (!f->store_buffer(p_page.header, p_page.header_len) || !f->store_buffer(p_page.body, p_page.body_len)) {
+		return ERR_FILE_CANT_WRITE;
+	}
+	return f->get_error();
+}
+
+Error MovieWriterOGV::push_audio(const int32_t *p_audio_data) {
+	if (!p_audio_data) {
+		return ERR_INVALID_PARAMETER;
+	}
+	float **buffer = vorbis_analysis_buffer(&vd, audio_frames);
+	if (!buffer) {
+		return ERR_OUT_OF_MEMORY;
+	}
+	// Godot supplies FL,FR,FC,LFE,BL,BR,SL,SR. Vorbis has a fixed
+	// channel order and no 3.1 layout, so store 3.1 as 5.1 with silent rears.
+	static const int channel_map[4][8] = {
+		{ 0, 1 },
+		{ 0, 2, 1, -1, -1, 3 },
+		{ 0, 2, 1, 4, 5, 3 },
+		{ 0, 2, 1, 6, 7, 4, 5, 3 },
+	};
+	const uint32_t encoded_channels = audio_ch == 4 ? 6 : audio_ch;
 	for (uint32_t i = 0; i < audio_frames; i++) {
-		for (uint32_t j = 0; j < audio_ch; j++) {
-			vorbis_buffer[j][i] = p_audio_data[count] / 2147483647.f;
-			count++;
+		for (uint32_t channel = 0; channel < encoded_channels; channel++) {
+			const int source_channel = channel_map[uint32_t(speaker_mode)][channel];
+			buffer[channel][i] = source_channel < 0 ? 0.0f : p_audio_data[i * audio_ch + source_channel] / 2147483647.f;
 		}
 	}
-
-	vorbis_analysis_wrote(&vd, audio_frames);
+	return vorbis_analysis_wrote(&vd, audio_frames) == 0 ? OK : ERR_CANT_CREATE;
 }
 
-void MovieWriterOGV::pull_audio(bool p_last) {
-	ogg_packet op;
-
-	while (vorbis_analysis_blockout(&vd, &vb) > 0) {
-		// Analysis, assume we want to use bitrate management.
-		vorbis_analysis(&vb, nullptr);
-		vorbis_bitrate_addblock(&vb);
-
-		// Weld packets into the bitstream.
-		while (vorbis_bitrate_flushpacket(&vd, &op) > 0) {
-			ogg_stream_packetin(&vo, &op);
+Error MovieWriterOGV::pull_audio(bool p_last) {
+	if (p_last && vorbis_analysis_wrote(&vd, 0) != 0) {
+		return ERR_CANT_CREATE;
+	}
+	int result;
+	while ((result = vorbis_analysis_blockout(&vd, &vb)) > 0) {
+		if (vorbis_analysis(&vb, nullptr) != 0 || vorbis_bitrate_addblock(&vb) != 0) {
+			return ERR_CANT_CREATE;
+		}
+		ogg_packet packet;
+		int packet_result;
+		while ((packet_result = vorbis_bitrate_flushpacket(&vd, &packet)) > 0) {
+			if (ogg_stream_packetin(&vo, &packet) != 0) {
+				return ERR_CANT_CREATE;
+			}
+			// Put the initial zero-sample Vorbis packet on its own page. This
+			// anchors short streams before their potentially truncated EOS page.
+			if (packet.packetno == 3) {
+				ogg_page first_page;
+				int page_result;
+				while ((page_result = ogg_stream_flush(&vo, &first_page)) > 0) {
+					const Error error = store_page(first_page);
+					if (error != OK) {
+						return error;
+					}
+				}
+				if (page_result < 0) {
+					return ERR_CANT_CREATE;
+				}
+			}
+		}
+		if (packet_result < 0) {
+			return ERR_CANT_CREATE;
 		}
 	}
-
-	if (p_last) {
-		vorbis_analysis_wrote(&vd, 0);
-		pull_audio();
-	}
+	return result < 0 ? ERR_CANT_CREATE : OK;
 }
 
-void MovieWriterOGV::push_video(const Ref<Image> &p_image) {
-	PackedByteArray data = p_image->get_data();
-	if (p_image->get_format() == Image::FORMAT_RGBA8) {
-		rgba2yuv420(y, u, v, data.ptrw(), p_image->get_width(), p_image->get_height());
+Error MovieWriterOGV::push_video(const Ref<Image> &p_image) {
+	const Vector<uint8_t> data = p_image->get_data();
+	const uint64_t pixel_size = p_image->get_format() == Image::FORMAT_RGBA8 ? 4 : 3;
+	const uint64_t expected = uint64_t(movie_size.width) * movie_size.height * pixel_size;
+	if (uint64_t(data.size()) < expected) {
+		return ERR_INVALID_DATA;
+	}
+	if (pixel_size == 4) {
+		rgba2yuv420(y, u, v, data.ptr(), movie_size.width, movie_size.height);
 	} else {
-		rgb2yuv420(y, u, v, data.ptrw(), p_image->get_width(), p_image->get_height());
+		rgb2yuv420(y, u, v, data.ptr(), movie_size.width, movie_size.height);
 	}
-	th_encode_ycbcr_in(td, ycbcr);
+	return th_encode_ycbcr_in(td, ycbcr) == 0 ? OK : ERR_CANT_CREATE;
 }
 
-void MovieWriterOGV::pull_video(bool p_last) {
-	ogg_packet op;
-
-	int ret = 0;
-	do {
-		ret = th_encode_packetout(td, p_last, &op);
-		if (ret > 0) {
-			ogg_stream_packetin(&to, &op);
+Error MovieWriterOGV::pull_video(bool p_last) {
+	ogg_packet packet;
+	int result;
+	while ((result = th_encode_packetout(td, p_last, &packet)) > 0) {
+		if (ogg_stream_packetin(&to, &packet) != 0) {
+			return ERR_CANT_CREATE;
 		}
-	} while (ret > 0);
+	}
+	return result < 0 ? ERR_CANT_CREATE : OK;
 }
 
 uint32_t MovieWriterOGV::get_audio_mix_rate() const {
 	return mix_rate;
 }
-
 AudioServer::SpeakerMode MovieWriterOGV::get_audio_speaker_mode() const {
 	return speaker_mode;
 }
-
 bool MovieWriterOGV::handles_file(const String &p_path) const {
 	return p_path.has_extension("ogv");
 }
-
 void MovieWriterOGV::get_supported_extensions(List<String> *r_extensions) const {
 	r_extensions->push_back("ogv");
 }
 
 Error MovieWriterOGV::write_begin(const Size2i &p_movie_size, uint32_t p_fps, const String &p_base_path) {
-	ERR_FAIL_COND_V_MSG((p_movie_size.width & 1) || (p_movie_size.height & 1), ERR_UNAVAILABLE, "Both video dimensions must be even.");
-	base_path = p_base_path.get_basename();
+	close();
+	reset_error();
+	if (p_movie_size.width <= 0 || p_movie_size.height <= 0 ||
+			p_movie_size.width > INT32_MAX - 15 || p_movie_size.height > INT32_MAX - 15 ||
+			(p_movie_size.width & 1) || (p_movie_size.height & 1) ||
+			p_fps == 0 || p_fps > INT32_MAX || mix_rate < 8000 || mix_rate > 192000 || mix_rate / p_fps == 0 ||
+			speaker_mode < AudioServer::SPEAKER_MODE_STEREO || speaker_mode > AudioServer::SPEAKER_SURROUND_71 ||
+			!Math::is_finite(audio_quality) || audio_quality < -0.1f || audio_quality > 1.0f ||
+			!Math::is_finite(video_quality) || video_quality < 0.0f || video_quality > 1.0f ||
+			speed < 1 || speed > 4 || keyframe_frequency < 1 || keyframe_frequency > 1024) {
+		return fail(ERR_INVALID_PARAMETER);
+	}
+	const uint64_t pixels = uint64_t(p_movie_size.width) * p_movie_size.height;
+	if (pixels + pixels / 2 > INT32_MAX) {
+		return fail(ERR_INVALID_PARAMETER);
+	}
+	if (yuv.resize(pixels + pixels / 2) != OK) {
+		return fail(ERR_OUT_OF_MEMORY);
+	}
+	movie_size = p_movie_size;
+	y = yuv.ptrw();
+	u = y + pixels;
+	v = u + pixels / 4;
+	ycbcr[0] = { movie_size.width, movie_size.height, movie_size.width, y };
+	ycbcr[1] = { movie_size.width / 2, movie_size.height / 2, movie_size.width / 2, u };
+	ycbcr[2] = { movie_size.width / 2, movie_size.height / 2, movie_size.width / 2, v };
+	fps = p_fps;
+	audio_ch = (uint32_t(speaker_mode) + 1) * 2;
+	audio_frames = mix_rate / fps;
+
+	base_path = p_base_path.get_basename() + ".ogv";
 	if (base_path.is_relative_path()) {
 		base_path = "res://" + base_path;
 	}
-	base_path += ".ogv";
-
-	f = FileAccess::open(base_path, FileAccess::WRITE_READ);
-	ERR_FAIL_COND_V(f.is_null(), ERR_CANT_OPEN);
-
-	fps = p_fps;
-
-	audio_ch = 2;
-	switch (speaker_mode) {
-		case AudioServer::SPEAKER_MODE_STEREO:
-			audio_ch = 2;
-			break;
-		case AudioServer::SPEAKER_SURROUND_31:
-			audio_ch = 4;
-			break;
-		case AudioServer::SPEAKER_SURROUND_51:
-			audio_ch = 6;
-			break;
-		case AudioServer::SPEAKER_SURROUND_71:
-			audio_ch = 8;
-			break;
+	Error open_error = OK;
+	f = FileAccess::open(base_path, FileAccess::WRITE_READ, &open_error);
+	if (f.is_null()) {
+		return fail(open_error == OK ? ERR_CANT_OPEN : open_error);
 	}
-	audio_frames = mix_rate / fps;
 
-	// Set up Ogg output streams.
-	srand(time(nullptr));
-	ogg_stream_init(&to, rand()); // Video.
-	ogg_stream_init(&vo, rand()); // Audio.
-
-	// Initialize Vorbis audio encoding.
+	const uint32_t serial = uint32_t(OS::get_singleton()->get_ticks_usec()) ^ uint32_t(uint64_t(get_instance_id()));
+	if (ogg_stream_init(&to, int(serial)) != 0) {
+		return fail(ERR_OUT_OF_MEMORY);
+	}
+	video_stream_initialized = true;
+	if (ogg_stream_init(&vo, int(serial ^ 0x9e3779b9U)) != 0) {
+		return fail(ERR_OUT_OF_MEMORY);
+	}
+	audio_stream_initialized = true;
 	vorbis_info_init(&vi);
-	int ret = vorbis_encode_init_vbr(&vi, audio_ch, mix_rate, audio_quality);
-	ERR_FAIL_COND_V_MSG(ret, ERR_UNAVAILABLE, "The Ogg Vorbis encoder couldn't set up a mode according to the requested quality or bitrate.");
-
+	vorbis_info_initialized = true;
+	if (vorbis_encode_init_vbr(&vi, audio_ch == 4 ? 6 : audio_ch, mix_rate, audio_quality) != 0) {
+		return fail(ERR_UNAVAILABLE);
+	}
 	vorbis_comment_init(&vc);
-	vorbis_analysis_init(&vd, &vi);
-	vorbis_block_init(&vd, &vb);
+	vorbis_comment_initialized = true;
+	if (vorbis_analysis_init(&vd, &vi) != 0) {
+		return fail(ERR_UNAVAILABLE);
+	}
+	vorbis_dsp_initialized = true;
+	if (vorbis_block_init(&vd, &vb) != 0) {
+		return fail(ERR_OUT_OF_MEMORY);
+	}
+	vorbis_block_initialized = true;
 
-	// Set up Theora encoder.
-	// Theora has a divisible-by-16 restriction for the encoded frame size
-	// scale the picture size up to the nearest /16 and calculate offsets.
-	int pic_w = p_movie_size.width;
-	int pic_h = p_movie_size.height;
-	int frame_w = (pic_w + 15) & ~0xF;
-	int frame_h = (pic_h + 15) & ~0xF;
-	// Force the offsets to be even so that chroma samples line up like we expect.
-	int pic_x = (frame_w - pic_w) / 2 & ~1;
-	int pic_y = (frame_h - pic_h) / 2 & ~1;
-
-	y = (uint8_t *)memalloc(pic_w * pic_h);
-	u = (uint8_t *)memalloc(pic_w * pic_h / 4);
-	v = (uint8_t *)memalloc(pic_w * pic_h / 4);
-
-	// We submit the buffer using the size of the picture region.
-	// libtheora will pad the picture region out to the full frame size for us,
-	// whether we pass in a full frame or not.
-	ycbcr[0].width = pic_w;
-	ycbcr[0].height = pic_h;
-	ycbcr[0].stride = pic_w;
-	ycbcr[0].data = y;
-	ycbcr[1].width = pic_w / 2;
-	ycbcr[1].height = pic_h / 2;
-	ycbcr[1].stride = pic_w / 2;
-	ycbcr[1].data = u;
-	ycbcr[2].width = pic_w / 2;
-	ycbcr[2].height = pic_h / 2;
-	ycbcr[2].stride = pic_w / 2;
-	ycbcr[2].data = v;
-
-	th_info_init(&ti);
-	ti.frame_width = frame_w;
-	ti.frame_height = frame_h;
-	ti.pic_width = pic_w;
-	ti.pic_height = pic_h;
-	ti.pic_x = pic_x;
-	ti.pic_y = pic_y;
-	ti.fps_numerator = fps;
-	ti.fps_denominator = 1;
-	ti.aspect_numerator = 1;
-	ti.aspect_denominator = 1;
-	ti.colorspace = TH_CS_UNSPECIFIED;
-	// Account for the Ogg page overhead.
-	// This is 1 byte per 255 for lacing values, plus 26 bytes per 4096 bytes for
-	// the page header, plus approximately 1/2 byte per packet (not accounted for here).
-	ti.target_bitrate = (int)(64870 * (ogg_int64_t)video_bitrate >> 16);
-	ti.quality = video_quality * 63;
-	ti.pixel_fmt = TH_PF_420;
-	td = th_encode_alloc(&ti);
-	th_info_clear(&ti);
-	ERR_FAIL_NULL_V_MSG(td, ERR_UNCONFIGURED, "Couldn't create a Theora encoder instance. Check that the video parameters are valid.");
-
-	// Setting just the granule shift only allows power-of-two keyframe spacing.
-	// Set the actual requested spacing.
-	ret = th_encode_ctl(td, TH_ENCCTL_SET_KEYFRAME_FREQUENCY_FORCE, &keyframe_frequency, sizeof(keyframe_frequency));
-	if (ret < 0) {
-		ERR_PRINT("Couldn't set keyframe interval.");
+	th_info info;
+	th_info_init(&info);
+	info.frame_width = (movie_size.width + 15) & ~0xf;
+	info.frame_height = (movie_size.height + 15) & ~0xf;
+	info.pic_width = movie_size.width;
+	info.pic_height = movie_size.height;
+	info.pic_x = 0;
+	info.pic_y = 0;
+	info.fps_numerator = fps;
+	info.fps_denominator = 1;
+	info.aspect_numerator = info.aspect_denominator = 1;
+	info.colorspace = TH_CS_UNSPECIFIED;
+	info.target_bitrate = int(64870 * int64_t(video_bitrate) >> 16);
+	info.quality = int(video_quality * 63);
+	info.pixel_fmt = TH_PF_420;
+	td = th_encode_alloc(&info);
+	th_info_clear(&info);
+	if (!td) {
+		return fail(ERR_UNAVAILABLE);
+	}
+	if (th_encode_ctl(td, TH_ENCCTL_SET_KEYFRAME_FREQUENCY_FORCE, &keyframe_frequency, sizeof(keyframe_frequency)) < 0) {
+		return fail(ERR_UNAVAILABLE);
+	}
+	int speed_max = 0;
+	if (th_encode_ctl(td, TH_ENCCTL_GET_SPLEVEL_MAX, &speed_max, sizeof(speed_max)) < 0 || speed_max < 0) {
+		return fail(ERR_UNAVAILABLE);
+	}
+	int selected_speed = MIN(speed, speed_max);
+	if (th_encode_ctl(td, TH_ENCCTL_SET_SPLEVEL, &selected_speed, sizeof(selected_speed)) < 0) {
+		return fail(ERR_UNAVAILABLE);
 	}
 
-	// Speed should also be set after the current encoder mode is established,
-	// since the available speed levels may change depending on the encoder mode.
-	if (speed >= 0) {
-		int speed_max;
-		ret = th_encode_ctl(td, TH_ENCCTL_GET_SPLEVEL_MAX, &speed_max, sizeof(speed_max));
-		if (ret < 0) {
-			WARN_PRINT("Couldn't determine maximum speed level.");
-			speed_max = 0;
-		}
-		ret = th_encode_ctl(td, TH_ENCCTL_SET_SPLEVEL, &speed, sizeof(speed));
-		if (ret < 0) {
-			if (ret < 0) {
-				WARN_PRINT(vformat("Couldn't set speed level to %d of %d.", speed, speed_max));
-			}
-			if (speed > speed_max) {
-				WARN_PRINT(vformat("Setting speed level to %d instead.", speed_max));
-			}
-			ret = th_encode_ctl(td, TH_ENCCTL_SET_SPLEVEL, &speed_max, sizeof(speed_max));
-			if (ret < 0) {
-				WARN_PRINT(vformat("Couldn't set speed level to %d of %d.", speed_max, speed_max));
-			}
-		}
-	}
-
-	// Write the bitstream header packets with proper page interleave.
 	th_comment_init(&tc);
-	// The first packet will get its own page automatically.
-	ogg_packet op;
-	if (th_encode_flushheader(td, &tc, &op) <= 0) {
-		ERR_FAIL_V_MSG(ERR_UNCONFIGURED, "Internal Theora library error.");
+	theora_comment_initialized = true;
+	ogg_packet packet;
+	if (th_encode_flushheader(td, &tc, &packet) <= 0 || ogg_stream_packetin(&to, &packet) != 0 ||
+			ogg_stream_pageout(&to, &video_page) != 1) {
+		return fail(ERR_CANT_CREATE);
 	}
-
-	ogg_stream_packetin(&to, &op);
-	if (ogg_stream_pageout(&to, &video_page) != 1) {
-		ERR_FAIL_V_MSG(ERR_UNCONFIGURED, "Internal Ogg library error.");
+	Error error = store_page(video_page);
+	if (error != OK) {
+		return fail(error);
 	}
-	f->store_buffer(video_page.header, video_page.header_len);
-	f->store_buffer(video_page.body, video_page.body_len);
-
-	// Create the remaining Theora headers.
-	while (true) {
-		ret = th_encode_flushheader(td, &tc, &op);
-		if (ret < 0) {
-			ERR_FAIL_V_MSG(ERR_UNCONFIGURED, "Internal Theora library error.");
-		} else if (ret == 0) {
-			break;
+	int result;
+	while ((result = th_encode_flushheader(td, &tc, &packet)) > 0) {
+		if (ogg_stream_packetin(&to, &packet) != 0) {
+			return fail(ERR_CANT_CREATE);
 		}
-		ogg_stream_packetin(&to, &op);
 	}
-
-	// Vorbis streams start with 3 standard header packets.
-	ogg_packet id;
-	ogg_packet comment;
-	ogg_packet code;
-	if (vorbis_analysis_headerout(&vd, &vc, &id, &comment, &code) < 0) {
-		ERR_FAIL_V_MSG(ERR_UNCONFIGURED, "Internal Vorbis library error.");
+	if (result < 0) {
+		return fail(ERR_CANT_CREATE);
 	}
-
-	// ID header is automatically placed in its own page.
-	ogg_stream_packetin(&vo, &id);
-	if (ogg_stream_pageout(&vo, &audio_page) != 1) {
-		ERR_FAIL_V_MSG(ERR_UNCONFIGURED, "Internal Ogg library error.");
+	ogg_packet id, comment, code;
+	if (vorbis_analysis_headerout(&vd, &vc, &id, &comment, &code) != 0 || ogg_stream_packetin(&vo, &id) != 0 ||
+			ogg_stream_pageout(&vo, &audio_page) != 1) {
+		return fail(ERR_CANT_CREATE);
 	}
-	f->store_buffer(audio_page.header, audio_page.header_len);
-	f->store_buffer(audio_page.body, audio_page.body_len);
-
-	// Append remaining Vorbis header packets.
-	ogg_stream_packetin(&vo, &comment);
-	ogg_stream_packetin(&vo, &code);
-
-	// Flush the rest of our headers. This ensures the actual data in each stream will start on a new page, as per spec.
-	while (true) {
-		ret = ogg_stream_flush(&to, &video_page);
-		if (ret < 0) {
-			ERR_FAIL_V_MSG(ERR_UNCONFIGURED, "Internal Ogg library error.");
-		} else if (ret == 0) {
-			break;
+	error = store_page(audio_page);
+	if (error != OK) {
+		return fail(error);
+	}
+	if (ogg_stream_packetin(&vo, &comment) != 0 || ogg_stream_packetin(&vo, &code) != 0) {
+		return fail(ERR_CANT_CREATE);
+	}
+	while ((result = ogg_stream_flush(&to, &video_page)) > 0) {
+		error = store_page(video_page);
+		if (error != OK) {
+			return fail(error);
 		}
-		f->store_buffer(video_page.header, video_page.header_len);
-		f->store_buffer(video_page.body, video_page.body_len);
 	}
-
-	while (true) {
-		ret = ogg_stream_flush(&vo, &audio_page);
-		if (ret < 0) {
-			ERR_FAIL_V_MSG(ERR_UNCONFIGURED, "Internal Ogg library error.");
-		} else if (ret == 0) {
-			break;
+	if (result < 0) {
+		return fail(ERR_CANT_CREATE);
+	}
+	while ((result = ogg_stream_flush(&vo, &audio_page)) > 0) {
+		error = store_page(audio_page);
+		if (error != OK) {
+			return fail(error);
 		}
-		f->store_buffer(audio_page.header, audio_page.header_len);
-		f->store_buffer(audio_page.body, audio_page.body_len);
 	}
-
+	if (result < 0) {
+		return fail(ERR_CANT_CREATE);
+	}
+	active = true;
 	return OK;
 }
 
-// The order of the operations has been chosen so we're one frame behind writing to the stream so we can put the eos
-// mark in the last frame.
-// Flushing streams to the file every X frames is done to improve audio/video page interleaving thus avoiding large runs
-// of video or audio pages.
+// Keep one submitted frame pending so finalization can mark the actual last packet.
 Error MovieWriterOGV::write_frame(const Ref<Image> &p_image, const int32_t *p_audio_data) {
-	ERR_FAIL_COND_V(f.is_null() || td == nullptr, ERR_UNCONFIGURED);
-
-	frame_count++;
-
-	pull_audio();
-	pull_video();
-
-	if ((frame_count % 8) == 0) {
-		write_to_file();
+	if (get_error() != OK) {
+		return get_error();
 	}
-
-	push_audio(p_audio_data);
-	push_video(p_image);
-
+	if (!active || p_image.is_null() || p_image->is_empty() || p_image->get_size() != movie_size || !p_audio_data) {
+		return fail(ERR_INVALID_PARAMETER);
+	}
+	Ref<Image> image = p_image;
+	if (image->get_format() != Image::FORMAT_RGB8 && image->get_format() != Image::FORMAT_RGBA8) {
+		image = p_image->duplicate();
+		if (image.is_null()) {
+			return fail(ERR_OUT_OF_MEMORY);
+		}
+		image->convert(Image::FORMAT_RGBA8);
+		if (image->is_empty() || image->get_format() != Image::FORMAT_RGBA8 || image->get_size() != movie_size) {
+			return fail(ERR_CANT_CREATE);
+		}
+	}
+	if (frame_count >= INT64_MAX) {
+		return fail(ERR_INVALID_PARAMETER);
+	}
+	Error error = pull_audio();
+	if (error == OK) {
+		error = pull_video();
+	}
+	if (error == OK && ((frame_count + 1) % 8) == 0) {
+		error = write_to_file();
+	}
+	if (error == OK) {
+		error = push_audio(p_audio_data);
+	}
+	if (error == OK) {
+		error = push_video(image);
+	}
+	if (error != OK) {
+		return fail(error);
+	}
+	frame_count++;
 	return OK;
 }
 
-void MovieWriterOGV::save_page(ogg_page page) {
-	unsigned int page_size = page.header_len + page.body_len;
-	if (page_size > backup_page_size) {
-		backup_page_data = (unsigned char *)memrealloc(backup_page_data, page_size);
-		backup_page_size = page_size;
+Error MovieWriterOGV::save_page(const ogg_page &p_page) {
+	if (p_page.header_len < 0 || p_page.body_len < 0 || !p_page.header || (p_page.body_len && !p_page.body)) {
+		return ERR_INVALID_DATA;
 	}
-	backup_page.header = backup_page_data;
-	backup_page.header_len = page.header_len;
-	backup_page.body = backup_page_data + page.header_len;
-	backup_page.body_len = page.body_len;
-	memcpy(backup_page.header, page.header, page.header_len);
-	memcpy(backup_page.body, page.body, page.body_len);
+	const uint64_t size = uint64_t(p_page.header_len) + uint64_t(p_page.body_len);
+	if (size > INT32_MAX) {
+		return ERR_INVALID_DATA;
+	}
+	if (p_page.header == backup_page_data.ptr()) {
+		return OK;
+	}
+	if (backup_page_data.resize(size) != OK) {
+		return ERR_OUT_OF_MEMORY;
+	}
+	uint8_t *data = backup_page_data.ptrw();
+	backup_page = {};
+	backup_page.header = data;
+	backup_page.header_len = p_page.header_len;
+	backup_page.body = data + p_page.header_len;
+	backup_page.body_len = p_page.body_len;
+	memcpy(backup_page.header, p_page.header, p_page.header_len);
+	if (p_page.body_len) {
+		memcpy(backup_page.body, p_page.body, p_page.body_len);
+	}
+	return OK;
 }
 
-void MovieWriterOGV::restore_page(ogg_page *page) {
-	page->header = backup_page.header;
-	page->header_len = backup_page.header_len;
-	page->body = backup_page.body;
-	page->body_len = backup_page.body_len;
-}
-
-// The added complexity here is because we have to ensure pages are written in ascending timestamp order.
-// libOgg doesn't allow checking the next page granulepos without requesting the page, and once requested it can't be
-// returned, thus, we need to save it so that it doesn't get erased by the next `ogg_stream_packetin` call.
-void MovieWriterOGV::write_to_file(bool p_finish) {
+Error MovieWriterOGV::write_to_file(bool p_finish) {
 	if (audio_flag) {
-		restore_page(&audio_page);
+		audio_page = backup_page;
 	} else {
-		audio_flag = ogg_stream_flush(&vo, &audio_page);
-	}
-	if (video_flag) {
-		restore_page(&video_page);
-	} else {
-		video_flag = ogg_stream_flush(&to, &video_page);
-	}
-
-	bool finishing = p_finish && (audio_flag || video_flag);
-	while (finishing || (audio_flag && video_flag)) {
-		double audiotime = vorbis_granule_time(&vd, ogg_page_granulepos(&audio_page));
-		double videotime = th_granule_time(td, ogg_page_granulepos(&video_page));
-		bool video_first = audiotime >= videotime;
-
-		if (video_flag && video_first) {
-			// Flush a video page.
-			f->store_buffer(video_page.header, video_page.header_len);
-			f->store_buffer(video_page.body, video_page.body_len);
-			video_flag = ogg_stream_flush(&to, &video_page) > 0;
-		} else {
-			// Flush an audio page.
-			f->store_buffer(audio_page.header, audio_page.header_len);
-			f->store_buffer(audio_page.body, audio_page.body_len);
-			audio_flag = ogg_stream_flush(&vo, &audio_page) > 0;
+		const int result = ogg_stream_flush(&vo, &audio_page);
+		if (result < 0) {
+			return ERR_CANT_CREATE;
 		}
-		finishing = p_finish && (audio_flag || video_flag);
+		audio_flag = result > 0;
 	}
-
 	if (video_flag) {
-		save_page(video_page);
-	} else if (audio_flag) {
-		save_page(audio_page);
+		video_page = backup_page;
+	} else {
+		const int result = ogg_stream_flush(&to, &video_page);
+		if (result < 0) {
+			return ERR_CANT_CREATE;
+		}
+		video_flag = result > 0;
 	}
+	while ((audio_flag && video_flag) || (p_finish && (audio_flag || video_flag))) {
+		const bool video_first = video_flag && (!audio_flag || th_granule_time(td, ogg_page_granulepos(&video_page)) <= vorbis_granule_time(&vd, ogg_page_granulepos(&audio_page)));
+		Error error = store_page(video_first ? video_page : audio_page);
+		if (error != OK) {
+			return error;
+		}
+		const int result = video_first ? ogg_stream_flush(&to, &video_page) : ogg_stream_flush(&vo, &audio_page);
+		if (result < 0) {
+			return ERR_CANT_CREATE;
+		}
+		if (video_first) {
+			video_flag = result > 0;
+		} else {
+			audio_flag = result > 0;
+		}
+	}
+	return video_flag ? save_page(video_page) : audio_flag ? save_page(audio_page)
+														   : OK;
 }
 
 void MovieWriterOGV::write_end() {
-	pull_audio(true);
-	pull_video(true);
-	write_to_file(true);
-
-	th_encode_free(td);
-
-	ogg_stream_clear(&vo);
-	vorbis_block_clear(&vb);
-	vorbis_dsp_clear(&vd);
-	vorbis_comment_clear(&vc);
-	vorbis_info_clear(&vi);
-
-	ogg_stream_clear(&to);
-	th_comment_clear(&tc);
-
-	memfree(y);
-	memfree(u);
-	memfree(v);
-
-	if (backup_page_data != nullptr) {
-		memfree(backup_page_data);
+	if (active && get_error() == OK) {
+		active = false;
+		Error error = pull_audio(true);
+		if (error == OK) {
+			error = pull_video(true);
+		}
+		if (error == OK) {
+			error = write_to_file(true);
+		}
+		set_error(error);
+		if (f.is_valid()) {
+			f->flush();
+			set_error(f->get_error());
+		}
 	}
-
-	if (f.is_valid()) {
-		f.unref();
-	}
+	close();
 }
 
 MovieWriterOGV::MovieWriterOGV() {
@@ -432,4 +493,7 @@ MovieWriterOGV::MovieWriterOGV() {
 	audio_quality = GLOBAL_GET("editor/movie_writer/ogv/audio_quality");
 	speed = GLOBAL_GET("editor/movie_writer/ogv/encoding_speed");
 	keyframe_frequency = GLOBAL_GET("editor/movie_writer/ogv/keyframe_interval");
+}
+MovieWriterOGV::~MovieWriterOGV() {
+	close();
 }

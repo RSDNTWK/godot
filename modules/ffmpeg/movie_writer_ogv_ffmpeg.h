@@ -6,6 +6,8 @@
 struct AVFormatContext;
 struct AVCodecContext;
 struct AVStream;
+struct AVFrame;
+struct AVAudioFifo;
 struct SwsContext;
 struct SwrContext;
 
@@ -17,18 +19,25 @@ class MovieWriterOGVFFmpeg : public MovieWriter {
 	AVCodecContext *audio_codec = nullptr;
 	AVStream *video_stream = nullptr;
 	AVStream *audio_stream = nullptr;
+	AVAudioFifo *audio_fifo = nullptr;
 	SwsContext *scale = nullptr;
 	SwrContext *resampler = nullptr;
+	Size2i movie_size;
 	String output_path;
-	uint64_t video_frame = 0;
+	int64_t video_frame = 0;
 	int64_t audio_frame = 0;
 	int audio_channels = 2;
 	int audio_samples_per_frame = 0;
+	bool active = false;
+	bool audio_packet_written = false;
 
 	void close();
+	Error fail(Error p_error);
 	Error encode_video(const Ref<Image> &p_image);
-	Error encode_audio(const int32_t *p_audio_data, int p_samples);
-	Error flush_encoder(AVCodecContext *p_codec, AVStream *p_stream);
+	Error convert_audio(const int32_t *p_audio_data, int p_samples, bool p_flush, int &r_converted);
+	Error emit_audio(bool p_final);
+	Error drain_packets(AVCodecContext *p_codec, AVStream *p_stream, bool p_final);
+	Error send_frame(AVCodecContext *p_codec, AVStream *p_stream, AVFrame *p_frame);
 
 protected:
 	uint32_t get_audio_mix_rate() const override;
@@ -40,6 +49,10 @@ protected:
 	bool handles_file(const String &p_path) const override;
 
 public:
+	static bool is_available();
+#ifdef DEV_ENABLED
+	void test_fail_output_writes();
+#endif
 	~MovieWriterOGVFFmpeg() override;
 };
 
