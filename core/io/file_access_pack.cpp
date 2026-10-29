@@ -537,7 +537,7 @@ Ref<FileAccess> PackedSourcePCK::get_file(const String &p_path, PackedData::Pack
 	if (PackedData::get_singleton()->has_delta_patches(p_path)) {
 		Ref<FileAccessPatched> file_patched;
 		file_patched.instantiate();
-		Error err = file_patched->open_custom(file);
+		Error err = file_patched->open_custom(file, p_decryption_key);
 		ERR_FAIL_COND_V(err != OK, Ref<FileAccess>());
 		file = file_patched;
 	}

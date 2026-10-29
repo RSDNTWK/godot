@@ -33,6 +33,8 @@
 TEST_FORCE_LINK(test_pck_safety)
 
 #include "core/io/dir_access.h"
+#include "core/io/delta_encoding.h"
+#include "core/io/file_access_patched.h"
 #include "core/io/file_access_encrypted.h"
 #include "tests/core/io/encrypted_test_helpers.h"
 #include "core/io/file_access_memory.h"
@@ -333,6 +335,138 @@ TEST_CASE("[F14][PCKCache] Opens remain coherent while accepted mappings switch 
 	ConcurrentCacheReads::run(&work);
 #endif
 	CHECK(work.failures.load(std::memory_order_relaxed) == 0);
+}
+
+static Vector<uint8_t> encoded_delta(const Vector<uint8_t> &p_old, const Vector<uint8_t> &p_new) {
+	Vector<uint8_t> delta;
+	REQUIRE(DeltaEncoding::encode_delta(p_old, p_new, delta, 3) == OK);
+	REQUIRE(delta.size() > 5);
+	return delta;
+}
+TEST_CASE("[N002][PCKDelta] Compression and encryption flags decode logical patch bytes") {
+	for (bool compressed_entry : { false, true }) {
+		for (bool encrypted_entry : { false, true }) {
+			ScopedPackedData isolated;
+			Fixture base;
+			Fixture patch;
+			MountedPath mounted(base.logical);
+			const Vector<uint8_t> original = bytes(1031);
+			Vector<uint8_t> expected = original;
+			expected.write[17] ^= 0xa7;
+			base.write(original, original.size());
+			base.mount();
+			const Vector<uint8_t> delta = encoded_delta(original, expected);
+			patch.write(compressed_entry ? literal_lzma2(delta) : delta, delta.size(), compressed_entry, encrypted_entry);
+			patch.info.delta = true;
+			map_entry(base.logical, patch.info);
+			Error error = FAILED;
+			Ref<FileAccess> reader = FileAccess::open(base.logical, FileAccess::READ, &error);
+			REQUIRE(error == OK);
+			REQUIRE(reader.is_valid());
+			CHECK(reader->get_length() == uint64_t(expected.size()));
+			CHECK(reader->get_error() == OK);
+			CHECK(reader->get_buffer(expected.size()) == expected);
+			reader->seek(17);
+			CHECK(reader->get_buffer(1) == expected.slice(17, 18));
+		}
+	}
+#ifdef TOOLS_ENABLED
+	constexpr uint8_t empty_key[32] = {};
+	if (memcmp(script_encryption_key, empty_key, sizeof(empty_key)) == 0) {
+		ScopedPackedData isolated;
+		Fixture base;
+		Fixture patch;
+		MountedPath mounted(base.logical);
+		const Vector<uint8_t> original = bytes(1031);
+		Vector<uint8_t> expected = original;
+		expected.write[19] ^= 0x57;
+		base.write(original, original.size());
+		base.mount();
+		const Vector<uint8_t> delta = encoded_delta(original, expected);
+		const Vector<uint8_t> stored = literal_lzma2(delta);
+		const Vector<uint8_t> custom_key = TestEncryptedSafety::key();
+		Ref<FileAccess> output = FileAccess::open(patch.filename, FileAccess::WRITE);
+		REQUIRE(output.is_valid());
+		REQUIRE(output->store_8(0xa7));
+		FileAccessEncrypted writer;
+		REQUIRE(writer.open_and_parse(output, custom_key, FileAccessEncrypted::MODE_WRITE_AES256, false) == OK);
+		REQUIRE(writer.store_buffer(stored.ptr(), stored.size()));
+		writer.close();
+		patch.info.stored_size = output->get_position() - 1;
+		output->close();
+		patch.info.size = delta.size();
+		patch.info.encrypted = true;
+		patch.info.lzma2 = true;
+		patch.info.delta = true;
+		map_entry(base.logical, patch.info);
+		Error error = FAILED;
+		Ref<FileAccess> reader = PackedData::get_singleton()->try_open_path(base.logical, custom_key, &error);
+		REQUIRE(error == OK);
+		REQUIRE(reader.is_valid());
+		CHECK(reader->get_length() == uint64_t(expected.size()));
+		CHECK(reader->get_buffer(expected.size()) == expected);
+	}
+#endif
+}
+TEST_CASE("[N002][PCKDelta] Ordered patch chains preserve nonempty and empty final content") {
+	for (bool empty_final : { false, true }) {
+		ScopedPackedData isolated;
+		Fixture base;
+		Fixture first_patch;
+		Fixture second_patch;
+		MountedPath mounted(base.logical);
+		const Vector<uint8_t> original = bytes(2051);
+		const Vector<uint8_t> middle = bytes(3119);
+		const Vector<uint8_t> expected = empty_final ? Vector<uint8_t>() : bytes(1031);
+		base.write(original, original.size());
+		base.mount();
+		const Vector<uint8_t> first = encoded_delta(original, middle);
+		const Vector<uint8_t> second = encoded_delta(middle, expected);
+		first_patch.write(literal_lzma2(first), first.size(), true);
+		first_patch.info.delta = true;
+		second_patch.write(literal_lzma2(second), second.size(), true, true);
+		second_patch.info.delta = true;
+		map_entry(base.logical, first_patch.info);
+		map_entry(base.logical, second_patch.info);
+		Ref<FileAccess> reader = FileAccess::open(base.logical, FileAccess::READ);
+		REQUIRE(reader.is_valid());
+		CHECK(reader->get_length() == uint64_t(expected.size()));
+		CHECK(reader->is_open());
+		CHECK(reader->get_buffer(expected.size() + 1) == expected);
+		CHECK(reader->get_error() == ERR_FILE_EOF);
+		reader->seek(0);
+		CHECK(reader->get_buffer(expected.size() + 1) == expected);
+	}
+}
+TEST_CASE("[N002][PCKDelta] Incomplete staging and unsupported bundle patches retain a failure") {
+	ErrorsOff quiet;
+	for (bool bundle : { false, true }) {
+		ScopedPackedData isolated;
+		Fixture base;
+		Fixture patch;
+		MountedPath mounted(base.logical);
+		const Vector<uint8_t> original = bytes(1031);
+		const Vector<uint8_t> expected = bytes(2051);
+		base.write(original, original.size());
+		base.mount();
+		const Vector<uint8_t> delta = encoded_delta(original, expected);
+		patch.write(delta, delta.size());
+		patch.info.delta = true;
+		patch.info.bundle = bundle;
+		if (!bundle) { patch.info.size += 5; }
+		map_entry(base.logical, patch.info);
+		Ref<FileAccess> reader = FileAccess::open(base.logical, FileAccess::READ);
+		REQUIRE(reader.is_valid());
+		CHECK(reader->get_length() == 0);
+		const Error failure = reader->get_error();
+		CHECK(failure == (bundle ? FAILED : ERR_FILE_CORRUPT));
+		uint8_t output = 0xa7;
+		CHECK(reader->get_buffer(&output, 1) == 0);
+		CHECK(output == 0xa7);
+		reader->seek(0);
+		CHECK(reader->get_length() == 0);
+		CHECK(reader->get_error() == failure);
+	}
 }
 TEST_CASE("[F08][PCK] Ordinary encryption and LZMA2 combinations preserve logical entry bytes") {
 	for (int size : { 1031, 2051, 3119, 4099, 5003 }) {
@@ -843,6 +977,42 @@ TEST_CASE("[F14][PCKCacheAllocation] A warm accepted entry reuses decoded storag
 	REQUIRE(error == OK);
 	REQUIRE(warm.is_valid());
 	CHECK(warm->get_buffer(payload.size()) == payload);
+}
+
+TEST_CASE("[N002][PCKDeltaAllocation] Whole-base staging allocation failure stays explicit and retry succeeds") {
+	ScopedPackedData isolated;
+	Fixture base;
+	Fixture patch;
+	MountedPath mounted(base.logical);
+	const Vector<uint8_t> original = bytes(100003);
+	Vector<uint8_t> expected = original;
+	expected.write[17] ^= 0xa7;
+	base.write(original, original.size());
+	base.mount();
+	const Vector<uint8_t> delta = encoded_delta(original, expected);
+	patch.write(delta, delta.size());
+	patch.info.delta = true;
+	map_entry(base.logical, patch.info);
+	Ref<FileAccess> reader = FileAccess::open(base.logical, FileAccess::READ);
+	REQUIRE(reader.is_valid());
+	const size_t exact = vector_allocation_size(original.size());
+	uint64_t length = UINT64_MAX;
+	ErrorsOff quiet;
+	{
+		AllocationFailure fault(exact, exact);
+		length = reader->get_length();
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(length == 0);
+	CHECK(reader->get_error() == ERR_OUT_OF_MEMORY);
+	uint8_t output = 0xa7;
+	CHECK(reader->get_buffer(&output, 1) == 0);
+	CHECK(output == 0xa7);
+	CHECK(reader->get_error() == ERR_OUT_OF_MEMORY);
+	Ref<FileAccess> retry = FileAccess::open(base.logical, FileAccess::READ);
+	REQUIRE(retry.is_valid());
+	CHECK(retry->get_length() == uint64_t(expected.size()));
+	CHECK(retry->get_buffer(expected.size()) == expected);
 }
 TEST_CASE("[B01AllocationFault] Real allocator destination failure returns an empty result") {
 	const Vector<uint8_t> payload = bytes(5003);

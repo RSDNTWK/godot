@@ -37,6 +37,7 @@ class FileAccessPatched : public FileAccess {
 	GDSOFTCLASS(FileAccessPatched, FileAccess);
 
 	Ref<FileAccess> old_file;
+	Vector<uint8_t> decryption_key;
 	mutable Vector<uint8_t> patched_file_data;
 	mutable Ref<FileAccessMemory> patched_file;
 	mutable Error last_error = OK;
@@ -61,7 +62,7 @@ protected:
 	virtual Error open_internal(const String &p_path, int p_mode_flags) override { return ERR_UNAVAILABLE; }
 
 public:
-	Error open_custom(const Ref<FileAccess> &p_old_file);
+	Error open_custom(const Ref<FileAccess> &p_old_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>());
 
 	virtual bool is_open() const override;
 
