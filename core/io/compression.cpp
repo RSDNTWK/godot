@@ -60,6 +60,8 @@ static _FORCE_INLINE_ PCKLzmaOptions _get_default_lzma2_options() {
 }
 
 int64_t Compression::compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_src_size, Mode p_mode) {
+	ERR_FAIL_COND_V(p_src_size < 0 || uint64_t(p_src_size) > SIZE_MAX, -1);
+	ERR_FAIL_COND_V(!p_src && p_src_size > 0, -1);
 	switch (p_mode) {
 		case MODE_BROTLI: {
 			ERR_FAIL_V_MSG(-1, "Only brotli decompression is supported.");
@@ -69,7 +71,9 @@ int64_t Compression::compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_sr
 			if (p_src_size < 16) {
 				uint8_t src[16];
 				memset(&src[p_src_size], 0, 16 - p_src_size);
-				memcpy(src, p_src, p_src_size);
+				if (p_src_size > 0) {
+					memcpy(src, p_src, p_src_size);
+				}
 				return fastlz_compress(src, 16, p_dst);
 			} else {
 				return fastlz_compress(p_src, p_src_size, p_dst);
@@ -104,14 +108,20 @@ int64_t Compression::compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_sr
 		} break;
 		case MODE_ZSTD: {
 			ZSTD_CCtx *cctx = ZSTD_createCCtx();
+			ERR_FAIL_NULL_V(cctx, -1);
 			ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, zstd_level);
 			if (zstd_long_distance_matching) {
 				ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 1);
 				ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, zstd_window_log_size);
 			}
 			const int64_t max_dst_size = get_max_compressed_buffer_size(p_src_size, MODE_ZSTD);
+			if (max_dst_size < 0) {
+				ZSTD_freeCCtx(cctx);
+				return -1;
+			}
 			const size_t ret = ZSTD_compressCCtx(cctx, p_dst, max_dst_size, p_src, p_src_size, zstd_level);
 			ZSTD_freeCCtx(cctx);
+			ERR_FAIL_COND_V(ZSTD_isError(ret), -1);
 			return (int64_t)ret;
 		} break;
 		case MODE_LZMA2: {
@@ -139,13 +149,14 @@ int64_t Compression::compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_sr
 }
 
 int64_t Compression::get_max_compressed_buffer_size(int64_t p_src_size, Mode p_mode) {
+	ERR_FAIL_COND_V(p_src_size < 0 || uint64_t(p_src_size) > SIZE_MAX, -1);
 	switch (p_mode) {
 		case MODE_BROTLI: {
 			ERR_FAIL_V_MSG(-1, "Only brotli decompression is supported.");
 		} break;
 		case MODE_FASTLZ: {
 			ERR_FAIL_COND_V_MSG(p_src_size > INT32_MAX, -1, "Cannot compress a FastLZ/LZ77 file 2 GiB or larger. LZ77 supports larger files, but FastLZ's implementation uses C++ `int` so is limited to 2 GiB. Consider using Zstd instead.");
-			int ss = p_src_size + p_src_size * 6 / 100;
+			int64_t ss = p_src_size + p_src_size * 6 / 100;
 			if (ss < 66) {
 				ss = 66;
 			}
@@ -170,7 +181,9 @@ int64_t Compression::get_max_compressed_buffer_size(int64_t p_src_size, Mode p_m
 			return aout;
 		} break;
 		case MODE_ZSTD: {
-			return ZSTD_compressBound(p_src_size);
+			const size_t bound = ZSTD_compressBound(p_src_size);
+			ERR_FAIL_COND_V(ZSTD_isError(bound) || bound == 0, -1);
+			return bound;
 		} break;
 		case MODE_LZMA2: {
 			ERR_FAIL_COND_V_MSG(p_src_size < 0, -1, "Invalid source size.");
@@ -184,6 +197,8 @@ int64_t Compression::get_max_compressed_buffer_size(int64_t p_src_size, Mode p_m
 }
 
 int64_t Compression::decompress(uint8_t *p_dst, int64_t p_dst_max_size, const uint8_t *p_src, int64_t p_src_size, Mode p_mode) {
+	ERR_FAIL_COND_V(p_src_size < 0 || p_dst_max_size < 0 || uint64_t(p_src_size) > SIZE_MAX || uint64_t(p_dst_max_size) > SIZE_MAX, -1);
+	ERR_FAIL_COND_V((!p_src && p_src_size > 0) || (!p_dst && p_dst_max_size > 0), -1);
 	switch (p_mode) {
 		case MODE_BROTLI: {
 #ifdef BROTLI_ENABLED
@@ -196,22 +211,22 @@ int64_t Compression::decompress(uint8_t *p_dst, int64_t p_dst_max_size, const ui
 #endif
 		} break;
 		case MODE_FASTLZ: {
-			ERR_FAIL_COND_V_MSG(p_dst_max_size > INT32_MAX, -1, "Cannot decompress a FastLZ/LZ77 file 2 GiB or larger. LZ77 supports larger files, but FastLZ's implementation uses C++ `int` so is limited to 2 GiB. Consider using Zstd instead.");
-			int ret_size = 0;
-
+			ERR_FAIL_COND_V(p_dst_max_size > INT32_MAX || p_src_size <= 0 || p_src_size > INT32_MAX, -1);
 			if (p_dst_max_size < 16) {
-				uint8_t dst[16];
-				fastlz_decompress(p_src, p_src_size, dst, 16);
-				memcpy(p_dst, dst, p_dst_max_size);
-				ret_size = p_dst_max_size;
-			} else {
-				ret_size = fastlz_decompress(p_src, p_src_size, p_dst, p_dst_max_size);
+				uint8_t temporary[16];
+				const int decoded = fastlz_decompress(p_src, p_src_size, temporary, sizeof(temporary));
+				ERR_FAIL_COND_V(decoded <= 0 || decoded < p_dst_max_size, -1);
+				if (p_dst_max_size > 0) {
+					memcpy(p_dst, temporary, p_dst_max_size);
+				}
+				return p_dst_max_size;
 			}
-			return ret_size;
+			const int decoded = fastlz_decompress(p_src, p_src_size, p_dst, p_dst_max_size);
+			return decoded > 0 ? decoded : -1;
 		} break;
 		case MODE_DEFLATE:
 		case MODE_GZIP: {
-			ERR_FAIL_COND_V_MSG(p_dst_max_size > INT32_MAX, -1, "Cannot decompress a Deflate or GZip file 2 GiB or larger. Deflate and GZip are both limited to 4 GiB, and ZLib's implementation uses C++ `int` so is limited to 2 GiB. Consider using Zstd instead.");
+			ERR_FAIL_COND_V_MSG(p_dst_max_size > INT32_MAX || p_src_size > INT32_MAX, -1, "Cannot decompress a Deflate or GZip file 2 GiB or larger. Deflate and GZip are both limited to 4 GiB, and ZLib's implementation uses C++ `int` so is limited to 2 GiB. Consider using Zstd instead.");
 			int window_bits = p_mode == MODE_DEFLATE ? 15 : 15 + 16;
 
 			z_stream strm;
@@ -224,14 +239,15 @@ int64_t Compression::decompress(uint8_t *p_dst, int64_t p_dst_max_size, const ui
 			ERR_FAIL_COND_V(err != Z_OK, -1);
 
 			strm.avail_in = p_src_size;
-			strm.avail_out = p_dst_max_size;
+			uint8_t empty_output;
+			strm.avail_out = p_dst_max_size > 0 ? p_dst_max_size : 1;
 			strm.next_in = (Bytef *)p_src;
-			strm.next_out = p_dst;
+			strm.next_out = p_dst_max_size > 0 ? p_dst : &empty_output;
 
 			err = inflate(&strm, Z_FINISH);
 			int total = strm.total_out;
 			inflateEnd(&strm);
-			ERR_FAIL_COND_V(err != Z_STREAM_END, -1);
+			ERR_FAIL_COND_V(err != Z_STREAM_END || total > p_dst_max_size, -1);
 			return total;
 		} break;
 		case MODE_ZSTD: {
@@ -243,14 +259,21 @@ int64_t Compression::decompress(uint8_t *p_dst, int64_t p_dst_max_size, const ui
 				}
 
 				current_zstd_d_ctx = ZSTD_createDCtx();
+				ERR_FAIL_NULL_V(current_zstd_d_ctx, -1);
 				if (zstd_long_distance_matching) {
-					ZSTD_DCtx_setParameter(current_zstd_d_ctx, ZSTD_d_windowLogMax, zstd_window_log_size);
+					const size_t parameter_result = ZSTD_DCtx_setParameter(current_zstd_d_ctx, ZSTD_d_windowLogMax, zstd_window_log_size);
+					if (ZSTD_isError(parameter_result)) {
+						ZSTD_freeDCtx(current_zstd_d_ctx);
+						current_zstd_d_ctx = nullptr;
+						return -1;
+					}
 				}
 				current_zstd_long_distance_matching = zstd_long_distance_matching;
 				current_zstd_window_log_size = zstd_window_log_size;
 			}
 
-			size_t ret = ZSTD_decompressDCtx(current_zstd_d_ctx, p_dst, p_dst_max_size, p_src, p_src_size);
+			const size_t ret = ZSTD_decompressDCtx(current_zstd_d_ctx, p_dst, p_dst_max_size, p_src, p_src_size);
+			ERR_FAIL_COND_V(ZSTD_isError(ret), -1);
 			return (int64_t)ret;
 		} break;
 		case MODE_LZMA2: {

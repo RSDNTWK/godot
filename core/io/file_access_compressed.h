@@ -44,6 +44,7 @@ class FileAccessCompressed : public FileAccess {
 	uint32_t block_size = 0;
 	mutable bool read_eof = false;
 	mutable bool at_end = false;
+	mutable Error read_error = OK;
 
 	struct ReadBlock {
 		uint32_t csize;
@@ -64,6 +65,7 @@ class FileAccessCompressed : public FileAccess {
 	Ref<FileAccess> f;
 
 	void _close();
+	Error _load_read_block(uint32_t p_block) const;
 
 public:
 	void configure(const String &p_magic, Compression::Mode p_mode = Compression::MODE_ZSTD, uint32_t p_block_size = 4096);
