@@ -1,12 +1,14 @@
 #include "video_stream_media.h"
 
+#include "ffmpeg_file_io.h"
+#include "ffmpeg_video_frame_converter.h"
+
 #include "core/error/error_macros.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_importer.h"
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
 #include "core/os/os.h"
-#include "ffmpeg_file_io.h"
 #include "scene/resources/image_texture.h"
 #include "servers/audio/audio_server.h"
 
@@ -29,8 +31,8 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
     AVFrame *queued_frame = nullptr;
     AVFrame *software_frame = nullptr;
     AVBufferRef *hardware_device = nullptr;
-    SwsContext *scale = nullptr;
-    int video_stream = -1;
+	FFmpegVideoFrameConverter frame_converter;
+	int video_stream = -1;
     bool playing = false;
     bool paused = false;
     double position = 0.0;
@@ -207,10 +209,21 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
         return true;
     }
 
-    void _mix_audio(double p_delta) {
-        if (!audio_playback.is_valid() || !mix_callback) {
-            return;
-        }
+	void _fail_playback(const char *p_reason) {
+		ERR_PRINT(p_reason);
+		playing = false;
+		if (audio_playback.is_valid()) {
+			audio_playback->stop_playback();
+		}
+		pending_audio.clear();
+		pending_audio_offset = 0;
+		audio_frames_due = 0.0;
+	}
+
+	Error _mix_audio(double p_delta) {
+		if (!audio_playback.is_valid() || !mix_callback) {
+			return OK;
+		}
         audio_frames_due += MAX(p_delta, 0.0) * AudioServer::get_singleton()->get_mix_rate();
         // Preserve rejected samples and fractional durations; bound work after stalls.
         for (int batch = 0; batch < 16; batch++) {
@@ -220,36 +233,41 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
                 pending_audio_offset += accepted;
                 audio_frames_due -= accepted;
                 if (accepted < remaining) {
-                    return;
-                }
+					return OK;
+				}
             }
             pending_audio.clear();
             pending_audio_offset = 0;
             const int mix_frames = int(MIN(audio_frames_due, 1024.0));
             if (mix_frames <= 0) {
-                return;
-            }
+				return OK;
+			}
             Vector<AudioFrame> samples;
-            samples.resize(mix_frames);
-            const int mixed = audio_playback->mix(samples.ptrw(), 1.0, mix_frames);
+			if (samples.resize(mix_frames) != OK) {
+				return ERR_OUT_OF_MEMORY;
+			}
+			const int mixed = audio_playback->mix(samples.ptrw(), 1.0, mix_frames);
             if (mixed <= 0) {
                 audio_frames_due = 0.0;
-                return;
-            }
-            pending_audio.resize(mixed * 2);
-            float *pcm = pending_audio.ptrw();
+				return OK;
+			}
+			if (mixed > mix_frames) {
+				return ERR_INVALID_DATA;
+			}
+			if (pending_audio.resize(mixed * 2) != OK) {
+				return ERR_OUT_OF_MEMORY;
+			}
+			float *pcm = pending_audio.ptrw();
             for (int i = 0; i < mixed; i++) {
                 pcm[i * 2] = samples[i].left;
                 pcm[i * 2 + 1] = samples[i].right;
             }
         }
-    }
-    void close() {
-        if (scale) {
-            sws_freeContext(scale);
-            scale = nullptr;
-        }
-        if (codec) {
+		return OK;
+	}
+	void close() {
+		frame_converter.clear();
+		if (codec) {
             avcodec_free_context(&codec);
         }
         if (format) {
@@ -310,22 +328,40 @@ public:
         frame = av_frame_alloc();
         queued_frame = av_frame_alloc();
         software_frame = av_frame_alloc();
-        if (packet && frame && queued_frame) {
-            Ref<Image> image = Image::create_empty(codec->width, codec->height, false, Image::FORMAT_RGBA8);
-            texture = ImageTexture::create_from_image(image);
-        }
-        audio_playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, p_path);
+		if (!packet || !frame || !queued_frame || !software_frame || codec->width < 0 || codec->height < 0) {
+			close();
+			return false;
+		}
+		// VideoStreamPlayer retains this Ref before the first decoded frame.
+		texture.instantiate();
+		if (codec->width > 0 && codec->height > 0) {
+			int64_t size = 0;
+			if (FFmpegVideoFrameConverter::get_rgba_size(codec->width, codec->height, size) != OK) {
+				close();
+				return false;
+			}
+			Ref<Image> image = Image::create_empty(codec->width, codec->height, false, Image::FORMAT_RGBA8);
+			if (image.is_null() || image->is_empty()) {
+				close();
+				return false;
+			}
+			texture->set_image(image);
+		}
+		audio_playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, p_path);
         length = format->duration > 0 ? double(format->duration) / AV_TIME_BASE : 0.0;
-        return packet && frame && queued_frame && software_frame;
-    }
+		return true;
+	}
 
     void update(double p_delta) override {
         if (!playing || paused || !format || !codec) {
             return;
         }
         playback_clock += MAX(p_delta, 0.0);
-        _mix_audio(p_delta);
-        const double target_clock = playback_clock - (audio_playback.is_valid() ? audio_frames_due / AudioServer::get_singleton()->get_mix_rate() : 0.0);
+		if (_mix_audio(p_delta) != OK) {
+			_fail_playback("FFmpeg: could not allocate video audio buffers.");
+			return;
+		}
+		const double target_clock = playback_clock - (audio_playback.is_valid() ? audio_frames_due / AudioServer::get_singleton()->get_mix_rate() : 0.0);
         const uint64_t decode_start = OS::get_singleton()->get_ticks_usec();
         bool frame_ready = false;
         double frame_position = position;
@@ -428,23 +464,13 @@ public:
             }
             display_frame = software_frame;
         }
-        scale = sws_getCachedContext(scale, codec->width, codec->height, static_cast<AVPixelFormat>(display_frame->format), codec->width, codec->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-        if (!scale) {
-            playing = false;
-            return;
-        }
-        Vector<uint8_t> data;
-        data.resize(codec->width * codec->height * 4);
-        uint8_t *dst[] = { data.ptrw() };
-        int stride[] = { codec->width * 4 };
-        sws_scale(scale, display_frame->data, display_frame->linesize, 0, codec->height, dst, stride);
-        Ref<Image> image = Image::create_from_data(codec->width, codec->height, false, Image::FORMAT_RGBA8, data);
-        if (texture.is_valid()) {
-            texture->update(image);
-        } else {
-            texture = ImageTexture::create_from_image(image);
-        }
-        position = frame_position;
+		Ref<Image> image;
+		if (frame_converter.convert(display_frame, image) != OK ||
+				FFmpegVideoFrameConverter::update_texture(image, texture) != OK) {
+			_fail_playback("FFmpeg: video frame conversion failed.");
+			return;
+		}
+		position = frame_position;
     }
 
     void play() override {
