@@ -72,6 +72,10 @@ int PacketPeerMbedDTLS::bio_recv(void *ctx, unsigned char *buf, size_t len) {
 	if (err != OK) {
 		return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
 	}
+	if (size_t(buffer_size) > len) {
+		// Discard the complete datagram rather than truncating a DTLS record.
+		return MBEDTLS_ERR_SSL_WANT_READ;
+	}
 	memcpy(buf, buffer, buffer_size);
 	return buffer_size;
 }
