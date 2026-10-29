@@ -33,6 +33,7 @@
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
 #include "core/io/resource_uid.h"
+#include "core/os/mutex.h"
 #include "core/string/print_string.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/list.h"
@@ -71,6 +72,7 @@ class PackedData {
 	friend class FileAccessPack;
 	friend class DirAccessPack;
 	friend class PackSource;
+	friend struct TestPCKSafety::Access;
 
 public:
 	struct PackedFile {
@@ -78,6 +80,7 @@ public:
 		uint64_t offset; //if offset is ZERO, the file was ERASED
 		uint64_t size;
 		uint64_t stored_size = 0;
+		uint64_t cache_identity = 0;
 		uint8_t md5[16];
 		PackSource *src = nullptr;
 		bool encrypted = false;
@@ -115,6 +118,7 @@ private:
 		}
 	};
 
+	mutable Mutex files_mutex;
 	HashMap<PathMD5, PackedFile, PathMD5> files;
 	HashMap<PathMD5, Vector<PackedFile>, PathMD5> delta_patches;
 
@@ -247,7 +251,9 @@ public:
 };
 
 int64_t PackedData::get_size(const String &p_path) {
-	HashMap<PathMD5, PackedFile, PathMD5>::Iterator E = files.find(_get_simplified_path(p_path));
+	const PathMD5 path_md5 = _get_simplified_path(p_path);
+	MutexLock lock(files_mutex);
+	HashMap<PathMD5, PackedFile, PathMD5>::Iterator E = files.find(path_md5);
 	if (!E) {
 		return -1; // File not found.
 	}
@@ -258,15 +264,22 @@ int64_t PackedData::get_size(const String &p_path) {
 }
 
 Ref<FileAccess> PackedData::try_open_path(const String &p_path, const Vector<uint8_t> &p_decryption_key, Error *r_error) {
-	HashMap<PathMD5, PackedFile, PathMD5>::Iterator E = files.find(_get_simplified_path(p_path));
-	if (!E) {
-		if (r_error) {
-			*r_error = ERR_FILE_NOT_FOUND;
+	const PathMD5 path_md5 = _get_simplified_path(p_path);
+	PackedFile packed_file;
+	{
+		MutexLock lock(files_mutex);
+		HashMap<PathMD5, PackedFile, PathMD5>::Iterator entry = files.find(path_md5);
+		if (!entry) {
+			if (r_error) {
+				*r_error = ERR_FILE_NOT_FOUND;
+			}
+			return nullptr;
 		}
-		return nullptr;
+		packed_file = entry->value;
 	}
-
-	Ref<FileAccess> file = E->value.src->get_file(p_path, &E->value, p_decryption_key);
+	// Provider I/O may recursively open the owning pack. Never hold the
+	// metadata lock while invoking a provider or reading/decompressing data.
+	Ref<FileAccess> file = packed_file.src->get_file(p_path, &packed_file, p_decryption_key);
 	Error error = OK;
 	if (file.is_null()) {
 		error = ERR_FILE_CANT_OPEN;
@@ -284,7 +297,9 @@ Ref<FileAccess> PackedData::try_open_path(const String &p_path, const Vector<uin
 }
 
 bool PackedData::has_path(const String &p_path) {
-	return files.has(_get_simplified_path(p_path));
+	const PathMD5 path_md5 = _get_simplified_path(p_path);
+	MutexLock lock(files_mutex);
+	return files.has(path_md5);
 }
 
 bool PackedData::has_directory(const String &p_path) {

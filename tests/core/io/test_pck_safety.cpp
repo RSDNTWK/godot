@@ -41,6 +41,7 @@ TEST_FORCE_LINK(test_pck_safety)
 #include "tests/core/io/pck_lzma2_fixtures.h"
 #include "core/object/script_language.h"
 #include "core/os/os.h"
+#include "core/os/thread.h"
 #include "tests/test_utils.h"
 
 #include "modules/modules_enabled.gen.h"
@@ -54,10 +55,12 @@ TEST_FORCE_LINK(test_pck_safety)
 #endif
 
 #include <cstring>
+#include <atomic>
 
 namespace TestPCKSafety {
 
 struct Access {
+	static void restore(PackedData *p_previous) { PackedData::singleton = p_previous; }
 	static void backing(FileAccessPack &p_pack, const Ref<FileAccess> &p_file) { p_pack.f = p_file; p_pack.off = 0; }
 	static uint64_t backing_position(FileAccessPack &p_pack) { return p_pack.f.is_valid() ? p_pack.f->get_position() : 0; }
 };
@@ -169,6 +172,168 @@ static Vector<uint8_t> compressed(const Vector<uint8_t> &p_input) {
 }
 
 
+
+struct ScopedPackedData {
+	PackedData *previous = PackedData::get_singleton();
+	PackedData data;
+	~ScopedPackedData() { Access::restore(previous); }
+};
+struct MountedPath {
+	String path;
+	explicit MountedPath(const String &p_path) : path(p_path) {}
+	~MountedPath() { PackedData::get_singleton()->remove_path(path); }
+};
+static Vector<uint8_t> literal_lzma2(const Vector<uint8_t> &p_data) {
+	REQUIRE(p_data.size() > 0);
+	REQUIRE(p_data.size() <= 65536);
+	Vector<uint8_t> stored;
+	REQUIRE(stored.resize(p_data.size() + 5) == OK);
+	stored.write[0] = 0; // 4 KiB dictionary; these controls fit in one chunk.
+	stored.write[1] = 1; // Uncompressed LZMA2 chunk with dictionary reset.
+	stored.write[2] = (p_data.size() - 1) >> 8;
+	stored.write[3] = (p_data.size() - 1) & 255;
+	memcpy(stored.ptrw() + 4, p_data.ptr(), p_data.size());
+	stored.write[stored.size() - 1] = 0;
+	return stored;
+}
+static void map_entry(const String &p_path, const PackedData::PackedFile &p_file) {
+	PackedData::get_singleton()->add_path(p_file.pack, p_path, p_file.offset, p_file.size, p_file.stored_size,
+			p_file.md5, p_file.src, true, p_file.encrypted, p_file.bundle, p_file.delta, p_file.lzma2, p_file.salt);
+}
+TEST_CASE("[F14][PCKCache] Replacement, removal and clear preserve current and already-open content") {
+	ScopedPackedData isolated;
+	Fixture fixture;
+	const Vector<uint8_t> first = bytes(1031);
+	Vector<uint8_t> second = first;
+	second.write[17] ^= 0x57;
+	fixture.write(literal_lzma2(first), first.size(), true);
+	fixture.mount();
+	Ref<FileAccess> held = FileAccess::open(fixture.logical, FileAccess::READ);
+	REQUIRE(held.is_valid());
+	CHECK(held->get_buffer(first.size()) == first);
+	const uint64_t old_extent = fixture.info.stored_size;
+	fixture.write(literal_lzma2(second), second.size(), true);
+	REQUIRE(fixture.info.stored_size == old_extent);
+	fixture.mount();
+	Ref<FileAccess> replaced = FileAccess::open(fixture.logical, FileAccess::READ);
+	REQUIRE(replaced.is_valid());
+	CHECK(replaced->get_buffer(second.size()) == second);
+	held->seek(0);
+	CHECK(held->get_buffer(first.size()) == first);
+	PackedData::get_singleton()->remove_path(fixture.logical);
+	fixture.write(literal_lzma2(first), first.size(), true);
+	fixture.mount();
+	REQUIRE(FileAccess::get_file_as_bytes(fixture.logical) == first);
+	PackedData::get_singleton()->clear();
+	fixture.write(literal_lzma2(second), second.size(), true);
+	fixture.mount();
+	REQUIRE(FileAccess::get_file_as_bytes(fixture.logical) == second);
+	replaced->seek(0);
+	CHECK(replaced->get_buffer(second.size()) == second);
+	held->seek(0);
+	CHECK(held->get_buffer(first.size()) == first);
+}
+TEST_CASE("[F14][PCKCache] Equal-size sparse entries in one owner retain separate identities") {
+	ScopedPackedData isolated;
+	Fixture first_file;
+	Fixture second_file;
+	const String stem = "f14_sparse_" + uitos(OS::get_singleton()->get_ticks_usec());
+	first_file.filename = first_file.directory.path_join(stem + "_a.bin");
+	second_file.filename = first_file.directory.path_join(stem + "_b.bin");
+	second_file.info.pack = first_file.info.pack;
+	const Vector<uint8_t> first = bytes(2051);
+	Vector<uint8_t> second = first;
+	second.write[19] ^= 0xa7;
+	const Vector<uint8_t> stored_a = literal_lzma2(first);
+	const Vector<uint8_t> stored_b = literal_lzma2(second);
+	REQUIRE(stored_a.size() == stored_b.size());
+	for (Fixture *fixture : { &first_file, &second_file }) {
+		Ref<FileAccess> output = FileAccess::open(fixture->filename, FileAccess::WRITE);
+		REQUIRE(output.is_valid());
+		const Vector<uint8_t> &stored = fixture == &first_file ? stored_a : stored_b;
+		REQUIRE(output->store_buffer(stored.ptr(), stored.size()));
+		output->close();
+		fixture->info.bundle = true;
+		fixture->info.lzma2 = true;
+		fixture->info.size = first.size();
+		fixture->info.stored_size = stored.size();
+	}
+#ifdef TOOLS_ENABLED
+	const String path_a = "res://" + first_file.filename.get_file();
+	const String path_b = "res://" + second_file.filename.get_file();
+#else
+	const String path_a = first_file.filename;
+	const String path_b = second_file.filename;
+#endif
+	MountedPath mount_a(path_a);
+	MountedPath mount_b(path_b);
+	map_entry(path_a, first_file.info);
+	map_entry(path_b, second_file.info);
+	for (int repeat = 0; repeat < 2; repeat++) {
+		CHECK(FileAccess::get_file_as_bytes(path_a) == first);
+		CHECK(FileAccess::get_file_as_bytes(path_b) == second);
+	}
+}
+struct ConcurrentCacheReads {
+	String path;
+	Vector<uint8_t> first;
+	Vector<uint8_t> second;
+	std::atomic<int> failures{ 0 };
+	static void run(void *p_userdata) {
+		ConcurrentCacheReads *work = static_cast<ConcurrentCacheReads *>(p_userdata);
+		for (int i = 0; i < 64; i++) {
+			Error error = FAILED;
+			Ref<FileAccess> file = FileAccess::open(work->path, FileAccess::READ, &error);
+			if (error != OK || file.is_null()) {
+				work->failures.fetch_add(1, std::memory_order_relaxed);
+				continue;
+			}
+			const Vector<uint8_t> output = file->get_buffer(file->get_length());
+			if ((output != work->first && output != work->second) || file->get_error() != OK) {
+				work->failures.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+	}
+};
+TEST_CASE("[F14][PCKCache] Opens remain coherent while accepted mappings switch between immutable backing files") {
+	ScopedPackedData isolated;
+	Fixture first_file;
+	Fixture second_file;
+	ConcurrentCacheReads work;
+	work.path = first_file.logical;
+	work.first = bytes(2051);
+	work.second = work.first;
+	work.second.write[19] ^= 0x57;
+	first_file.write(literal_lzma2(work.first), work.first.size(), true);
+	second_file.write(literal_lzma2(work.second), work.second.size(), true);
+	MountedPath mounted(work.path);
+	map_entry(work.path, first_file.info);
+#ifdef THREADS_ENABLED
+	Thread readers[3];
+	for (Thread &reader : readers) {
+		reader.start(&ConcurrentCacheReads::run, &work);
+		CHECK(reader.is_started());
+	}
+#endif
+	for (int i = 0; i < 64; i++) {
+		map_entry(work.path, i % 2 ? first_file.info : second_file.info);
+#ifndef THREADS_ENABLED
+		Error error = FAILED;
+		Ref<FileAccess> file = FileAccess::open(work.path, FileAccess::READ, &error);
+		REQUIRE(error == OK);
+		REQUIRE(file.is_valid());
+		CHECK(file->get_buffer(file->get_length()) == (i % 2 ? work.first : work.second));
+#endif
+	}
+#ifdef THREADS_ENABLED
+	for (Thread &reader : readers) {
+		if (reader.is_started()) { reader.wait_to_finish(); }
+	}
+#else
+	ConcurrentCacheReads::run(&work);
+#endif
+	CHECK(work.failures.load(std::memory_order_relaxed) == 0);
+}
 TEST_CASE("[F08][PCK] Ordinary encryption and LZMA2 combinations preserve logical entry bytes") {
 	for (int size : { 1031, 2051, 3119, 4099, 5003 }) {
 		const Vector<uint8_t> payload = bytes(size);
@@ -572,17 +737,18 @@ TEST_CASE("[B01Compatibility] Cold and warm cached reads keep exact logical boun
 	Fixture fixture;
 	const Vector<uint8_t> payload = bytes(3119);
 	fixture.write(compressed(payload), payload.size(), true);
+	fixture.mount();
 	for (int repeat = 0; repeat < 2; repeat++) {
-		FileAccessPack pack(fixture.logical, fixture.info);
-		REQUIRE(pack.is_open());
+		Ref<FileAccess> pack = FileAccess::open(fixture.logical, FileAccess::READ);
+		REQUIRE(pack.is_valid());
 		Vector<uint8_t> output;
 		output.resize(payload.size());
-		CHECK(pack.get_buffer(output.ptrw(), UINT64_MAX) == uint64_t(payload.size()));
+		CHECK(pack->get_buffer(output.ptrw(), UINT64_MAX) == uint64_t(payload.size()));
 		CHECK(output == payload);
-		CHECK(pack.eof_reached());
-		pack.seek_end(-7);
-		CHECK(pack.get_error() == OK);
-		CHECK(pack.FileAccess::get_buffer(7) == payload.slice(payload.size() - 7));
+		CHECK(pack->eof_reached());
+		pack->seek_end(-7);
+		CHECK(pack->get_error() == OK);
+		CHECK(pack->get_buffer(7) == payload.slice(payload.size() - 7));
 	}
 }
 
@@ -656,6 +822,28 @@ static size_t vector_allocation_size(int64_t p_size) {
 	return first_allocation_size;
 }
 
+
+TEST_CASE("[F14][PCKCacheAllocation] A warm accepted entry reuses decoded storage") {
+	ScopedPackedData isolated;
+	Fixture fixture;
+	const Vector<uint8_t> payload = bytes(100003);
+	fixture.write(compressed(payload), payload.size(), true);
+	fixture.mount();
+	Ref<FileAccess> cold = FileAccess::open(fixture.logical, FileAccess::READ);
+	REQUIRE(cold.is_valid());
+	CHECK(cold->get_buffer(payload.size()) == payload);
+	const size_t exact = vector_allocation_size(payload.size());
+	Ref<FileAccess> warm;
+	Error error = FAILED;
+	{
+		AllocationFailure fault(exact, exact);
+		warm = FileAccess::open(fixture.logical, FileAccess::READ, &error);
+	}
+	CHECK(allocation_failures == 0);
+	REQUIRE(error == OK);
+	REQUIRE(warm.is_valid());
+	CHECK(warm->get_buffer(payload.size()) == payload);
+}
 TEST_CASE("[B01AllocationFault] Real allocator destination failure returns an empty result") {
 	const Vector<uint8_t> payload = bytes(5003);
 	const Vector<uint8_t> encoded = compressed(payload);

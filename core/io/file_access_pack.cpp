@@ -30,6 +30,7 @@
 
 #include "file_access_pack.h"
 
+#include "core/crypto/crypto_core.h"
 #include "core/io/file_access_encrypted.h"
 #include "core/io/file_access_patched.h"
 #include "core/io/pck_lzma.h"
@@ -47,8 +48,32 @@ struct PCKLzmaCacheEntry {
 	uint64_t last_use = 0;
 };
 
+struct PCKLzmaCacheKey {
+	uint64_t identity = 0;
+	uint64_t epoch = 0;
+	bool encrypted = false;
+	uint8_t encryption_domain[32] = {};
+
+	bool operator==(const PCKLzmaCacheKey &p_other) const {
+		return identity == p_other.identity && epoch == p_other.epoch && encrypted == p_other.encrypted &&
+				memcmp(encryption_domain, p_other.encryption_domain, sizeof(encryption_domain)) == 0;
+	}
+	static uint32_t hash(const PCKLzmaCacheKey &p_key) {
+		uint32_t h = hash_murmur3_one_64(p_key.identity);
+		h = hash_murmur3_one_64(p_key.epoch, h);
+		h = hash_murmur3_one_32(p_key.encrypted, h);
+		// The byte fingerprint follows a bool and need not be word-aligned.
+		// hash_murmur3_buffer reads native words, so give it aligned storage.
+		uint32_t domain_words[8];
+		memcpy(domain_words, p_key.encryption_domain, sizeof(domain_words));
+		return hash_murmur3_buffer(domain_words, sizeof(domain_words), h);
+	}
+};
+
 static Mutex pck_lzma_cache_mutex;
-static HashMap<String, PCKLzmaCacheEntry> pck_lzma_cache;
+static HashMap<PCKLzmaCacheKey, PCKLzmaCacheEntry, PCKLzmaCacheKey> pck_lzma_cache;
+static uint64_t pck_lzma_cache_epoch = 0;
+static bool pck_lzma_cache_identity_exhausted = false;
 static uint64_t pck_lzma_cache_total_size = 0;
 static uint64_t pck_lzma_cache_use_counter = 0;
 
@@ -62,13 +87,33 @@ static uint64_t _get_pck_lzma_cache_budget_bytes() {
 #endif
 }
 
-static String _get_pck_lzma_cache_key(const PackedData::PackedFile &p_pf) {
-	return p_pf.pack + "|" + String::num_uint64(p_pf.offset) + "|" + String::num_uint64(p_pf.stored_size) + "|" + String::num_uint64(p_pf.size);
+// Entry identity and epoch share one process-wide monotonic sequence. A
+// decode started before a mount mutation can never populate its successor.
+static uint64_t _invalidate_pck_lzma_cache() {
+	MutexLock lock(pck_lzma_cache_mutex);
+	pck_lzma_cache.clear();
+	pck_lzma_cache_total_size = 0;
+	pck_lzma_cache_use_counter = 0;
+	if (pck_lzma_cache_epoch == UINT64_MAX) {
+		pck_lzma_cache_identity_exhausted = true;
+	}
+	if (pck_lzma_cache_identity_exhausted) {
+		return 0;
+	}
+	return ++pck_lzma_cache_epoch;
 }
 
-static bool _get_pck_lzma_cached_data(const String &p_key, Vector<uint8_t> &r_data) {
+static uint64_t _get_pck_lzma_cache_epoch() {
 	MutexLock lock(pck_lzma_cache_mutex);
-	HashMap<String, PCKLzmaCacheEntry>::Iterator E = pck_lzma_cache.find(p_key);
+	return pck_lzma_cache_identity_exhausted ? 0 : pck_lzma_cache_epoch;
+}
+
+static bool _get_pck_lzma_cached_data(const PCKLzmaCacheKey &p_key, Vector<uint8_t> &r_data) {
+	MutexLock lock(pck_lzma_cache_mutex);
+	if (p_key.identity == 0 || p_key.epoch == 0 || p_key.epoch != pck_lzma_cache_epoch || pck_lzma_cache_identity_exhausted) {
+		return false;
+	}
+	HashMap<PCKLzmaCacheKey, PCKLzmaCacheEntry, PCKLzmaCacheKey>::Iterator E = pck_lzma_cache.find(p_key);
 	if (!E) {
 		return false;
 	}
@@ -77,7 +122,7 @@ static bool _get_pck_lzma_cached_data(const String &p_key, Vector<uint8_t> &r_da
 	return true;
 }
 
-static void _put_pck_lzma_cached_data(const String &p_key, const Vector<uint8_t> &p_data) {
+static void _put_pck_lzma_cached_data(const PCKLzmaCacheKey &p_key, const Vector<uint8_t> &p_data) {
 	const uint64_t budget = _get_pck_lzma_cache_budget_bytes();
 	const uint64_t data_size = p_data.size();
 	if (budget == 0 || data_size == 0 || data_size > (budget / 2)) {
@@ -85,7 +130,10 @@ static void _put_pck_lzma_cached_data(const String &p_key, const Vector<uint8_t>
 	}
 
 	MutexLock lock(pck_lzma_cache_mutex);
-	HashMap<String, PCKLzmaCacheEntry>::Iterator existing = pck_lzma_cache.find(p_key);
+	if (p_key.identity == 0 || p_key.epoch == 0 || p_key.epoch != pck_lzma_cache_epoch || pck_lzma_cache_identity_exhausted) {
+		return;
+	}
+	HashMap<PCKLzmaCacheKey, PCKLzmaCacheEntry, PCKLzmaCacheKey>::Iterator existing = pck_lzma_cache.find(p_key);
 	if (existing) {
 		if (existing->value.size <= pck_lzma_cache_total_size) {
 			pck_lzma_cache_total_size -= existing->value.size;
@@ -99,15 +147,15 @@ static void _put_pck_lzma_cached_data(const String &p_key, const Vector<uint8_t>
 	pck_lzma_cache_total_size += data_size;
 
 	while (pck_lzma_cache_total_size > budget && !pck_lzma_cache.is_empty()) {
-		String oldest_key;
+		PCKLzmaCacheKey oldest_key;
 		uint64_t oldest_use = (uint64_t)-1;
-		for (const KeyValue<String, PCKLzmaCacheEntry> &kv : pck_lzma_cache) {
+		for (const KeyValue<PCKLzmaCacheKey, PCKLzmaCacheEntry> &kv : pck_lzma_cache) {
 			if (kv.value.last_use < oldest_use) {
 				oldest_use = kv.value.last_use;
 				oldest_key = kv.key;
 			}
 		}
-		HashMap<String, PCKLzmaCacheEntry>::Iterator oldest = pck_lzma_cache.find(oldest_key);
+		HashMap<PCKLzmaCacheKey, PCKLzmaCacheEntry, PCKLzmaCacheKey>::Iterator oldest = pck_lzma_cache.find(oldest_key);
 		if (!oldest) {
 			break;
 		}
@@ -134,6 +182,7 @@ void PackedData::add_path(const String &p_pkg_path, const String &p_path, uint64
 	String simplified_path = p_path.simplify_path().trim_prefix("res://");
 	PathMD5 pmd5(simplified_path.md5_buffer());
 
+	MutexLock lock(files_mutex);
 	bool exists = files.has(pmd5);
 
 	PackedFile pf;
@@ -152,8 +201,10 @@ void PackedData::add_path(const String &p_pkg_path, const String &p_path, uint64
 	pf.src = p_src;
 
 	if (p_delta) {
+		pf.cache_identity = _invalidate_pck_lzma_cache();
 		delta_patches[pmd5].push_back(pf);
 	} else if (!exists || p_replace_files) {
+		pf.cache_identity = _invalidate_pck_lzma_cache();
 		files[pmd5] = pf;
 		delta_patches[pmd5].clear();
 	}
@@ -188,9 +239,14 @@ void PackedData::add_path(const String &p_pkg_path, const String &p_path, uint64
 void PackedData::remove_path(const String &p_path) {
 	String simplified_path = p_path.simplify_path().trim_prefix("res://");
 	PathMD5 pmd5(simplified_path.md5_buffer());
-	if (!files.has(pmd5)) {
+	MutexLock lock(files_mutex);
+	if (!files.has(pmd5) && !delta_patches.has(pmd5)) {
 		return;
 	}
+
+	files.erase(pmd5);
+	delta_patches.erase(pmd5);
+	_invalidate_pck_lzma_cache();
 
 	// Search for directory.
 	PackedDir *cd = root;
@@ -208,8 +264,6 @@ void PackedData::remove_path(const String &p_path) {
 	}
 
 	cd->files.erase(simplified_path.get_file());
-
-	files.erase(pmd5);
 }
 
 void PackedData::add_pack_source(PackSource *p_source) {
@@ -221,6 +275,7 @@ void PackedData::add_pack_source(PackSource *p_source) {
 uint8_t *PackedData::get_file_hash(const String &p_path) {
 	String simplified_path = p_path.simplify_path().trim_prefix("res://");
 	PathMD5 pmd5(simplified_path.md5_buffer());
+	MutexLock lock(files_mutex);
 	HashMap<PathMD5, PackedFile, PathMD5>::Iterator E = files.find(pmd5);
 	if (!E) {
 		return nullptr;
@@ -232,6 +287,7 @@ uint8_t *PackedData::get_file_hash(const String &p_path) {
 Vector<PackedData::PackedFile> PackedData::get_delta_patches(const String &p_path) const {
 	String simplified_path = p_path.simplify_path().trim_prefix("res://");
 	PathMD5 pmd5(simplified_path.md5_buffer());
+	MutexLock lock(files_mutex);
 	HashMap<PathMD5, Vector<PackedFile>, PathMD5>::ConstIterator E = delta_patches.find(pmd5);
 	if (!E) {
 		return Vector<PackedFile>();
@@ -243,6 +299,7 @@ Vector<PackedData::PackedFile> PackedData::get_delta_patches(const String &p_pat
 bool PackedData::has_delta_patches(const String &p_path) const {
 	String simplified_path = p_path.simplify_path().trim_prefix("res://");
 	PathMD5 pmd5(simplified_path.md5_buffer());
+	MutexLock lock(files_mutex);
 	HashMap<PathMD5, Vector<PackedFile>, PathMD5>::ConstIterator E = delta_patches.find(pmd5);
 	if (!E) {
 		return false;
@@ -252,6 +309,7 @@ bool PackedData::has_delta_patches(const String &p_path) const {
 }
 
 HashSet<String> PackedData::get_file_paths() const {
+	MutexLock lock(files_mutex);
 	HashSet<String> file_paths;
 	_get_file_paths(root, root->name, file_paths);
 	return file_paths;
@@ -268,6 +326,8 @@ void PackedData::_get_file_paths(PackedDir *p_dir, const String &p_parent_dir, H
 }
 
 void PackedData::clear() {
+	MutexLock lock(files_mutex);
+	_invalidate_pck_lzma_cache();
 	files.clear();
 	delta_patches.clear();
 	_free_packed_dirs(root);
@@ -720,6 +780,12 @@ FileAccessPack::FileAccessPack(const String &p_path, const PackedData::PackedFil
 }
 
 Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
+	PCKLzmaCacheKey cache_key;
+	if (pf.lzma2 && pf.cache_identity != 0) {
+		cache_key.identity = pf.cache_identity;
+		cache_key.epoch = _get_pck_lzma_cache_epoch();
+		cache_key.encrypted = pf.encrypted;
+	}
 	const String &p_path = path;
 	if (pf.bundle) {
 		String simplified_path = p_path.simplify_path();
@@ -789,6 +855,11 @@ Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
 			memcpy(key.ptrw(), script_encryption_key, 32);
 		}
 
+		if (pf.lzma2 && cache_key.identity != 0 && CryptoCore::sha256(key.ptr(), key.size(), cache_key.encryption_domain) != OK) {
+			// A cache-key failure must not alter verified file decoding.
+			cache_key.identity = 0;
+		}
+
 		Error err = fae->open_and_parse(f, key, FileAccessEncrypted::MODE_READ, false);
 		ERR_FAIL_COND_V_MSG(err != OK, err, vformat(R"(Can't open encrypted pack-referenced file "%s" from pack "%s" due to error "%s".)", p_path, pf.pack, error_names[err]));
 		f = fae;
@@ -798,7 +869,6 @@ Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
 		const uint64_t compressed_size = pf.encrypted ? f->get_length() : pf.stored_size;
 		ERR_FAIL_COND_V(pf.encrypted && pf.bundle && compressed_size != pf.stored_size, ERR_FILE_CORRUPT);
 		ERR_FAIL_COND_V_MSG(compressed_size > INT32_MAX, ERR_FILE_CORRUPT, vformat(R"(Compressed pack-referenced file "%s" is too large to decode in memory.)", p_path));
-		const String cache_key = _get_pck_lzma_cache_key(pf);
 		if (!_get_pck_lzma_cached_data(cache_key, cached_data)) {
 			Vector<uint8_t> compressed_data;
 			const Error allocation_error = compressed_data.resize(compressed_size);
