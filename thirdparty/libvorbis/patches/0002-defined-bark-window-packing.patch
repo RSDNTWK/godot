@@ -1,0 +1,13 @@
+Replace signed left shift of a potentially negative Bark lower-window index
+with exact multiplication by 65536. Vorbis block sizes are bounded by 8192;
+the long intermediate and packed signed 32-bit window retain their range.
+The signed upper-window extraction and low 16-bit upper bound are unchanged.
+
+--- a/thirdparty/libvorbis/psy.c
++++ b/thirdparty/libvorbis/psy.c
+@@ -318,4 +318,4 @@
+
+-    p->bark[i]=((lo-1)<<16)+(hi-1);
++    p->bark[i]=(lo-1)*65536+(hi-1);
+
+   }

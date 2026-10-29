@@ -1,0 +1,10 @@
+Bound both noise-offset interpolation endpoints within P_BANDS.
+At the final band, interpolate from the preceding band with weight one
+instead of reading a nonexistent next entry with weight zero.
+
+--- a/thirdparty/libvorbis/psy.c
++++ b/thirdparty/libvorbis/psy.c
+@@ -341,2 +341,3 @@
+     inthalfoc=(int)halfoc;
++    if(inthalfoc>=P_BANDS-1)inthalfoc=P_BANDS-2;
+     del=halfoc-inthalfoc;

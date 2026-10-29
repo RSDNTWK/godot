@@ -1,0 +1,15 @@
+Reuse an owned residue slot when both encoder modes configure the same number.
+The 5.1 short and long mappings both select LFE residue2. Reinitializing its
+plain-data structure preserves the final configuration without losing the
+previous allocation; vorbis_info_clear remains the single owner cleanup.
+
+--- a/thirdparty/libvorbis/vorbisenc.c
++++ b/thirdparty/libvorbis/vorbisenc.c
+@@ -461,5 +461,5 @@
+
+-  vorbis_info_residue0 *r=ci->residue_param[number]=
+-    _ogg_malloc(sizeof(*r));
++  vorbis_info_residue0 *r=ci->residue_param[number];
++  if(!r)r=ci->residue_param[number]=_ogg_malloc(sizeof(*r));
+
+   memcpy(r,res->res,sizeof(*r));

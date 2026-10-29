@@ -459,8 +459,8 @@ static void vorbis_encode_residue_setup(vorbis_info *vi,
   codec_setup_info *ci=vi->codec_setup;
   int i;
 
-  vorbis_info_residue0 *r=ci->residue_param[number]=
-    _ogg_malloc(sizeof(*r));
+  vorbis_info_residue0 *r=ci->residue_param[number];
+  if(!r)r=ci->residue_param[number]=_ogg_malloc(sizeof(*r));
 
   memcpy(r,res->res,sizeof(*r));
   if(ci->residues<=number)ci->residues=number+1;

@@ -1,0 +1,11 @@
+Double a negative floor prediction deviation using defined signed arithmetic.
+Floor values and predictions are bounded by the quantizer (at most256),
+so multiplication by two retains the intended representable folded code.
+
+--- a/thirdparty/libvorbis/floor1.c
++++ b/thirdparty/libvorbis/floor1.c
+@@ -819,3 +819,3 @@
+           else
+-            val=-1-(val<<1);
++            val=-1-val*2;
+         else
