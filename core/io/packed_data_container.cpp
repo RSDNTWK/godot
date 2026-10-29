@@ -33,6 +33,8 @@
 #include "core/io/marshalls.h"
 #include "core/object/class_db.h"
 
+#include <climits>
+
 Variant PackedDataContainer::getvar(const Variant &p_key, bool *r_valid) const {
 	bool err = false;
 	Variant ret = _key_at_ofs(0, p_key, err);
@@ -51,8 +53,8 @@ int PackedDataContainer::size() const {
 
 Variant PackedDataContainer::_iter_init_ofs(const Array &p_iter, uint32_t p_offset) {
 	Array ref = p_iter;
-	uint32_t size = _size(p_offset);
-	if (size == 0 || ref.size() != 1) {
+	int size = _size(p_offset);
+	if (size <= 0 || ref.size() != 1) {
 		return false;
 	} else {
 		ref[0] = 0;
@@ -88,11 +90,11 @@ Variant PackedDataContainer::_iter_get_ofs(const Variant &p_iter, uint32_t p_off
 
 	bool err = false;
 	if (type == TYPE_ARRAY) {
-		uint32_t vpos = decode_uint32(rd + p_offset + 8 + pos * 4);
+		uint32_t vpos = decode_uint32(rd + uint64_t(p_offset) + 8 + uint64_t(pos) * 4);
 		return _get_at_ofs(vpos, rd, err);
 
 	} else if (type == TYPE_DICT) {
-		uint32_t vpos = decode_uint32(rd + p_offset + 8 + pos * 12 + 4);
+		uint32_t vpos = decode_uint32(rd + uint64_t(p_offset) + 8 + uint64_t(pos) * 12 + 4);
 		return _get_at_ofs(vpos, rd, err);
 	} else {
 		ERR_FAIL_V(Variant());
@@ -100,30 +102,37 @@ Variant PackedDataContainer::_iter_get_ofs(const Variant &p_iter, uint32_t p_off
 }
 
 Variant PackedDataContainer::_get_at_ofs(uint32_t p_ofs, const uint8_t *p_buf, bool &err) const {
-	ERR_FAIL_COND_V(p_ofs + 4 > (uint32_t)data.size(), Variant());
+	err = true;
+	const int64_t remaining = data.size() - int64_t(p_ofs);
+	ERR_FAIL_COND_V(remaining < 4, Variant());
 	uint32_t type = decode_uint32(p_buf + p_ofs);
 
 	if (type == TYPE_ARRAY || type == TYPE_DICT) {
+		uint32_t container_type;
+		uint32_t count;
+		ERR_FAIL_COND_V(!_read_container_header(p_ofs, container_type, count), Variant());
 		Ref<PackedDataContainerRef> pdcr = memnew(PackedDataContainerRef);
 		Ref<PackedDataContainer> pdc = Ref<PackedDataContainer>(const_cast<PackedDataContainer *>(this));
 
 		pdcr->from = pdc;
 		pdcr->offset = p_ofs;
+		err = false;
 		return pdcr;
 	} else {
 		Variant v;
-		Error rerr = decode_variant(v, p_buf + p_ofs, datalen - p_ofs, nullptr, false);
+		Error rerr = decode_variant(v, p_buf + p_ofs, int(MIN(remaining, int64_t(INT_MAX))), nullptr, false);
 
 		if (rerr != OK) {
 			err = true;
 			ERR_FAIL_COND_V_MSG(err != OK, Variant(), "Error when trying to decode Variant.");
 		}
+		err = false;
 		return v;
 	}
 }
 
 uint32_t PackedDataContainer::_type_at_ofs(uint32_t p_ofs) const {
-	ERR_FAIL_COND_V(p_ofs + 4 > (uint32_t)data.size(), 0);
+	ERR_FAIL_COND_V(data.size() - int64_t(p_ofs) < 4, 0);
 	const uint8_t *rd = data.ptr();
 	ERR_FAIL_NULL_V(rd, 0);
 	const uint8_t *r = &rd[p_ofs];
@@ -132,44 +141,51 @@ uint32_t PackedDataContainer::_type_at_ofs(uint32_t p_ofs) const {
 	return type;
 }
 
-int PackedDataContainer::_size(uint32_t p_ofs) const {
-	ERR_FAIL_COND_V(p_ofs + 4 > (uint32_t)data.size(), 0);
-	const uint8_t *rd = data.ptr();
-	ERR_FAIL_NULL_V(rd, 0);
-	const uint8_t *r = &rd[p_ofs];
-	uint32_t type = decode_uint32(r);
-
-	if (type == TYPE_ARRAY) {
-		uint32_t len = decode_uint32(r + 4);
-		return len;
-
-	} else if (type == TYPE_DICT) {
-		uint32_t len = decode_uint32(r + 4);
-		return len;
+bool PackedDataContainer::_read_container_header(uint32_t p_ofs, uint32_t &r_type, uint32_t &r_count) const {
+	const int64_t remaining = data.size() - int64_t(p_ofs);
+	if (remaining < 8) {
+		return false;
 	}
+	const uint8_t *header = data.ptr() + p_ofs;
+	r_type = decode_uint32(header);
+	if (r_type != TYPE_ARRAY && r_type != TYPE_DICT) {
+		return false;
+	}
+	r_count = decode_uint32(header + 4);
+	const int stride = r_type == TYPE_ARRAY ? 4 : 12;
+	// Check the immediate table on every access: nested refs retain a live owner.
+	// Children are checked lazily, preserving shared and backward offsets.
+	return r_count <= uint32_t(INT_MAX) && int64_t(r_count) <= (remaining - 8) / stride;
+}
 
-	return -1;
+int PackedDataContainer::_size(uint32_t p_ofs) const {
+	uint32_t type;
+	uint32_t count;
+	ERR_FAIL_COND_V(!_read_container_header(p_ofs, type, count), 0);
+	return int(count);
 }
 
 Variant PackedDataContainer::_key_at_ofs(uint32_t p_ofs, const Variant &p_key, bool &err) const {
-	ERR_FAIL_COND_V(p_ofs + 4 > (uint32_t)data.size(), Variant());
+	err = true;
+	uint32_t type;
+	uint32_t count;
+	ERR_FAIL_COND_V(!_read_container_header(p_ofs, type, count), Variant());
 	const uint8_t *rd = data.ptr();
 	if (!rd) {
 		err = true;
 		ERR_FAIL_NULL_V(rd, Variant());
 	}
 	const uint8_t *r = &rd[p_ofs];
-	uint32_t type = decode_uint32(r);
 
 	if (type == TYPE_ARRAY) {
 		if (p_key.is_num()) {
 			int idx = p_key;
-			int len = decode_uint32(r + 4);
+			int len = int(count);
 			if (idx < 0 || idx >= len) {
 				err = true;
 				return Variant();
 			}
-			uint32_t ofs = decode_uint32(r + 8 + 4 * idx);
+			uint32_t ofs = decode_uint32(r + 8 + uint64_t(idx) * 4);
 			return _get_at_ofs(ofs, rd, err);
 
 		} else {
@@ -179,19 +195,19 @@ Variant PackedDataContainer::_key_at_ofs(uint32_t p_ofs, const Variant &p_key, b
 
 	} else if (type == TYPE_DICT) {
 		uint32_t hash = p_key.hash();
-		uint32_t len = decode_uint32(r + 4);
+		uint32_t len = count;
 
 		bool found = false;
 		for (uint32_t i = 0; i < len; i++) {
-			uint32_t khash = decode_uint32(r + 8 + i * 12 + 0);
+			uint32_t khash = decode_uint32(r + 8 + uint64_t(i) * 12 + 0);
 			if (khash == hash) {
-				Variant key = _get_at_ofs(decode_uint32(r + 8 + i * 12 + 4), rd, err);
+				Variant key = _get_at_ofs(decode_uint32(r + 8 + uint64_t(i) * 12 + 4), rd, err);
 				if (err) {
 					return Variant();
 				}
 				if (key == p_key) {
 					//key matches, return value
-					return _get_at_ofs(decode_uint32(r + 8 + i * 12 + 8), rd, err);
+					return _get_at_ofs(decode_uint32(r + 8 + uint64_t(i) * 12 + 8), rd, err);
 				}
 				found = true;
 			} else {

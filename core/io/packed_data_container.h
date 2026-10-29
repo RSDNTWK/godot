@@ -63,6 +63,7 @@ class PackedDataContainer : public Resource {
 	Variant _key_at_ofs(uint32_t p_ofs, const Variant &p_key, bool &err) const;
 	Variant _get_at_ofs(uint32_t p_ofs, const uint8_t *p_buf, bool &err) const;
 	uint32_t _type_at_ofs(uint32_t p_ofs) const;
+	bool _read_container_header(uint32_t p_ofs, uint32_t &r_type, uint32_t &r_count) const;
 	int _size(uint32_t p_ofs) const;
 
 protected:
