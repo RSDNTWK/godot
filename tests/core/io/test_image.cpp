@@ -38,7 +38,106 @@ TEST_FORCE_LINK(test_image)
 
 #include "modules/modules_enabled.gen.h" // For bmp, jpg, svg, webp, tga.
 
+#ifdef MODULE_JPG_ENABLED
+#include "tests/core/io/jpeg_test_helpers.h"
+#endif
+
 namespace TestImage {
+
+#ifdef MODULE_JPG_ENABLED
+TEST_CASE("[F02][JPEG] Existing RGB and grayscale buffer and file paths agree") {
+	const char *fixtures[] = { "images/icon.jpg", "images/grayscale.jpg" };
+	for (int i = 0; i < 2; i++) {
+		const String path = TestUtils::get_data_path(fixtures[i]);
+		const Vector<uint8_t> encoded = FileAccess::get_file_as_bytes(path);
+		REQUIRE_FALSE(encoded.is_empty());
+		const int frame = TestJPEG::frame_offset(encoded);
+		REQUIRE(frame >= 0);
+		const int height = (int(encoded[frame + 1]) << 8) | encoded[frame + 2];
+		const int width = (int(encoded[frame + 3]) << 8) | encoded[frame + 4];
+		for (int iteration = 0; iteration < 3; iteration++) {
+			Ref<Image> direct = memnew(Image);
+			REQUIRE(jpeg_turbo_load_image_from_buffer(direct.ptr(), encoded.ptr(), encoded.size()) == OK);
+			CHECK(direct->get_width() == width);
+			CHECK(direct->get_height() == height);
+			CHECK(direct->get_format() == (i == 0 ? Image::FORMAT_RGB8 : Image::FORMAT_L8));
+			CHECK(direct->get_data().size() == int64_t(width) * height * (i == 0 ? 3 : 1));
+			Ref<Image> public_buffer = memnew(Image);
+			REQUIRE(public_buffer->load_jpg_from_buffer(encoded) == OK);
+			CHECK(public_buffer->get_data() == direct->get_data());
+			Ref<Image> public_file = memnew(Image);
+			REQUIRE(public_file->load(path) == OK);
+			CHECK(public_file->get_data() == direct->get_data());
+		}
+	}
+}
+
+TEST_CASE("[F02][JPEG] Ordinary encoded pixels and recoverable warnings remain supported") {
+	Ref<Image> source = memnew(Image(17, 9, false, Image::FORMAT_RGB8));
+	source->fill(Color(0.25, 0.5, 0.75));
+	const Vector<uint8_t> encoded = source->save_jpg_to_buffer(1.0);
+	REQUIRE_FALSE(encoded.is_empty());
+	Ref<Image> destination = memnew(Image);
+	REQUIRE(destination->load_jpg_from_buffer(encoded) == OK);
+	CHECK(destination->get_width() == 17);
+	CHECK(destination->get_height() == 9);
+	const Color decoded = destination->get_pixel(8, 4);
+	CHECK(Math::abs(decoded.r - 0.25) < 0.02);
+	CHECK(Math::abs(decoded.g - 0.5) < 0.02);
+	CHECK(Math::abs(decoded.b - 0.75) < 0.02);
+	Vector<uint8_t> missing_eoi = encoded;
+	REQUIRE(missing_eoi[missing_eoi.size() - 2] == 0xff);
+	REQUIRE(missing_eoi[missing_eoi.size() - 1] == 0xd9);
+	missing_eoi.resize(missing_eoi.size() - 2);
+	REQUIRE(jpeg_turbo_load_image_from_buffer(destination.ptr(), missing_eoi.ptr(), missing_eoi.size()) == OK);
+	CHECK(destination->get_data().size() == 17 * 9 * 3);
+}
+
+TEST_CASE("[F02][JPEG] Oversized dimensions reject before destination decoding") {
+	const int dimensions[][2] = { { 16385, 16384 }, { 65500, 65500 }, { 65500, 21858 } };
+	for (const char *fixture : { "images/icon.jpg", "images/grayscale.jpg" }) {
+		const Vector<uint8_t> encoded = FileAccess::get_file_as_bytes(TestUtils::get_data_path(fixture));
+		REQUIRE_FALSE(encoded.is_empty());
+		for (const auto &size : dimensions) {
+			Vector<uint8_t> oversized = encoded;
+			REQUIRE(TestJPEG::dimensions(oversized, size[0], size[1]));
+			Ref<Image> destination = memnew(Image(2, 3, false, Image::FORMAT_RGBA8));
+			destination->fill(Color(0.25, 0.5, 0.75, 1.0));
+			const Vector<uint8_t> original = destination->get_data();
+			CHECK(jpeg_turbo_load_image_from_buffer(destination.ptr(), oversized.ptr(), oversized.size()) == ERR_FILE_CORRUPT);
+			CHECK(destination->get_width() == 2);
+			CHECK(destination->get_height() == 3);
+			CHECK(destination->get_data() == original);
+		}
+	}
+}
+
+TEST_CASE("[F02][JPEG] Invalid headers and unsupported precision preserve the destination") {
+	const Vector<uint8_t> encoded = FileAccess::get_file_as_bytes(TestUtils::get_data_path("images/icon.jpg"));
+	REQUIRE_FALSE(encoded.is_empty());
+	const int frame = TestJPEG::frame_offset(encoded);
+	REQUIRE(frame >= 0);
+	Ref<Image> destination = memnew(Image(2, 2, false, Image::FORMAT_RGB8));
+	destination->fill(Color(0.25, 0.5, 0.75));
+	const Vector<uint8_t> original = destination->get_data();
+	const int lengths[] = { 0, 1, 2, frame };
+	for (int length : lengths) {
+		CHECK(jpeg_turbo_load_image_from_buffer(destination.ptr(), encoded.ptr(), length) == ERR_FILE_CORRUPT);
+		CHECK(destination->get_data() == original);
+	}
+	Vector<uint8_t> zero_dimension = encoded;
+	REQUIRE(TestJPEG::dimensions(zero_dimension, 0, 1));
+	CHECK(jpeg_turbo_load_image_from_buffer(destination.ptr(), zero_dimension.ptr(), zero_dimension.size()) == ERR_FILE_CORRUPT);
+	CHECK(destination->get_data() == original);
+	Vector<uint8_t> precision = encoded;
+	precision.write[frame] = 12;
+	ERR_PRINT_OFF;
+	CHECK(jpeg_turbo_load_image_from_buffer(destination.ptr(), precision.ptr(), precision.size()) == ERR_UNAVAILABLE);
+	ERR_PRINT_ON;
+	CHECK(destination->get_data() == original);
+	REQUIRE(destination->load_jpg_from_buffer(encoded) == OK);
+}
+#endif // MODULE_JPG_ENABLED
 
 TEST_CASE("[Image] Instantiation") {
 	Ref<Image> image = memnew(Image(8, 4, false, Image::FORMAT_RGBA8));
@@ -154,7 +253,7 @@ TEST_CASE("[Image] Saving and loading") {
 	data_grayscale_jpg.resize(f_grayscale_jpg->get_length() + 1);
 	f_grayscale_jpg->get_buffer(data_grayscale_jpg.ptrw(), f_grayscale_jpg->get_length());
 	CHECK_MESSAGE(
-			image_jpg->load_jpg_from_buffer(data_grayscale_jpg) == OK,
+			image_grayscale_jpg->load_jpg_from_buffer(data_grayscale_jpg) == OK,
 			"The grayscale JPG image should load successfully.");
 
 	// Save JPG

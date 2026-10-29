@@ -43,8 +43,8 @@ Error jpeg_turbo_load_image_from_buffer(Image *p_image, const uint8_t *p_buffer,
 		return ERR_FILE_CORRUPT;
 	}
 
-	const unsigned int width = tj3Get(tj_instance, TJPARAM_JPEGWIDTH);
-	const unsigned int height = tj3Get(tj_instance, TJPARAM_JPEGHEIGHT);
+	const int width = tj3Get(tj_instance, TJPARAM_JPEGWIDTH);
+	const int height = tj3Get(tj_instance, TJPARAM_JPEGHEIGHT);
 	const TJCS colorspace = (TJCS)tj3Get(tj_instance, TJPARAM_COLORSPACE);
 
 	if (tj3Get(tj_instance, TJPARAM_PRECISION) > 8) {
@@ -69,8 +69,18 @@ Error jpeg_turbo_load_image_from_buffer(Image *p_image, const uint8_t *p_buffer,
 		gd_pixel_format = Image::FORMAT_RGB8;
 	}
 
+	if (width <= 0 || height <= 0 || width > Image::MAX_WIDTH || height > Image::MAX_HEIGHT ||
+			int64_t(width) * height > Image::MAX_PIXELS) {
+		tj3Destroy(tj_instance);
+		return ERR_FILE_CORRUPT;
+	}
+
 	Vector<uint8_t> data;
-	data.resize(width * height * tjPixelSize[tj_pixel_format]);
+	const Error allocation_error = data.resize(int64_t(width) * height * tjPixelSize[tj_pixel_format]);
+	if (allocation_error != OK) {
+		tj3Destroy(tj_instance);
+		return allocation_error;
+	}
 
 	if (tj3Decompress8(tj_instance, p_buffer, p_buffer_len, data.ptrw(), 0, tj_pixel_format) < 0) {
 		if (tj3GetErrorCode(tj_instance) == TJERR_FATAL) {

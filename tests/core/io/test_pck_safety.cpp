@@ -42,6 +42,11 @@ TEST_FORCE_LINK(test_pck_safety)
 #include "core/os/os.h"
 #include "tests/test_utils.h"
 
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_JPG_ENABLED
+#include "tests/core/io/jpeg_test_helpers.h"
+#endif
+
 #include <cstring>
 
 namespace TestPCKSafety {
@@ -574,6 +579,54 @@ TEST_CASE("[B01CombinedFault] Output allocation failure propagates through packe
 	CHECK(error == OK);
 	CHECK(result->get_buffer(payload.size()) == payload);
 }
+
+#ifdef MODULE_JPG_ENABLED
+TEST_CASE("[F02AllocationFault][JPEG] Output allocation failure is propagated and retry succeeds") {
+	Ref<Image> source = memnew(Image(257, 113, false, Image::FORMAT_RGB8));
+	source->fill(Color(0.25, 0.5, 0.75));
+	const Vector<uint8_t> encoded = source->save_jpg_to_buffer(0.9);
+	REQUIRE_FALSE(encoded.is_empty());
+	Ref<Image> destination = memnew(Image(2, 3, false, Image::FORMAT_L8));
+	const Vector<uint8_t> original = destination->get_data();
+	const size_t allocation_size = vector_allocation_size(257 * 113 * 3);
+	Error result;
+	ErrorsOff quiet;
+	{
+		AllocationFailure fault(allocation_size, allocation_size);
+		result = jpeg_turbo_load_image_from_buffer(destination.ptr(), encoded.ptr(), encoded.size());
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(result == ERR_OUT_OF_MEMORY);
+	CHECK(destination->get_width() == 2);
+	CHECK(destination->get_height() == 3);
+	CHECK(destination->get_data() == original);
+	REQUIRE(jpeg_turbo_load_image_from_buffer(destination.ptr(), encoded.ptr(), encoded.size()) == OK);
+	CHECK(destination->get_data().size() == 257 * 113 * 3);
+}
+
+TEST_CASE("[F02AllocationFault][JPEG] Pixel-limit boundary reaches checked allocation without allocating it") {
+	const Vector<uint8_t> encoded = FileAccess::get_file_as_bytes(TestUtils::get_data_path("images/icon.jpg"));
+	REQUIRE_FALSE(encoded.is_empty());
+	const int dimensions[][2] = { { 16384, 16384 }, { 16384, 16383 } };
+	for (const auto &size : dimensions) {
+		Vector<uint8_t> boundary = encoded;
+		REQUIRE(TestJPEG::dimensions(boundary, size[0], size[1]));
+		Ref<Image> destination = memnew(Image(2, 3, false, Image::FORMAT_L8));
+		const Vector<uint8_t> original = destination->get_data();
+		Error result;
+		ErrorsOff quiet;
+		{
+			AllocationFailure fault(size_t(size[0]) * size[1] * 3, SIZE_MAX);
+			result = jpeg_turbo_load_image_from_buffer(destination.ptr(), boundary.ptr(), boundary.size());
+		}
+		CHECK(allocation_failures == 1);
+		CHECK(result == ERR_OUT_OF_MEMORY);
+		CHECK(destination->get_width() == 2);
+		CHECK(destination->get_height() == 3);
+		CHECK(destination->get_data() == original);
+	}
+}
+#endif // MODULE_JPG_ENABLED
 #endif
 
 } // namespace TestPCKSafety
