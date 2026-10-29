@@ -169,10 +169,11 @@ ENetConnection::EventType ENetConnection::service(int p_timeout, Event &r_event)
 	// enet_peer_disconnect*) do not trigger DISCONNECTED events.
 	List<Ref<ENetPacketPeer>>::Element *E = peers.front();
 	while (E) {
+		List<Ref<ENetPacketPeer>>::Element *next = E->next();
 		if (!E->get()->is_active()) {
-			peers.erase(E->get());
+			peers.erase(E);
 		}
-		E = E->next();
+		E = next;
 	}
 
 	ENetEvent event;
