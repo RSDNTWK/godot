@@ -42,6 +42,12 @@
 #include <cstring>
 namespace {
 
+#ifdef TOOLS_ENABLED
+constexpr bool pck_key_override_enabled = true;
+#else
+constexpr bool pck_key_override_enabled = false;
+#endif
+
 struct PCKLzmaCacheEntry {
 	Vector<uint8_t> data;
 	uint64_t size = 0;
@@ -167,6 +173,30 @@ static void _put_pck_lzma_cached_data(const PCKLzmaCacheKey &p_key, const Vector
 }
 
 } // namespace
+
+Error PCKEncryption::select_key(const Vector<uint8_t> &p_override, const uint8_t (&p_compiled)[32], bool p_allow_override, Vector<uint8_t> &r_key) {
+	if (p_allow_override && !p_override.is_empty()) {
+		if (p_override.size() != 32) {
+			r_key.clear();
+			return ERR_INVALID_PARAMETER;
+		}
+		constexpr uint8_t empty_key[32] = {};
+		if (memcmp(p_compiled, empty_key, sizeof(empty_key)) == 0) {
+			r_key = p_override;
+			return OK;
+		}
+	}
+
+	Vector<uint8_t> key;
+	const Error allocation_error = key.resize(32);
+	if (allocation_error != OK) {
+		r_key.clear();
+		return allocation_error;
+	}
+	memcpy(key.ptrw(), p_compiled, 32);
+	r_key = key;
+	return OK;
+}
 
 Error PackedData::add_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key) {
 	for (int i = 0; i < sources.size(); i++) {
@@ -476,19 +506,8 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 		ERR_FAIL_COND_V_MSG(fae.is_null(), false, "Can't open encrypted pack directory.");
 
 		Vector<uint8_t> key;
-#ifdef TOOLS_ENABLED
-		if (!p_decryption_key.is_empty()) {
-			ERR_FAIL_COND_V_MSG(p_decryption_key.size() != 32, false, "Decryption key must be 256-bit.");
-			constexpr uint8_t empty_key[32] = {};
-			if (memcmp(script_encryption_key, empty_key, sizeof(empty_key)) == 0) {
-				key = p_decryption_key;
-			}
-		} else
-#endif
-		{
-			key.resize(32);
-			memcpy(key.ptrw(), script_encryption_key, 32);
-		}
+		const Error key_error = PCKEncryption::select_key(p_decryption_key, script_encryption_key, pck_key_override_enabled, key);
+		ERR_FAIL_COND_V_MSG(key_error != OK, false, "Can't prepare encrypted pack directory key.");
 
 		Error err = fae->open_and_parse(f, key, FileAccessEncrypted::MODE_READ, false);
 		ERR_FAIL_COND_V_MSG(err, false, "Can't open encrypted pack directory.");
@@ -840,20 +859,8 @@ Error FileAccessPack::_open_pack(const Vector<uint8_t> &p_decryption_key) {
 		ERR_FAIL_COND_V_MSG(fae.is_null(), ERR_OUT_OF_MEMORY, vformat(R"(Can't open encrypted pack-referenced file "%s" from pack "%s".)", p_path, pf.pack));
 
 		Vector<uint8_t> key;
-#ifdef TOOLS_ENABLED
-		if (!p_decryption_key.is_empty()) {
-			ERR_FAIL_COND_V_MSG(p_decryption_key.size() != 32, ERR_INVALID_PARAMETER, "Decryption key must be 256-bit.");
-			constexpr uint8_t empty_key[32] = {};
-			if (memcmp(script_encryption_key, empty_key, sizeof(empty_key)) == 0) {
-				key = p_decryption_key;
-			}
-		} else
-#endif
-		{
-			const Error allocation_error = key.resize(32);
-			ERR_FAIL_COND_V(allocation_error != OK, allocation_error);
-			memcpy(key.ptrw(), script_encryption_key, 32);
-		}
+		const Error key_error = PCKEncryption::select_key(p_decryption_key, script_encryption_key, pck_key_override_enabled, key);
+		ERR_FAIL_COND_V_MSG(key_error != OK, key_error, "Can't prepare encrypted pack entry key.");
 
 		if (pf.lzma2 && cache_key.identity != 0 && CryptoCore::sha256(key.ptr(), key.size(), cache_key.encryption_domain) != OK) {
 			// A cache-key failure must not alter verified file decoding.

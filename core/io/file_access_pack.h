@@ -62,6 +62,10 @@ enum PackFileFlags {
 	PACK_FILE_LZMA2 = 1 << 3,
 };
 
+namespace PCKEncryption {
+Error select_key(const Vector<uint8_t> &p_override, const uint8_t (&p_compiled)[32], bool p_allow_override, Vector<uint8_t> &r_key);
+}
+
 class PackSource;
 
 namespace TestPCKSafety {

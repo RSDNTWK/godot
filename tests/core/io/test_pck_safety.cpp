@@ -468,6 +468,65 @@ TEST_CASE("[N002][PCKDelta] Incomplete staging and unsupported bundle patches re
 		CHECK(reader->get_error() == failure);
 	}
 }
+
+TEST_CASE("[N009][PCKKey] Compiled-key priority and eligible override policy always produce full keys") {
+	uint8_t compiled[32];
+	constexpr uint8_t empty[32] = {};
+	for (int i = 0; i < 32; i++) { compiled[i] = i; }
+	Vector<uint8_t> provided = bytes(32);
+	Vector<uint8_t> short_key = bytes(3);
+	Vector<uint8_t> selected;
+	for (bool allow : { false, true }) {
+		REQUIRE(PCKEncryption::select_key(Vector<uint8_t>(), compiled, allow, selected) == OK);
+		REQUIRE(selected.size() == 32);
+		CHECK(memcmp(selected.ptr(), compiled, 32) == 0);
+		REQUIRE(PCKEncryption::select_key(provided, compiled, allow, selected) == OK);
+		REQUIRE(selected.size() == 32);
+		CHECK(memcmp(selected.ptr(), compiled, 32) == 0);
+		REQUIRE(PCKEncryption::select_key(Vector<uint8_t>(), empty, allow, selected) == OK);
+		REQUIRE(selected.size() == 32);
+		CHECK(memcmp(selected.ptr(), empty, 32) == 0);
+		REQUIRE(PCKEncryption::select_key(provided, empty, allow, selected) == OK);
+		if (allow) {
+			CHECK(selected == provided);
+		} else {
+			CHECK(memcmp(selected.ptr(), empty, 32) == 0);
+		}
+	}
+	REQUIRE(PCKEncryption::select_key(short_key, compiled, false, selected) == OK);
+	CHECK(memcmp(selected.ptr(), compiled, 32) == 0);
+}
+TEST_CASE("[N009][PCKKey] A valid compiled key remains usable when a different override is supplied") {
+	uint8_t compiled[32];
+	for (int i = 0; i < 32; i++) { compiled[i] = i; }
+	const Vector<uint8_t> encrypted = TestEncryptedSafety::stream(17, false);
+	Vector<uint8_t> selected;
+	REQUIRE(PCKEncryption::select_key(bytes(32), compiled, true, selected) == OK);
+	Ref<FileAccessMemory> source;
+	source.instantiate();
+	REQUIRE(source->open_custom(encrypted.ptr(), encrypted.size()) == OK);
+	FileAccessEncrypted reader;
+	REQUIRE(reader.open_and_parse(source, selected, FileAccessEncrypted::MODE_READ, false) == OK);
+	Vector<uint8_t> expected;
+	REQUIRE(expected.resize(17) == OK);
+	for (int i = 0; i < 17; i++) { expected.write[i] = i; }
+	CHECK(reader.FileAccess::get_buffer(expected.size()) == expected);
+}
+TEST_CASE("[N009][PCKKey] Eligible invalid overrides clear output and valid aliasing remains safe") {
+	uint8_t compiled[32];
+	constexpr uint8_t empty[32] = {};
+	for (int i = 0; i < 32; i++) { compiled[i] = i; }
+	const Vector<uint8_t> provided = bytes(32);
+	Vector<uint8_t> selected = provided;
+	CHECK(PCKEncryption::select_key(bytes(3), compiled, true, selected) == ERR_INVALID_PARAMETER);
+	CHECK(selected.is_empty());
+	selected = provided;
+	CHECK(PCKEncryption::select_key(bytes(3), empty, true, selected) == ERR_INVALID_PARAMETER);
+	CHECK(selected.is_empty());
+	selected = provided;
+	CHECK(PCKEncryption::select_key(selected, empty, true, selected) == OK);
+	CHECK(selected == provided);
+}
 TEST_CASE("[F08][PCK] Ordinary encryption and LZMA2 combinations preserve logical entry bytes") {
 	for (int size : { 1031, 2051, 3119, 4099, 5003 }) {
 		const Vector<uint8_t> payload = bytes(size);
@@ -1013,6 +1072,31 @@ TEST_CASE("[N002][PCKDeltaAllocation] Whole-base staging allocation failure stay
 	REQUIRE(retry.is_valid());
 	CHECK(retry->get_length() == uint64_t(expected.size()));
 	CHECK(retry->get_buffer(expected.size()) == expected);
+}
+
+TEST_CASE("[N009][PCKKeyAllocation] Failed default and compiled fallback allocations never publish a key") {
+	ErrorsOff quiet;
+	uint8_t compiled[32];
+	constexpr uint8_t empty[32] = {};
+	for (int i = 0; i < 32; i++) { compiled[i] = i; }
+	const Vector<uint8_t> provided = bytes(32);
+	const size_t exact = vector_allocation_size(32);
+	for (int mode = 0; mode < 2; mode++) {
+		Vector<uint8_t> selected = provided;
+		const Vector<uint8_t> override_key = mode ? provided : Vector<uint8_t>();
+		Error error;
+		{
+			AllocationFailure fault(exact, exact);
+			error = mode ? PCKEncryption::select_key(override_key, compiled, true, selected) :
+					PCKEncryption::select_key(override_key, empty, true, selected);
+		}
+		CHECK(allocation_failures == 1);
+		CHECK(error == ERR_OUT_OF_MEMORY);
+		CHECK(selected.is_empty());
+		CHECK(PCKEncryption::select_key(override_key, compiled, true, selected) == OK);
+		REQUIRE(selected.size() == 32);
+		CHECK(memcmp(selected.ptr(), compiled, 32) == 0);
+	}
 }
 TEST_CASE("[B01AllocationFault] Real allocator destination failure returns an empty result") {
 	const Vector<uint8_t> payload = bytes(5003);
