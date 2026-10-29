@@ -120,47 +120,32 @@ Vector<uint8_t> _webp_packer(const Ref<Image> &p_image, float p_quality, bool p_
 }
 
 Ref<Image> _webp_unpack(const Vector<uint8_t> &p_buffer) {
-	int size = p_buffer.size();
-	ERR_FAIL_COND_V(size <= 0, Ref<Image>());
-	const uint8_t *r = p_buffer.ptr();
-
-	// A WebP file uses a RIFF header, which starts with "RIFF____WEBP".
-	ERR_FAIL_COND_V(r[0] != 'R' || r[1] != 'I' || r[2] != 'F' || r[3] != 'F' || r[8] != 'W' || r[9] != 'E' || r[10] != 'B' || r[11] != 'P', Ref<Image>());
-	WebPBitstreamFeatures features;
-	if (WebPGetFeatures(r, size, &features) != VP8_STATUS_OK) {
-		ERR_FAIL_V_MSG(Ref<Image>(), "Error unpacking WebP image.");
-	}
-
-	Vector<uint8_t> dst_image;
-	int datasize = features.width * features.height * (features.has_alpha ? 4 : 3);
-	dst_image.resize(datasize);
-
-	uint8_t *dst_w = dst_image.ptrw();
-
-	bool errdec = false;
-	if (features.has_alpha) {
-		errdec = WebPDecodeRGBAInto(r, size, dst_w, datasize, 4 * features.width) == nullptr;
-	} else {
-		errdec = WebPDecodeRGBInto(r, size, dst_w, datasize, 3 * features.width) == nullptr;
-	}
-
-	ERR_FAIL_COND_V_MSG(errdec, Ref<Image>(), "Failed decoding WebP image.");
-
-	Ref<Image> img = memnew(Image(features.width, features.height, false, features.has_alpha ? Image::FORMAT_RGBA8 : Image::FORMAT_RGB8, dst_image));
-	return img;
+	const int64_t size = p_buffer.size();
+	ERR_FAIL_COND_V(size < 12 || size > INT32_MAX, Ref<Image>());
+	const uint8_t *data = p_buffer.ptr();
+	ERR_FAIL_COND_V(memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WEBP", 4) != 0, Ref<Image>());
+	Ref<Image> image;
+	image.instantiate();
+	const Error err = webp_load_image_from_buffer(image.ptr(), data, size);
+	ERR_FAIL_COND_V(err != OK, Ref<Image>());
+	return image;
 }
 
 Error webp_load_image_from_buffer(Image *p_image, const uint8_t *p_buffer, int p_buffer_len) {
 	ERR_FAIL_NULL_V(p_image, ERR_INVALID_PARAMETER);
+	ERR_FAIL_COND_V(!p_buffer || p_buffer_len <= 0, ERR_FILE_CORRUPT);
 
 	WebPBitstreamFeatures features;
 	if (WebPGetFeatures(p_buffer, p_buffer_len, &features) != VP8_STATUS_OK) {
 		ERR_FAIL_V(ERR_FILE_CORRUPT);
 	}
 
+	ERR_FAIL_COND_V(features.width <= 0 || features.height <= 0 || features.width > Image::MAX_WIDTH || features.height > Image::MAX_HEIGHT, ERR_FILE_CORRUPT);
+	ERR_FAIL_COND_V(int64_t(features.width) * features.height > Image::MAX_PIXELS, ERR_FILE_CORRUPT);
+	const int64_t datasize = int64_t(features.width) * features.height * (features.has_alpha ? 4 : 3);
 	Vector<uint8_t> dst_image;
-	int datasize = features.width * features.height * (features.has_alpha ? 4 : 3);
-	dst_image.resize(datasize);
+	const Error allocation_error = dst_image.resize(datasize);
+	ERR_FAIL_COND_V(allocation_error != OK, allocation_error);
 	uint8_t *dst_w = dst_image.ptrw();
 
 	bool errdec = false;

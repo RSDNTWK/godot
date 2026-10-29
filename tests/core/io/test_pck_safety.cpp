@@ -46,6 +46,11 @@ TEST_FORCE_LINK(test_pck_safety)
 #ifdef MODULE_JPG_ENABLED
 #include "tests/core/io/jpeg_test_helpers.h"
 #endif
+#ifdef MODULE_WEBP_ENABLED
+#include "modules/webp/texture_loader_webp.h"
+#include "modules/webp/webp_common.h"
+#include "tests/core/io/webp_test_helpers.h"
+#endif
 
 #include <cstring>
 
@@ -627,6 +632,85 @@ TEST_CASE("[F02AllocationFault][JPEG] Pixel-limit boundary reaches checked alloc
 	}
 }
 #endif // MODULE_JPG_ENABLED
+#endif
+
+
+#if defined(B01_ALLOCATION_TESTS) && defined(MODULE_WEBP_ENABLED)
+TEST_CASE("[F07][WebPAllocation] Static destination failures preserve the prior image") {
+	const Vector<uint8_t> encoded = TestWebPSafety::make_static(false);
+	Ref<Image> image = memnew(Image(2, 3, false, Image::FORMAT_L8));
+	const Vector<uint8_t> previous = image->get_data();
+	const size_t exact = vector_allocation_size(17 * 19 * 3);
+	Error error = OK;
+	ErrorsOff quiet;
+	{
+		AllocationFailure fault(exact, exact);
+		error = WebPCommon::webp_load_image_from_buffer(image.ptr(), encoded.ptr(), encoded.size());
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(error == ERR_OUT_OF_MEMORY);
+	CHECK(image->get_data() == previous);
+	CHECK(image->get_width() == 2);
+	CHECK(image->get_height() == 3);
+	CHECK(WebPCommon::webp_load_image_from_buffer(image.ptr(), encoded.ptr(), encoded.size()) == OK);
+	Ref<Image> unpacked;
+	{
+		AllocationFailure fault(exact, exact);
+		unpacked = WebPCommon::_webp_unpack(encoded);
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(unpacked.is_null());
+	CHECK(WebPCommon::_webp_unpack(encoded).is_valid());
+}
+
+TEST_CASE("[SceneTree][F07][WebPAllocation] Metadata and resource input failures remain explicit") {
+	const Vector<uint8_t> encoded = TestWebPSafety::make_animation(256);
+	TestWebPSafety::Fixture fixture(encoded);
+	uint32_t count = 0;
+	REQUIRE(ResourceFormatWebP::get_webp_frame_count(fixture.path, count) == OK);
+	const size_t exact = vector_allocation_size(encoded.size());
+	Error error = OK;
+	ErrorsOff quiet;
+	{
+		AllocationFailure fault(exact, exact);
+		error = ResourceFormatWebP::get_webp_frame_count(fixture.path, count);
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(error == ERR_OUT_OF_MEMORY);
+	CHECK(count == 0);
+	Ref<Resource> result;
+	{
+		AllocationFailure fault(exact, exact);
+		result = ResourceFormatWebP::load_texture(fixture.path, &error);
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(error == ERR_OUT_OF_MEMORY);
+	CHECK(result.is_null());
+	CHECK(ResourceFormatWebP::load_texture(fixture.path, &error).is_valid());
+	CHECK(error == OK);
+}
+
+TEST_CASE("[SceneTree][F07][WebPAllocation] Animated canvas copy failure cleans up and permits retry") {
+	const Vector<uint8_t> encoded = TestWebPSafety::make_animation(2);
+	TestWebPSafety::Fixture fixture(encoded);
+	Error error = FAILED;
+	Ref<Resource> control = ResourceFormatWebP::load_texture(fixture.path, &error);
+	REQUIRE(control.is_valid());
+	REQUIRE(error == OK);
+	const size_t exact = vector_allocation_size(17 * 19 * 4);
+	REQUIRE(exact != vector_allocation_size(encoded.size()));
+	Ref<Resource> result;
+	ErrorsOff quiet;
+	{
+		AllocationFailure fault(exact, exact);
+		result = ResourceFormatWebP::load_texture(fixture.path, &error);
+	}
+	CHECK(allocation_failures == 1);
+	CHECK(error == ERR_OUT_OF_MEMORY);
+	CHECK(result.is_null());
+	CHECK(ResourceFormatWebP::load_texture(fixture.path, &error).is_valid());
+	CHECK(error == OK);
+}
 #endif
 
 } // namespace TestPCKSafety
