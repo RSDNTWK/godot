@@ -97,7 +97,11 @@ static void fastlz_memcpy(uint8_t* dest, const uint8_t* src, uint32_t count) { m
 
 #if defined(FLZ_ARCH64)
 
-static uint32_t flz_readu32(const void* ptr) { return *(const uint32_t*)ptr; }
+static uint32_t flz_readu32(const void* ptr) {
+  uint32_t value;
+  fastlz_memcpy((uint8_t*)&value, (const uint8_t*)ptr, sizeof(value));
+  return value;
+}
 
 static uint32_t flz_cmp(const uint8_t* p, const uint8_t* q, const uint8_t* r) {
   const uint8_t* start = p;
@@ -117,7 +121,7 @@ static uint32_t flz_cmp(const uint8_t* p, const uint8_t* q, const uint8_t* r) {
 
 static uint32_t flz_readu32(const void* ptr) {
   const uint8_t* p = (const uint8_t*)ptr;
-  return (p[3] << 24) | (p[2] << 16) | (p[1] << 8) | p[0];
+  return ((uint32_t)p[3] << 24) | ((uint32_t)p[2] << 16) | ((uint32_t)p[1] << 8) | p[0];
 }
 
 static uint32_t flz_cmp(const uint8_t* p, const uint8_t* q, const uint8_t* r) {
@@ -146,37 +150,12 @@ static uint16_t flz_hash(uint32_t v) {
 
 /* special case of memcpy: at most MAX_COPY bytes */
 static void flz_smallcopy(uint8_t* dest, const uint8_t* src, uint32_t count) {
-#if defined(FLZ_ARCH64)
-  if (count >= 4) {
-    const uint32_t* p = (const uint32_t*)src;
-    uint32_t* q = (uint32_t*)dest;
-    while (count > 4) {
-      *q++ = *p++;
-      count -= 4;
-      dest += 4;
-      src += 4;
-    }
-  }
-#endif
   fastlz_memcpy(dest, src, count);
 }
 
 /* special case of memcpy: exactly MAX_COPY bytes */
 static void flz_maxcopy(void* dest, const void* src) {
-#if defined(FLZ_ARCH64)
-  const uint32_t* p = (const uint32_t*)src;
-  uint32_t* q = (uint32_t*)dest;
-  *q++ = *p++;
-  *q++ = *p++;
-  *q++ = *p++;
-  *q++ = *p++;
-  *q++ = *p++;
-  *q++ = *p++;
-  *q++ = *p++;
-  *q++ = *p++;
-#else
-  fastlz_memcpy(dest, src, MAX_COPY);
-#endif
+  fastlz_memcpy((uint8_t*)dest, (const uint8_t*)src, MAX_COPY);
 }
 
 static uint8_t* flz_literals(uint32_t runs, const uint8_t* src, uint8_t* dest) {
