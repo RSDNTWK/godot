@@ -234,3 +234,18 @@ TEST_CASE("[Crypto] Crypto decrypt well-known") {
 }
 
 } // namespace TestCryptoMbedTLS
+
+namespace TestCertificateChain {
+void distinct_chain_roundtrip();
+void empty_certificate();
+void large_certificate();
+TEST_CASE("[F16][CertificateChain] Distinct certificates round trip in both orders through strings and files") {
+	distinct_chain_roundtrip();
+}
+TEST_CASE("[F16][CertificateChain] Empty certificates serialize to an empty string") {
+	empty_certificate();
+}
+TEST_CASE("[F16][CertificateChain] Certificates exceeding the former buffer limit remain complete") {
+	large_certificate();
+}
+} // namespace TestCertificateChain

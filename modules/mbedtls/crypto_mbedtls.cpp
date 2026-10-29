@@ -203,40 +203,40 @@ Error X509CertificateMbedTLS::load_from_memory(const uint8_t *p_buffer, int p_le
 	return OK;
 }
 
+static Error _encode_certificate_pem(const mbedtls_x509_crt *p_certificate, Vector<uint8_t> &r_buffer) {
+	size_t required = 0;
+	const int size_result = mbedtls_pem_write_buffer(PEM_BEGIN_CRT, PEM_END_CRT, p_certificate->raw.p, p_certificate->raw.len, nullptr, 0, &required);
+	ERR_FAIL_COND_V_MSG(size_result != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL || required == 0 || required > INT32_MAX, FAILED, "Cannot determine certificate PEM size.");
+	const Error allocation_error = r_buffer.resize(required);
+	ERR_FAIL_COND_V(allocation_error != OK, allocation_error);
+	size_t written = 0;
+	const int result = mbedtls_pem_write_buffer(PEM_BEGIN_CRT, PEM_END_CRT, p_certificate->raw.p, p_certificate->raw.len, r_buffer.ptrw(), r_buffer.size(), &written);
+	ERR_FAIL_COND_V_MSG(result != 0 || written != required, FAILED, "Error encoding certificate PEM.");
+	return OK;
+}
+
 Error X509CertificateMbedTLS::save(const String &p_path) {
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::WRITE);
 	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_INVALID_PARAMETER, vformat("Cannot save X509CertificateMbedTLS file '%s'.", p_path));
-
-	mbedtls_x509_crt *crt = &cert;
-	while (crt) {
-		unsigned char w[4096];
-		size_t wrote = 0;
-		int ret = mbedtls_pem_write_buffer(PEM_BEGIN_CRT, PEM_END_CRT, cert.raw.p, cert.raw.len, w, sizeof(w), &wrote);
-		if (ret != 0 || wrote == 0) {
-			ERR_FAIL_V_MSG(FAILED, "Error writing certificate '" + itos(ret) + "'.");
-		}
-
-		f->store_buffer(w, wrote - 1); // don't write the string terminator
-		crt = crt->next;
+	for (const mbedtls_x509_crt *crt = &cert; crt; crt = crt->next) {
+		Vector<uint8_t> encoded;
+		const Error err = _encode_certificate_pem(crt, encoded);
+		ERR_FAIL_COND_V(err != OK, err);
+		ERR_FAIL_COND_V(!f->store_buffer(encoded.ptr(), encoded.size() - 1), ERR_FILE_CANT_WRITE);
 	}
 	return OK;
 }
 
 String X509CertificateMbedTLS::save_to_string() {
 	String buffer;
-	mbedtls_x509_crt *crt = &cert;
-	while (crt) {
-		unsigned char w[4096];
-		size_t wrote = 0;
-		int ret = mbedtls_pem_write_buffer(PEM_BEGIN_CRT, PEM_END_CRT, cert.raw.p, cert.raw.len, w, sizeof(w), &wrote);
-		ERR_FAIL_COND_V_MSG(ret != 0 || wrote == 0, String(), "Error saving the certificate.");
-
-		// PEM is base64, aka ascii
-		buffer += String::ascii(Span((char *)w, wrote));
-		crt = crt->next;
+	for (const mbedtls_x509_crt *crt = &cert; crt; crt = crt->next) {
+		Vector<uint8_t> encoded;
+		const Error err = _encode_certificate_pem(crt, encoded);
+		ERR_FAIL_COND_V(err != OK, String());
+		// The PEM size includes its string terminator.
+		buffer += String::ascii(Span((const char *)encoded.ptr(), encoded.size() - 1));
 	}
 	if (buffer.length() <= PEM_MIN_SIZE) {
-		// When the returned value of variable 'buffer' would consist of no Base-64 data, return an empty String instead.
 		return String();
 	}
 	return buffer;

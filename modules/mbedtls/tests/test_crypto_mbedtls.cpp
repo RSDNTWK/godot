@@ -33,7 +33,9 @@
 #include "../crypto_mbedtls.h"
 #include "test_crypto_core_psa.h"
 
+#include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/os/os.h"
 #include "tests/test_macros.h"
 #include "tests/test_utils.h"
 
@@ -263,3 +265,65 @@ TEST_CASE("[CryptoMbedTLS] Arbitrary HMAC key lengths remain supported") {
 }
 
 } // namespace TestCryptoMbedTLS
+
+namespace TestCertificateChain {
+struct Fixture {
+	String path = TestUtils::get_temp_path("certificate_chain_" + uitos(OS::get_singleton()->get_ticks_usec()) + ".crt");
+	~Fixture() {
+		if (FileAccess::exists(path)) {
+			DirAccess::remove_absolute(path);
+		}
+	}
+};
+
+void distinct_chain_roundtrip() {
+	CryptoMbedTLS crypto;
+	Ref<CryptoKey> key = crypto.generate_rsa(1024);
+	REQUIRE(key.is_valid());
+	Ref<X509Certificate> first = crypto.generate_self_signed_certificate(key, "CN=First, O=Godot test", "20240101000000", "20340101000000");
+	Ref<X509Certificate> second = crypto.generate_self_signed_certificate(key, "CN=Second, O=Godot test", "20240101000000", "20340101000000");
+	REQUIRE(first.is_valid());
+	REQUIRE(second.is_valid());
+	Fixture fixture;
+	REQUIRE(first->save(fixture.path) == OK);
+	const String first_pem = FileAccess::get_file_as_string(fixture.path);
+	REQUIRE(second->save(fixture.path) == OK);
+	const String second_pem = FileAccess::get_file_as_string(fixture.path);
+	REQUIRE(first_pem != second_pem);
+	REQUIRE(first_pem.ends_with("-----END CERTIFICATE-----\n"));
+	REQUIRE(second_pem.ends_with("-----END CERTIFICATE-----\n"));
+	CHECK(first->save_to_string() == first_pem);
+	CHECK(second->save_to_string() == second_pem);
+	for (const String &expected : { first_pem + second_pem, second_pem + first_pem }) {
+		X509CertificateMbedTLS chain;
+		REQUIRE(chain.load_from_string(expected) == OK);
+		CHECK(chain.save_to_string() == expected);
+		REQUIRE(chain.save(fixture.path) == OK);
+		CHECK(FileAccess::get_file_as_string(fixture.path) == expected);
+		X509CertificateMbedTLS from_file;
+		REQUIRE(from_file.load(fixture.path) == OK);
+		CHECK(from_file.save_to_string() == expected);
+		X509CertificateMbedTLS from_string;
+		REQUIRE(from_string.load_from_string(chain.save_to_string()) == OK);
+		CHECK(from_string.save_to_string() == expected);
+	}
+}
+
+void empty_certificate() {
+	X509CertificateMbedTLS empty;
+	CHECK(empty.save_to_string().is_empty());
+}
+void large_certificate() {
+	const String input = FileAccess::get_file_as_string(TestUtils::get_data_path("crypto/long_certificate.crt"));
+	REQUIRE(input.utf8().length() > 4096);
+	X509CertificateMbedTLS certificate;
+	REQUIRE(certificate.load_from_string(input) == OK);
+	CHECK(certificate.save_to_string() == input);
+	Fixture fixture;
+	REQUIRE(certificate.save(fixture.path) == OK);
+	CHECK(FileAccess::get_file_as_string(fixture.path) == input);
+	X509CertificateMbedTLS reparsed;
+	REQUIRE(reparsed.load(fixture.path) == OK);
+	CHECK(reparsed.save_to_string() == input);
+}
+} // namespace TestCertificateChain
