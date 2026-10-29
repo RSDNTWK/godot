@@ -76,6 +76,7 @@ class FileAccessZip : public FileAccess {
 	unz_file_info64 file_info;
 
 	mutable bool at_eof = false;
+	mutable Error last_error = OK;
 
 	void _close();
 
