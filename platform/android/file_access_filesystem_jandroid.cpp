@@ -69,6 +69,7 @@ Error FileAccessFilesystemJAndroid::open_internal(const String &p_path, int p_mo
 		_close();
 	}
 
+	last_read_error = OK;
 	if (_file_open) {
 		JNIEnv *env = get_jni_env();
 		ERR_FAIL_NULL_V(env, ERR_UNCONFIGURED);
@@ -112,28 +113,90 @@ bool FileAccessFilesystemJAndroid::is_open() const {
 void FileAccessFilesystemJAndroid::seek(uint64_t p_position) {
 	if (_file_seek) {
 		JNIEnv *env = get_jni_env();
-		ERR_FAIL_NULL(env);
-		ERR_FAIL_COND_MSG(!is_open(), "File must be opened before use.");
+		if (!env) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_NULL(env);
+		}
+		if (!is_open()) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_MSG("File must be opened before use.");
+		}
+		last_read_error = OK;
+		if (p_position > uint64_t(INT64_MAX)) {
+			last_read_error = ERR_FILE_CANT_READ;
+			return;
+		}
 		env->CallVoidMethod(file_access_handler, _file_seek, id, p_position);
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+			last_read_error = ERR_FILE_CANT_READ;
+		} else if (get_position() != p_position) {
+			last_read_error = ERR_FILE_CANT_READ;
+		}
+		if (last_read_error == OK) {
+			_set_eof(false);
+		}
+	} else {
+		last_read_error = ERR_UNCONFIGURED;
 	}
 }
 
 void FileAccessFilesystemJAndroid::seek_end(int64_t p_position) {
 	if (_file_seek_end) {
 		JNIEnv *env = get_jni_env();
-		ERR_FAIL_NULL(env);
-		ERR_FAIL_COND_MSG(!is_open(), "File must be opened before use.");
+		if (!env) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_NULL(env);
+		}
+		if (!is_open()) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_MSG("File must be opened before use.");
+		}
+		last_read_error = OK;
+		const int64_t length = get_length();
+		if (last_read_error != OK) {
+			return;
+		}
+		if (p_position < -length || p_position > INT64_MAX - length) {
+			last_read_error = ERR_FILE_CANT_READ;
+			return;
+		}
+		const uint64_t expected = uint64_t(length + p_position);
 		env->CallVoidMethod(file_access_handler, _file_seek_end, id, p_position);
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+			last_read_error = ERR_FILE_CANT_READ;
+		} else if (get_position() != expected) {
+			last_read_error = ERR_FILE_CANT_READ;
+		}
+		if (last_read_error == OK) {
+			_set_eof(false);
+		}
+	} else {
+		last_read_error = ERR_UNCONFIGURED;
 	}
 }
 
 uint64_t FileAccessFilesystemJAndroid::get_position() const {
 	if (_file_tell) {
 		JNIEnv *env = get_jni_env();
-		ERR_FAIL_NULL_V(env, 0);
-		ERR_FAIL_COND_V_MSG(!is_open(), 0, "File must be opened before use.");
-		return env->CallLongMethod(file_access_handler, _file_tell, id);
+		if (!env) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_NULL_V(env, 0);
+		}
+		if (!is_open()) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_V_MSG(0, "File must be opened before use.");
+		}
+		const jlong position = env->CallLongMethod(file_access_handler, _file_tell, id);
+		if (env->ExceptionCheck() || position < 0) {
+			env->ExceptionClear();
+			last_read_error = ERR_FILE_CANT_READ;
+			return 0;
+		}
+		return position;
 	} else {
+		last_read_error = ERR_UNCONFIGURED;
 		return 0;
 	}
 }
@@ -141,10 +204,23 @@ uint64_t FileAccessFilesystemJAndroid::get_position() const {
 uint64_t FileAccessFilesystemJAndroid::get_length() const {
 	if (_file_get_size) {
 		JNIEnv *env = get_jni_env();
-		ERR_FAIL_NULL_V(env, 0);
-		ERR_FAIL_COND_V_MSG(!is_open(), 0, "File must be opened before use.");
-		return env->CallLongMethod(file_access_handler, _file_get_size, id);
+		if (!env) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_NULL_V(env, 0);
+		}
+		if (!is_open()) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_V_MSG(0, "File must be opened before use.");
+		}
+		const jlong length = env->CallLongMethod(file_access_handler, _file_get_size, id);
+		if (env->ExceptionCheck() || length < 0) {
+			env->ExceptionClear();
+			last_read_error = ERR_FILE_CANT_READ;
+			return 0;
+		}
+		return length;
 	} else {
+		last_read_error = ERR_UNCONFIGURED;
 		return 0;
 	}
 }
@@ -152,30 +228,67 @@ uint64_t FileAccessFilesystemJAndroid::get_length() const {
 bool FileAccessFilesystemJAndroid::eof_reached() const {
 	if (_file_eof) {
 		JNIEnv *env = get_jni_env();
-		ERR_FAIL_NULL_V(env, false);
-		ERR_FAIL_COND_V_MSG(!is_open(), false, "File must be opened before use.");
-		return env->CallBooleanMethod(file_access_handler, _file_eof, id);
+		if (!env) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_NULL_V(env, false);
+		}
+		if (!is_open()) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_V_MSG(false, "File must be opened before use.");
+		}
+		const bool eof = env->CallBooleanMethod(file_access_handler, _file_eof, id);
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+			last_read_error = ERR_FILE_CANT_READ;
+			return false;
+		}
+		return eof;
 	} else {
+		last_read_error = ERR_UNCONFIGURED;
 		return false;
 	}
 }
 
 void FileAccessFilesystemJAndroid::_set_eof(bool eof) {
 	if (_file_set_eof) {
-		ERR_FAIL_COND_MSG(!is_open(), "File must be opened before use.");
+		if (!is_open()) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_MSG("File must be opened before use.");
+		}
 
 		JNIEnv *env = get_jni_env();
-		ERR_FAIL_NULL(env);
+		if (!env) {
+			last_read_error = ERR_UNCONFIGURED;
+			ERR_FAIL_NULL(env);
+		}
 		env->CallVoidMethod(file_access_handler, _file_set_eof, id, eof);
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+			last_read_error = ERR_FILE_CANT_READ;
+		}
+	} else {
+		last_read_error = ERR_UNCONFIGURED;
 	}
 }
 
 String FileAccessFilesystemJAndroid::get_line() const {
-	ERR_FAIL_COND_V_MSG(!is_open(), String(), "File must be opened before use.");
+	if (!is_open()) {
+		last_read_error = ERR_UNCONFIGURED;
+		ERR_FAIL_V_MSG(String(), "File must be opened before use.");
+	}
+	if (last_read_error == ERR_BUSY) {
+		last_read_error = OK;
+	}
+	if (last_read_error != OK) {
+		return String();
+	}
 
 	const size_t buffer_size_limit = 2048;
 	const uint64_t file_size = get_length();
 	const uint64_t start_position = get_position();
+	if (last_read_error != OK) {
+		return String();
+	}
 
 	String result;
 	LocalVector<uint8_t> line_buffer;
@@ -183,12 +296,16 @@ String FileAccessFilesystemJAndroid::get_line() const {
 	uint64_t line_buffer_position = 0;
 
 	while (true) {
-		size_t line_buffer_size = MIN(buffer_size_limit, file_size - get_position());
-		if (line_buffer_size <= 0) {
+		const uint64_t position = get_position();
+		if (last_read_error != OK) {
+			return String();
+		}
+		if (position >= file_size) {
 			const_cast<FileAccessFilesystemJAndroid *>(this)->_set_eof(true);
 			break;
 		}
 
+		const size_t line_buffer_size = MIN(buffer_size_limit, file_size - position);
 		current_buffer_size += line_buffer_size;
 		line_buffer.resize(current_buffer_size);
 
@@ -203,6 +320,9 @@ String FileAccessFilesystemJAndroid::get_line() const {
 				// Found the end of the line
 				const bool is_crlf = elem == '\r' && line_buffer_position + 1 < current_buffer_size && line_buffer[line_buffer_position + 1] == '\n';
 				const_cast<FileAccessFilesystemJAndroid *>(this)->seek(start_position + line_buffer_position + (is_crlf ? 2 : 1));
+				if (last_read_error != OK) {
+					return String();
+				}
 				if (result.append_utf8((const char *)line_buffer.ptr(), line_buffer_position)) {
 					return String();
 				}
@@ -218,22 +338,44 @@ String FileAccessFilesystemJAndroid::get_line() const {
 }
 
 uint64_t FileAccessFilesystemJAndroid::get_buffer(uint8_t *p_dst, uint64_t p_length) const {
-	if (_file_read) {
-		ERR_FAIL_COND_V_MSG(!is_open(), 0, "File must be opened before use.");
-		if (p_length == 0) {
-			return 0;
-		}
-
-		JNIEnv *env = get_jni_env();
-		ERR_FAIL_NULL_V(env, 0);
-
-		jobject j_buffer = env->NewDirectByteBuffer(p_dst, p_length);
-		int length = env->CallIntMethod(file_access_handler, _file_read, id, j_buffer);
-		env->DeleteLocalRef(j_buffer);
-		return length;
-	} else {
+	if (p_length == 0) {
 		return 0;
 	}
+	if (last_read_error != OK && last_read_error != ERR_BUSY) {
+		return 0;
+	}
+	last_read_error = OK;
+	if (!_file_read || !is_open()) {
+		last_read_error = ERR_UNCONFIGURED;
+		return 0;
+	}
+	JNIEnv *env = get_jni_env();
+	if (!env) {
+		last_read_error = ERR_UNCONFIGURED;
+		return 0;
+	}
+	jobject j_buffer = env->NewDirectByteBuffer(p_dst, p_length);
+	if (!j_buffer) {
+		if (env->ExceptionCheck()) {
+			env->ExceptionClear();
+		}
+		last_read_error = ERR_FILE_CANT_READ;
+		return 0;
+	}
+	const jint length = env->CallIntMethod(file_access_handler, _file_read, id, j_buffer);
+	env->DeleteLocalRef(j_buffer);
+	if (env->ExceptionCheck() || length < 0 || uint64_t(length) > p_length) {
+		env->ExceptionClear();
+		last_read_error = ERR_FILE_CANT_READ;
+		return 0;
+	}
+	if (length == 0) {
+		const bool eof = eof_reached();
+		if (last_read_error == OK && !eof) {
+			last_read_error = ERR_BUSY;
+		}
+	}
+	return length;
 }
 
 bool FileAccessFilesystemJAndroid::store_buffer(const uint8_t *p_src, uint64_t p_length) {
@@ -257,10 +399,14 @@ bool FileAccessFilesystemJAndroid::store_buffer(const uint8_t *p_src, uint64_t p
 }
 
 Error FileAccessFilesystemJAndroid::get_error() const {
-	if (eof_reached()) {
-		return ERR_FILE_EOF;
+	if (last_read_error != OK) {
+		return last_read_error;
 	}
-	return OK;
+	const bool eof = eof_reached();
+	if (last_read_error != OK) {
+		return last_read_error;
+	}
+	return eof ? ERR_FILE_EOF : OK;
 }
 
 Error FileAccessFilesystemJAndroid::resize(int64_t p_length) {

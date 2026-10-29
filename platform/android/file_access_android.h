@@ -45,10 +45,12 @@ class FileAccessAndroid : public FileAccess {
 	mutable uint64_t len = 0;
 	mutable uint64_t pos = 0;
 	mutable bool eof = false;
+	mutable Error last_read_error = OK;
 	String absolute_path;
 	String path_src;
 
 	void _close();
+	void _seek(int64_t p_offset, int p_whence);
 
 public:
 	virtual Error open_internal(const String &p_path, int p_mode_flags) override; // open a file

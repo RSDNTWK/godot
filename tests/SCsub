@@ -15,15 +15,32 @@ force_link_header = env.CommandNoCache(
 env.Depends(force_link_header, "test_builders.py")
 
 tests_obj = []
+tests_env = env.Clone()
+if env["module_ffmpeg_enabled"]:
+    tests_env.Prepend(CPPPATH=["#thirdparty/libogg/"])
+asset_test_source = "platform/android/test_csv_android_asset.cpp"
 if env["scu_build"]:
     # HACK: SCU setup doesn't support recursive/dynamic setup, so we must manually pass the files.
-    env.add_source_files(tests_obj, glob.glob(".scu/*.cpp"))
+    if env["platform"] == "linuxbsd":
+        tests_env.Prepend(CPPPATH=["#tests/platform/android/asset_stubs"])
+    tests_env.add_source_files(tests_obj, glob.glob(".scu/*.cpp"))
 else:
-    env.add_source_files(tests_obj, glob.glob("*.cpp") + force_link_sources)
+    regular_sources = glob.glob("*.cpp") + [
+        source for source in force_link_sources if source.replace("\\", "/") != asset_test_source
+    ]
+    tests_env.add_source_files(tests_obj, regular_sources)
+    asset_test_env = tests_env.Clone()
+    if env["platform"] == "linuxbsd":
+        asset_test_env.Prepend(CPPPATH=["#tests/platform/android/asset_stubs"])
+    asset_test_env.add_source_files(tests_obj, asset_test_source)
 
 # Exercise the actual WebP importer without requiring an editor in focused tests.
 if not env.editor_build and env["module_webp_enabled"]:
-    env.add_source_files(tests_obj, "#editor/import/resource_importer_webp_texture.cpp")
+    tests_env.add_source_files(tests_obj, "#editor/import/resource_importer_webp_texture.cpp")
+
+# Exercise CSV importer error propagation in focused non-editor tests.
+if not env.editor_build:
+    tests_env.add_source_files(tests_obj, "#editor/import/resource_importer_csv_translation.cpp")
 
 lib = env.add_library("tests", tests_obj)
 env.Prepend(LIBS=[lib])

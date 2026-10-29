@@ -49,6 +49,10 @@ String FileAccessAndroid::get_path_absolute() const {
 
 Error FileAccessAndroid::open_internal(const String &p_path, int p_mode_flags) {
 	_close();
+	last_read_error = OK;
+	len = 0;
+	pos = 0;
+	eof = false;
 
 	path_src = p_path;
 	String path = fix_path(p_path).simplify_path();
@@ -64,7 +68,13 @@ Error FileAccessAndroid::open_internal(const String &p_path, int p_mode_flags) {
 	if (!asset) {
 		return ERR_CANT_OPEN;
 	}
-	len = AAsset_getLength(asset);
+	const int64_t length = AAsset_getLength64(asset);
+	if (length < 0) {
+		last_read_error = ERR_FILE_CANT_READ;
+		_close();
+		return last_read_error;
+	}
+	len = length;
 	pos = 0;
 	eof = false;
 
@@ -83,23 +93,37 @@ bool FileAccessAndroid::is_open() const {
 	return asset != nullptr;
 }
 
-void FileAccessAndroid::seek(uint64_t p_position) {
-	ERR_FAIL_NULL(asset);
-
-	AAsset_seek(asset, p_position, SEEK_SET);
-	pos = p_position;
-	if (pos > len) {
-		pos = len;
-		eof = true;
-	} else {
-		eof = false;
+void FileAccessAndroid::_seek(int64_t p_offset, int p_whence) {
+	last_read_error = OK;
+	if (!asset) {
+		last_read_error = ERR_UNCONFIGURED;
+		return;
 	}
+	const int64_t base = p_whence == SEEK_END ? int64_t(len) : 0;
+	if (p_offset < -base || p_offset > INT64_MAX - base) {
+		last_read_error = ERR_FILE_CANT_READ;
+		return;
+	}
+	const int64_t expected = base + p_offset;
+	const int64_t actual = AAsset_seek64(asset, p_offset, p_whence);
+	if (actual < 0 || actual != expected) {
+		last_read_error = ERR_FILE_CANT_READ;
+		return;
+	}
+	pos = MIN(uint64_t(actual), len);
+	eof = uint64_t(actual) > len;
+}
+
+void FileAccessAndroid::seek(uint64_t p_position) {
+	if (p_position > uint64_t(INT64_MAX)) {
+		last_read_error = ERR_FILE_CANT_READ;
+		return;
+	}
+	_seek(int64_t(p_position), SEEK_SET);
 }
 
 void FileAccessAndroid::seek_end(int64_t p_position) {
-	ERR_FAIL_NULL(asset);
-	AAsset_seek(asset, p_position, SEEK_END);
-	pos = len + p_position;
+	_seek(p_position, SEEK_END);
 }
 
 uint64_t FileAccessAndroid::get_position() const {
@@ -115,30 +139,54 @@ bool FileAccessAndroid::eof_reached() const {
 }
 
 uint64_t FileAccessAndroid::get_buffer(uint8_t *p_dst, uint64_t p_length) const {
-	ERR_FAIL_COND_V(!p_dst && p_length > 0, -1);
-
-	int r = AAsset_read(asset, p_dst, p_length);
-
-	if (pos + p_length > len) {
-		eof = true;
+	if (p_length == 0) {
+		return 0;
+	}
+	if (last_read_error != OK) {
+		return 0;
+	}
+	if (!asset) {
+		last_read_error = ERR_UNCONFIGURED;
+		return 0;
+	}
+	if (!p_dst) {
+		last_read_error = ERR_INVALID_PARAMETER;
+		return 0;
 	}
 
-	if (r >= 0) {
-		pos += r;
-		if (pos > len) {
-			pos = len;
+	uint64_t total = 0;
+	while (total < p_length) {
+		const int requested = int(MIN(p_length - total, uint64_t(INT_MAX)));
+		const int actual = AAsset_read(asset, p_dst + total, requested);
+		if (actual < 0 || actual > requested) {
+			last_read_error = ERR_FILE_CANT_READ;
+			break;
 		}
+		if (actual == 0) {
+			eof = true;
+			break;
+		}
+		total += actual;
+		pos = MIN(pos + uint64_t(actual), len);
 	}
-
-	return r;
+	return total;
 }
 
 int64_t FileAccessAndroid::_get_size(const String &p_file) {
-	return AAsset_getLength64(asset);
+	// FileAccess::get_size creates an unopened backend for this query.
+	FileAccessAndroid file;
+	file._set_access_type(get_access_type());
+	if (file.open_internal(p_file, READ) != OK) {
+		return -1;
+	}
+	return file.get_length();
 }
 
 Error FileAccessAndroid::get_error() const {
-	return eof ? ERR_FILE_EOF : OK; // not sure what else it may happen
+	if (last_read_error != OK) {
+		return last_read_error;
+	}
+	return asset ? (eof ? ERR_FILE_EOF : OK) : ERR_UNCONFIGURED;
 }
 
 void FileAccessAndroid::flush() {

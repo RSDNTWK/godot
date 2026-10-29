@@ -487,7 +487,12 @@ Vector<String> FileAccess::get_csv_line(const String &p_delim) const {
 		if (eof_reached()) {
 			break;
 		}
-		line += get_line() + "\n";
+		const String physical_line = get_line();
+		const Error read_error = get_error();
+		if (read_error != OK && read_error != ERR_FILE_EOF) {
+			return Vector<String>();
+		}
+		line += physical_line + "\n";
 		qc = 0;
 		for (int i = 0; i < line.length(); i++) {
 			if (line[i] == '"') {

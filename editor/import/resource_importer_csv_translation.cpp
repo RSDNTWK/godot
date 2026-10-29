@@ -97,6 +97,8 @@ Error ResourceImporterCSVTranslation::import(ResourceUID::ID p_source_id, const 
 	int plural_column = -1;
 	{
 		const Vector<String> line = f->get_csv_line(delimiter);
+		const Error read_error = f->get_error();
+		ERR_FAIL_COND_V_MSG(read_error != OK && read_error != ERR_FILE_EOF, read_error, "Error reading CSV translation file '" + p_source_file + "'.");
 		for (int i = 1; i < line.size(); i++) {
 			if (line[i].left(1) == "_") {
 				continue;
@@ -141,6 +143,8 @@ Error ResourceImporterCSVTranslation::import(ResourceUID::ID p_source_id, const 
 
 		do {
 			const Vector<String> line = f->get_csv_line(delimiter);
+			const Error read_error = f->get_error();
+			ERR_FAIL_COND_V_MSG(read_error != OK && read_error != ERR_FILE_EOF, read_error, "Error reading CSV translation file '" + p_source_file + "'.");
 
 			// Skip empty lines.
 			if (line.size() == 1 && line[0].is_empty()) {

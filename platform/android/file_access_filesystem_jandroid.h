@@ -57,6 +57,7 @@ class FileAccessFilesystemJAndroid : public FileAccess {
 	static jmethodID _file_size;
 
 	int id;
+	mutable Error last_read_error = OK;
 	String absolute_path;
 	String path_src;
 

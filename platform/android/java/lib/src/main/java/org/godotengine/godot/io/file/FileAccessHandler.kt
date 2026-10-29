@@ -165,7 +165,7 @@ class FileAccessHandler(val context: Context) {
 
 	fun fileGetSize(fileId: Int): Long = lock.withLock {
 		if (!hasFileId(fileId)) {
-			return 0L
+			return -1L
 		}
 
 		return files[fileId].size()
@@ -189,7 +189,7 @@ class FileAccessHandler(val context: Context) {
 
 	fun fileRead(fileId: Int, byteBuffer: ByteBuffer?): Int = lock.withLock {
 		if (!hasFileId(fileId) || byteBuffer == null) {
-			return 0
+			return -1
 		}
 
 		return files[fileId].read(byteBuffer)
@@ -272,7 +272,7 @@ class FileAccessHandler(val context: Context) {
 
 	fun fileGetPosition(fileId: Int): Long = lock.withLock {
 		if (!hasFileId(fileId)) {
-			return 0L
+			return -1L
 		}
 
 		return files[fileId].position()

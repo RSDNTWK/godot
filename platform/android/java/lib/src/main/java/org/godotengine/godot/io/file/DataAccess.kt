@@ -199,6 +199,7 @@ internal abstract class DataAccess {
 	abstract fun resize(length: Long): Error
 	abstract fun position(): Long
 	abstract fun size(): Long
+	// Negative counts report errors; EOF is zero bytes with endOfFile set.
 	abstract fun read(buffer: ByteBuffer): Int
 	abstract fun write(buffer: ByteBuffer): Boolean
 
@@ -260,7 +261,7 @@ internal abstract class DataAccess {
 					"Exception when retrieving position for file $filePath.",
 					e
 				)
-				0L
+				-1L
 			}
 		}
 
@@ -268,7 +269,7 @@ internal abstract class DataAccess {
 			fileChannel.size()
 		} catch (e: IOException) {
 			Log.w(TAG, "Exception when retrieving size for file $filePath.", e)
-			0L
+			-1L
 		}
 
 		override fun read(buffer: ByteBuffer): Int {
@@ -282,7 +283,7 @@ internal abstract class DataAccess {
 				}
 			} catch (e: IOException) {
 				Log.w(TAG, "Exception while reading from file $filePath.", e)
-				0
+				-1
 			}
 		}
 

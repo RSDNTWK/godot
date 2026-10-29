@@ -143,7 +143,7 @@ internal class AssetData(context: Context, private val filePath: String, accessF
 			}
 		} catch (e: IOException) {
 			Log.w(TAG, "Exception while reading from $filePath.", e)
-			0
+			-1
 		}
 	}
 
