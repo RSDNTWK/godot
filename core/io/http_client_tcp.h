@@ -56,6 +56,11 @@ private:
 	bool head_request = false;
 	Ref<TLSOptions> tls_options;
 
+	// Bound metadata separately from response bodies and downloads.
+	static constexpr int MAX_RESPONSE_HEADER_BYTES = 1 << 20;
+	static constexpr int MAX_RESPONSE_TRAILER_BYTES = 1 << 20;
+	static constexpr int METADATA_READ_BUDGET = 1 << 14;
+	int response_trailer_bytes = 0;
 	Vector<uint8_t> response_str;
 
 	bool chunked = false;
@@ -76,6 +81,7 @@ private:
 	// 64 KiB by default (favors fast download speeds at the cost of memory usage).
 	int read_chunk_size = 65536;
 
+	Error _response_error();
 	Error _get_http_data(uint8_t *p_buffer, int p_bytes, int &r_received);
 
 public:

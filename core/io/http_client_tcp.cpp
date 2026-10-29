@@ -214,6 +214,7 @@ Error HTTPClientTCP::request(Method p_method, const String &p_url, const Vector<
 	}
 	request_buffer->seek(0);
 
+	response_trailer_bytes = 0;
 	status = STATUS_REQUESTING;
 	head_request = p_method == METHOD_HEAD;
 
@@ -263,6 +264,8 @@ void HTTPClientTCP::close() {
 	ip_candidates.clear();
 	response_headers.clear();
 	response_str.clear();
+	chunk.clear();
+	response_trailer_bytes = 0;
 	request_buffer->clear();
 	body_size = -1;
 	body_left = 0;
@@ -271,6 +274,12 @@ void HTTPClientTCP::close() {
 	read_until_eof = false;
 	response_num = 0;
 	handshaking = false;
+}
+
+Error HTTPClientTCP::_response_error() {
+	close();
+	status = STATUS_CONNECTION_ERROR;
+	return ERR_CONNECTION_ERROR;
 }
 
 Error HTTPClientTCP::poll() {
@@ -465,7 +474,15 @@ Error HTTPClientTCP::poll() {
 				}
 				request_buffer->clear();
 			}
+			int metadata_bytes_read = 0;
 			while (true) {
+				if (!blocking && metadata_bytes_read >= METADATA_READ_BUDGET) {
+					return OK;
+				}
+				if (response_str.size() >= MAX_RESPONSE_HEADER_BYTES) {
+					ERR_PRINT("HTTP response headers exceed 1 MiB.");
+					return _response_error();
+				}
 				uint8_t byte;
 				int rec = 0;
 				Error err = _get_http_data(&byte, 1, rec);
@@ -479,13 +496,18 @@ Error HTTPClientTCP::poll() {
 					return OK; // Still requesting, keep trying!
 				}
 
-				response_str.push_back(byte);
+				metadata_bytes_read += rec;
+				if (response_str.push_back(byte)) {
+					return _response_error();
+				}
 				int rs = response_str.size();
 				if (
 						(rs >= 2 && response_str[rs - 2] == '\n' && response_str[rs - 1] == '\n') ||
 						(rs >= 4 && response_str[rs - 4] == '\r' && response_str[rs - 3] == '\n' && response_str[rs - 2] == '\r' && response_str[rs - 1] == '\n')) {
 					// End of response, parse.
-					response_str.push_back(0);
+					if (response_str.push_back(0)) {
+						return _response_error();
+					}
 					String response = String::utf8((const char *)response_str.ptr(), response_str.size());
 					Vector<String> responses = response.split("\n");
 					body_size = -1;
@@ -577,8 +599,17 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 	Error err = OK;
 
 	if (chunked) {
+		int metadata_bytes_read = 0;
 		while (true) {
+			if ((chunk_trailer_part || chunk_left == 0) && !blocking && metadata_bytes_read >= METADATA_READ_BUDGET) {
+				break;
+			}
 			if (chunk_trailer_part) {
+				if (response_trailer_bytes >= MAX_RESPONSE_TRAILER_BYTES) {
+					ERR_PRINT("HTTP response trailers exceed 1 MiB.");
+					_response_error();
+					return PackedByteArray();
+				}
 				// We need to consume the trailer part too or keep-alive will break.
 				uint8_t b;
 				int rec = 0;
@@ -588,7 +619,12 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 					break;
 				}
 
-				chunk.push_back(b);
+				metadata_bytes_read += rec;
+				response_trailer_bytes += rec;
+				if (chunk.push_back(b)) {
+					_response_error();
+					return PackedByteArray();
+				}
 				int cs = chunk.size();
 				if ((cs >= 2 && chunk[cs - 2] == '\r' && chunk[cs - 1] == '\n')) {
 					if (cs == 2) {
@@ -612,7 +648,11 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 					break;
 				}
 
-				chunk.push_back(b);
+				metadata_bytes_read += rec;
+				if (chunk.push_back(b)) {
+					_response_error();
+					return PackedByteArray();
+				}
 
 				if (chunk.size() > 32) {
 					ERR_PRINT("HTTP Invalid chunk hex len");
@@ -645,6 +685,11 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 						}
 					}
 
+					if (status == STATUS_CONNECTION_ERROR) {
+						_response_error();
+						return PackedByteArray();
+					}
+
 					if (len == 0) {
 						// End reached!
 						chunk_trailer_part = true;
@@ -653,7 +698,10 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 					}
 
 					chunk_left = len + 2;
-					chunk.resize(chunk_left);
+					if (chunk.resize(chunk_left) != OK) {
+						_response_error();
+						return PackedByteArray();
+					}
 				}
 			} else {
 				int rec = 0;
@@ -671,7 +719,10 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 						break;
 					}
 
-					ret.resize(chunk_size - 2);
+					if (ret.resize(chunk_size - 2) != OK) {
+						_response_error();
+						return PackedByteArray();
+					}
 					uint8_t *w = ret.ptrw();
 					memcpy(w, chunk.ptr(), chunk_size - 2);
 					chunk.clear();
@@ -683,7 +734,10 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 
 	} else {
 		int to_read = !read_until_eof ? MIN(body_left, read_chunk_size) : read_chunk_size;
-		ret.resize(to_read);
+		if (ret.resize(to_read) != OK) {
+			_response_error();
+			return PackedByteArray();
+		}
 		int _offset = 0;
 		while (to_read > 0) {
 			int rec = 0;
@@ -706,6 +760,11 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 				break;
 			}
 		}
+	}
+
+	if (status == STATUS_CONNECTION_ERROR) {
+		_response_error();
+		return PackedByteArray();
 	}
 
 	if (err != OK) {
