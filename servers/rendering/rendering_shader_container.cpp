@@ -35,6 +35,12 @@
 
 #include <thirdparty/spirv-reflect/spirv_reflect.h>
 
+static constexpr uint32_t RAYTRACING_STAGE_FLAGS = RenderingDeviceCommons::SHADER_STAGE_RAYGEN_BIT |
+		RenderingDeviceCommons::SHADER_STAGE_ANY_HIT_BIT |
+		RenderingDeviceCommons::SHADER_STAGE_CLOSEST_HIT_BIT |
+		RenderingDeviceCommons::SHADER_STAGE_MISS_BIT |
+		RenderingDeviceCommons::SHADER_STAGE_INTERSECTION_BIT;
+
 static inline uint32_t aligned_to(uint32_t p_size, uint32_t p_alignment) {
 	if (p_size % p_alignment) {
 		return p_size + (p_alignment - (p_size % p_alignment));
@@ -292,11 +298,7 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 		// This makes no practical difference in current graphics drivers, since Vulkan is the outlier.
 		BitField<RDC::ShaderStage> uniform_stage_flags;
 		if (pipeline_type == RDC::PIPELINE_TYPE_RAYTRACING) {
-			uniform_stage_flags = RDC::SHADER_STAGE_RAYGEN |
-					RDC::SHADER_STAGE_ANY_HIT |
-					RDC::SHADER_STAGE_CLOSEST_HIT |
-					RDC::SHADER_STAGE_MISS |
-					RDC::SHADER_STAGE_INTERSECTION;
+			uniform_stage_flags = RAYTRACING_STAGE_FLAGS;
 		} else {
 			uniform_stage_flags = stage_flag;
 		}
@@ -786,7 +788,7 @@ bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 
 	// Read reflection data.
 	ERR_FAIL_COND_V_MSG(int64_t(bytes_offset + sizeof(ReflectionData)) > p_bytes.size(), false, "Not enough bytes for reflection data in shader container.");
-	reflection_data = *(const ReflectionData *)(&bytes_ptr[bytes_offset]);
+	memcpy(&reflection_data, &bytes_ptr[bytes_offset], sizeof(ReflectionData));
 	bytes_offset += sizeof(ReflectionData);
 	bytes_offset += _from_bytes_reflection_extra_data(&bytes_ptr[bytes_offset]);
 
@@ -862,6 +864,19 @@ bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 	bytes_offset += _from_bytes_footer_extra_data(&bytes_ptr[bytes_offset]);
 
 	ERR_FAIL_COND_V_MSG(bytes_offset != (uint64_t)p_bytes.size(), false, "Amount of bytes in the container does not match the amount of bytes read.");
+
+	if (reflection_data.pipeline_type == RDC::PIPELINE_TYPE_RAYTRACING) {
+		// Older containers combined stage indices (5 | 6 | 7 | 8 | 9 == 0x0f).
+		// Keep their saved code usable with the corrected resource visibility.
+		for (ReflectionBindingData &binding : reflection_binding_set_uniforms_data) {
+			if (binding.stages == 0x0f) {
+				binding.stages = RAYTRACING_STAGE_FLAGS;
+			}
+		}
+		if (reflection_data.push_constant_size > 0 && reflection_data.push_constant_stages_mask == 0x0f) {
+			reflection_data.push_constant_stages_mask = RAYTRACING_STAGE_FLAGS;
+		}
+	}
 	return true;
 }
 
