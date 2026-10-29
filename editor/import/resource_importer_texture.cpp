@@ -38,8 +38,9 @@
 #include "editor/settings/editor_settings.h"
 #include "editor/themes/editor_scale.h"
 #include "editor/themes/editor_theme_manager.h"
-#include "modules/webp/texture_loader_webp.h"
 #include "scene/resources/compressed_texture.h"
+
+#include "modules/webp/texture_loader_webp.h"
 
 void ResourceImporterTexture::_texture_reimport_roughness(const Ref<CompressedTexture2D> &p_tex, const String &p_normal_path, RSE::TextureDetectRoughnessChannel p_channel) {
 	ERR_FAIL_COND(p_tex.is_null());
@@ -1048,7 +1049,7 @@ bool ResourceImporterTexture::are_import_settings_valid(const String &p_path, co
 			return false;
 		}
 
-		if (is_animated != bool(p_meta["animated_webp"]) || is_animated) {
+		if (is_animated != bool(p_meta["animated_webp"])) {
 			return false;
 		}
 	}

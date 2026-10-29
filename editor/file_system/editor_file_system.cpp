@@ -621,6 +621,7 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 	Vector<String> to_check;
 
 	String importer_name;
+	bool importer_explicit = true;
 	String source_file = "";
 	String source_md5 = "";
 	Vector<String> dest_files;
@@ -660,6 +661,8 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 				version = value;
 			} else if (assign == "importer") {
 				importer_name = value;
+			} else if (assign == "importer_explicit") {
+				importer_explicit = value;
 			} else if (assign == "uid") {
 				found_uid = true;
 			} else if (assign == "source_file") {
@@ -693,7 +696,7 @@ bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_
 	Ref<ResourceImporter> importer = ResourceFormatImporter::get_singleton()->get_importer_by_name(importer_name);
 	Ref<ResourceImporter> preferred_importer;
 	if (!importer_name.is_empty()) {
-		preferred_importer = ResourceFormatImporter::get_singleton()->get_importer_by_file(p_path);
+		preferred_importer = ResourceFormatImporter::get_singleton()->get_importer_for_existing_file(p_path, importer_name, importer_explicit);
 	}
 
 	if (preferred_importer.is_valid() && preferred_importer->get_importer_name() != importer_name) {
@@ -2638,6 +2641,7 @@ Error EditorFileSystem::_reimport_group(const String &p_group_file, const Vector
 
 	HashMap<String, HashMap<StringName, Variant>> source_file_options;
 	HashMap<String, ResourceUID::ID> uids;
+	HashMap<String, bool> explicit_importers;
 	HashMap<String, String> base_paths;
 	for (int i = 0; i < p_files.size(); i++) {
 		Ref<ConfigFile> config;
@@ -2661,6 +2665,7 @@ Error EditorFileSystem::_reimport_group(const String &p_group_file, const Vector
 		}
 
 		uids[p_files[i]] = uid;
+		explicit_importers[p_files[i]] = config->get_value("remap", "importer_explicit", true);
 
 		source_file_options[p_files[i]] = HashMap<StringName, Variant>();
 		importer_name = file_importer_name;
@@ -2714,6 +2719,7 @@ Error EditorFileSystem::_reimport_group(const String &p_group_file, const Vector
 			f->store_line("[remap]");
 			f->store_line("");
 			f->store_line("importer=\"" + importer->get_importer_name() + "\"");
+			f->store_line(String("importer_explicit=") + (explicit_importers[file] ? "true" : "false"));
 			int version = importer->get_format_version();
 			if (version > 0) {
 				f->store_line("importer_version=" + itos(version));
@@ -2829,7 +2835,7 @@ Error EditorFileSystem::_reimport_group(const String &p_group_file, const Vector
 	return err;
 }
 
-Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<StringName, Variant> &p_custom_options, const String &p_custom_importer, Variant *p_generator_parameters, bool p_update_file_system) {
+Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<StringName, Variant> &p_custom_options, const String &p_custom_importer, Variant *p_generator_parameters, bool p_update_file_system, const Ref<ResourceImporter> &p_scheduled_importer) {
 	print_verbose(vformat("EditorFileSystem: Importing file: %s", p_file));
 	uint64_t start_time = OS::get_singleton()->get_ticks_msec();
 
@@ -2844,6 +2850,7 @@ Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<Strin
 
 	HashMap<StringName, Variant> params(p_custom_options);
 	String importer_name; //empty by default though
+	bool importer_explicit = !p_custom_importer.is_empty();
 
 	if (!p_custom_importer.is_empty()) {
 		importer_name = p_custom_importer;
@@ -2874,6 +2881,7 @@ Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<Strin
 			if (cf->has_section("remap")) {
 				if (p_custom_importer.is_empty()) {
 					importer_name = cf->get_value("remap", "importer");
+					importer_explicit = cf->get_value("remap", "importer_explicit", true);
 				}
 
 				if (cf->has_section_key("remap", "uid")) {
@@ -2908,18 +2916,28 @@ Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<Strin
 		}
 		return OK;
 	}
-	Ref<ResourceImporter> importer;
+	Ref<ResourceImporter> importer = p_scheduled_importer;
 	bool load_default = false;
-	if (p_custom_importer.is_empty()) {
-		Ref<ResourceImporter> preferred_importer = ResourceFormatImporter::get_singleton()->get_importer_by_file(p_file);
+	bool migrated = false;
+	if (importer.is_valid()) {
+		// A worker must execute the same importer whose threading hooks were
+		// selected by the main thread, even if source content changes meanwhile.
+		load_default = importer_name.is_empty() || (importer_name != importer->get_importer_name() && ResourceFormatImporter::get_singleton()->get_importer_by_name(importer_name).is_null());
+		migrated = !load_default && importer_name != importer->get_importer_name();
+		importer_name = importer->get_importer_name();
+		if (load_default) {
+			importer_explicit = false;
+		}
+	} else if (p_custom_importer.is_empty() && !importer_name.is_empty() && ResourceFormatImporter::get_singleton()->get_importer_by_name(importer_name).is_valid()) {
+		Ref<ResourceImporter> preferred_importer = ResourceFormatImporter::get_singleton()->get_importer_for_existing_file(p_file, importer_name, importer_explicit);
 		if (preferred_importer.is_valid() && preferred_importer->get_importer_name() != importer_name) {
 			print_verbose(vformat("EditorFileSystem: Updating importer for '%s' from '%s' to '%s'.", p_file, importer_name, preferred_importer->get_importer_name()));
 			importer_name = preferred_importer->get_importer_name();
-			load_default = true;
+			migrated = true;
 		}
 	}
 	//find the importer
-	if (!importer_name.is_empty()) {
+	if (importer.is_null() && !importer_name.is_empty()) {
 		importer = ResourceFormatImporter::get_singleton()->get_importer_by_name(importer_name);
 	}
 
@@ -2927,6 +2945,7 @@ Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<Strin
 		//not found by name, find by extension
 		importer = ResourceFormatImporter::get_singleton()->get_importer_by_file(p_file);
 		load_default = true;
+		importer_explicit = false;
 		if (importer.is_null()) {
 			ERR_FAIL_V_MSG(ERR_FILE_CANT_OPEN, "BUG: File queued for import, but can't be imported, importer for type '" + importer_name + "' not found.");
 		}
@@ -2937,10 +2956,20 @@ Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<Strin
 		importer->handle_compatibility_options(params);
 	}
 
+	// A content-driven migration must not overwrite saved or custom options.
+	if (migrated && ProjectSettings::get_singleton()->has_setting("importer_defaults/" + importer->get_importer_name())) {
+		Dictionary defaults = GLOBAL_GET("importer_defaults/" + importer->get_importer_name());
+		for (const KeyValue<Variant, Variant> &kv : defaults) {
+			if (!params.has(kv.key)) {
+				params[kv.key] = kv.value;
+			}
+		}
+	}
+
 	//mix with default params, in case a parameter is missing
 
 	List<ResourceImporter::ImportOption> opts;
-	importer->get_import_options(p_file, &opts);
+	importer->get_import_options_for_import(p_file, params, &opts);
 	for (const ResourceImporter::ImportOption &E : opts) {
 		if (!params.has(E.option.name)) { //this one is not present
 			params[E.option.name] = E.default_value;
@@ -2979,6 +3008,7 @@ Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<Strin
 		f->store_line("[remap]");
 		f->store_line("");
 		f->store_line("importer=\"" + importer->get_importer_name() + "\"");
+		f->store_line(String("importer_explicit=") + (importer_explicit ? "true" : "false"));
 		int version = importer->get_format_version();
 		if (version > 0) {
 			f->store_line("importer_version=" + itos(version));
@@ -3276,7 +3306,7 @@ void EditorFileSystem::_refresh_filesystem() {
 void EditorFileSystem::_reimport_thread(uint32_t p_index, ImportThreadData *p_import_data) {
 	ResourceLoader::set_is_import_thread(true);
 	int file_idx = p_import_data->reimport_from + int(p_index);
-	_reimport_file(p_import_data->reimport_files[file_idx].path);
+	_reimport_file(p_import_data->reimport_files[file_idx].path, HashMap<StringName, Variant>(), String(), nullptr, true, p_import_data->importer);
 	ResourceLoader::set_is_import_thread(false);
 
 	p_import_data->imported_sem->post();
@@ -3331,7 +3361,6 @@ void EditorFileSystem::reimport_files(const Vector<String> &p_files) {
 			// It's a regular file.
 			ImportFile ifile;
 			ifile.path = file;
-			ResourceFormatImporter::get_singleton()->get_import_order_threads_and_importer(file, ifile.order, ifile.threaded, ifile.importer);
 			reloads.push_back(file);
 			reimport_files.push_back(ifile);
 		}
@@ -3344,12 +3373,16 @@ void EditorFileSystem::reimport_files(const Vector<String> &p_files) {
 		}
 	}
 
-	reimport_files.sort();
-
 	ep->step(TTR("Executing pre-reimport operations..."), 0, true);
 
 	// Emit the resource_reimporting signal for the single file before the actual importation.
 	emit_signal(SNAME("resources_reimporting"), reloads);
+
+	// Pre-import callbacks may change source content or importer choices.
+	for (ImportFile &file : reimport_files) {
+		ResourceFormatImporter::get_singleton()->get_import_order_threads_and_importer(file.path, file.order, file.threaded, file.importer);
+	}
+	reimport_files.sort();
 
 #ifdef WEB_ENABLED
 	// On web, busy-wait loops on the main thread block the JavaScript event loop,
@@ -3390,6 +3423,7 @@ void EditorFileSystem::reimport_files(const Vector<String> &p_files) {
 					tdata.reimport_from = from;
 					tdata.reimport_files = reimport_files.ptr();
 					tdata.imported_sem = &imported_sem;
+					tdata.importer = importer;
 
 					int item_count = i - from + 1;
 					WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &EditorFileSystem::_reimport_thread, &tdata, item_count, -1, false, vformat(TTR("Import resources of type: %s"), reimport_files[from].importer));

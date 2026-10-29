@@ -33,6 +33,10 @@
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
 
+namespace TestImporterMigration {
+struct Access;
+}
+
 class ResourceImporter;
 class ResourceFormatImporter;
 
@@ -41,10 +45,13 @@ typedef Ref<Resource> (*ResourceFormatImporterLoadOnStartup)(ResourceFormatImpor
 class ResourceFormatImporter : public ResourceFormatLoader {
 	GDSOFTCLASS(ResourceFormatImporter, ResourceFormatLoader);
 
+	friend struct TestImporterMigration::Access;
+
 	struct PathAndType {
 		String path;
 		String type;
 		String importer;
+		bool importer_explicit = true; // Preserve legacy choices whose provenance was not recorded.
 		String group_file;
 		Variant metadata;
 		ResourceUID::ID uid = ResourceUID::INVALID_ID;
@@ -95,6 +102,7 @@ public:
 	void remove_importer(const Ref<ResourceImporter> &p_importer) { importers.erase(p_importer); }
 	Ref<ResourceImporter> get_importer_by_name(const String &p_name) const;
 	Ref<ResourceImporter> get_importer_by_file(const String &p_file) const;
+	Ref<ResourceImporter> get_importer_for_existing_file(const String &p_file, const String &p_importer, bool p_explicit = true) const;
 	void get_importers_for_file(const String &p_file, List<Ref<ResourceImporter>> *r_importers);
 	void get_importers(List<Ref<ResourceImporter>> *r_importers);
 
@@ -151,6 +159,7 @@ public:
 	virtual String get_preset_name(int p_idx) const { return String(); }
 
 	virtual void get_import_options(const String &p_path, List<ImportOption> *r_options, int p_preset = 0) const = 0;
+	void get_import_options_for_import(const String &p_path, const HashMap<StringName, Variant> &p_values, List<ImportOption> *r_options) const;
 	virtual bool get_option_visibility(const String &p_path, const String &p_option, const HashMap<StringName, Variant> &p_options) const = 0;
 	virtual void handle_compatibility_options(HashMap<StringName, Variant> &p_import_params) const {}
 	virtual String get_option_group_file() const { return String(); }

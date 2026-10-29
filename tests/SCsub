@@ -21,5 +21,9 @@ if env["scu_build"]:
 else:
     env.add_source_files(tests_obj, glob.glob("*.cpp") + force_link_sources)
 
+# Exercise the actual WebP importer without requiring an editor in focused tests.
+if not env.editor_build and env["module_webp_enabled"]:
+    env.add_source_files(tests_obj, "#editor/import/resource_importer_webp_texture.cpp")
+
 lib = env.add_library("tests", tests_obj)
 env.Prepend(LIBS=[lib])

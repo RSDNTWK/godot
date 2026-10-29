@@ -30,9 +30,12 @@
 
 #include "resource_importer_webp_texture.h"
 
+#include "core/io/config_file.h"
 #include "core/io/dir_access.h"
-#include "modules/webp/texture_loader_webp.h"
+#include "scene/resources/animated_texture.h"
 #include "scene/resources/texture.h"
+
+#include "modules/webp/texture_loader_webp.h"
 
 String ResourceImporterWebPTexture::get_importer_name() const {
 	return "webp_texture";
@@ -77,10 +80,31 @@ String ResourceImporterWebPTexture::get_import_settings_string() const {
 }
 
 void ResourceImporterWebPTexture::get_import_options(const String &p_path, List<ImportOption> *r_options, int p_preset) const {
+	// Keep the saved Texture options dormant while the source is animated, so
+	// switching back to a static texture does not reconstruct them from defaults.
+	Ref<ConfigFile> config;
+	config.instantiate();
+	if (config->load(p_path + ".import") != OK || !config->has_section("params")) {
+		return;
+	}
+	Ref<ResourceImporter> texture = ResourceFormatImporter::get_singleton()->get_importer_by_name("texture");
+	if (texture.is_null()) {
+		return;
+	}
+	List<ImportOption> texture_options;
+	texture->get_import_options(p_path, &texture_options);
+	for (const ImportOption &option : texture_options) {
+		if (config->has_section_key("params", option.option.name)) {
+			ImportOption dormant = option;
+			dormant.option.usage = PROPERTY_USAGE_STORAGE;
+			dormant.default_value = config->get_value("params", option.option.name);
+			r_options->push_back(dormant);
+		}
+	}
 }
 
 bool ResourceImporterWebPTexture::get_option_visibility(const String &p_path, const String &p_option, const HashMap<StringName, Variant> &p_options) const {
-	return true;
+	return false;
 }
 
 Error ResourceImporterWebPTexture::import(ResourceUID::ID p_source_id, const String &p_source_file, const String &p_save_path, const HashMap<StringName, Variant> &p_options, List<String> *r_platform_variants, List<String> *r_gen_files, Variant *r_metadata) {
@@ -93,7 +117,7 @@ Error ResourceImporterWebPTexture::import(ResourceUID::ID p_source_id, const Str
 
 	if (r_metadata) {
 		Dictionary meta;
-		meta["animated_webp"] = true;
+		meta["animated_webp"] = Object::cast_to<AnimatedTexture>(texture.ptr()) != nullptr;
 		meta["format_version"] = get_format_version();
 		*r_metadata = meta;
 	}
@@ -106,7 +130,7 @@ Error ResourceImporterWebPTexture::import(ResourceUID::ID p_source_id, const Str
 }
 
 bool ResourceImporterWebPTexture::are_import_settings_valid(const String &p_path, const Dictionary &p_meta) const {
-	if (!p_meta.has("animated_webp") || !bool(p_meta["animated_webp"]) || int(p_meta.get("format_version", 0)) != get_format_version()) {
+	if (!p_meta.has("animated_webp") || int(p_meta.get("format_version", 0)) != get_format_version()) {
 		return false;
 	}
 
@@ -115,5 +139,5 @@ bool ResourceImporterWebPTexture::are_import_settings_valid(const String &p_path
 		return false;
 	}
 
-	return is_animated;
+	return is_animated == bool(p_meta["animated_webp"]);
 }

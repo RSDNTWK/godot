@@ -57,6 +57,7 @@ public:
 	HashSet<StringName> checked;
 	bool checking = false;
 	bool skip = false;
+	bool importer_selected = false;
 	String base_options_path;
 
 	bool _set(const StringName &p_name, const Variant &p_value) {
@@ -404,6 +405,7 @@ void ImportDock::_update_preset_menu() {
 }
 
 void ImportDock::_importer_selected(int i_idx) {
+	params->importer_selected = true;
 	String name = import_as->get_selected_metadata();
 	if (name == "keep") {
 		params->importer.unref();
@@ -503,6 +505,7 @@ void ImportDock::clear() {
 	preset->set_disabled(true);
 	params->values.clear();
 	params->properties.clear();
+	params->importer_selected = false;
 	params->update();
 	preset->get_popup()->clear();
 	content->hide();
@@ -644,6 +647,9 @@ void ImportDock::_reimport() {
 
 		if (params->importer.is_valid()) {
 			String importer_name = params->importer->get_importer_name();
+			if (params->importer_selected) {
+				config->set_value("remap", "importer_explicit", true);
+			}
 
 			if (params->checking && config->get_value("remap", "importer") == params->importer->get_importer_name()) {
 				//update only what is edited (checkboxes) if the importer is the same
@@ -722,6 +728,7 @@ void ImportDock::_set_dirty(bool p_dirty) {
 		import->add_theme_color_override(SceneStringName(font_color), get_theme_color(SNAME("warning_color"), EditorStringName(Editor)));
 		import->set_tooltip_text(TTRC("You have pending changes that haven't been applied yet. Click Reimport to apply changes made to the import options.\nSelecting another resource in the FileSystem dock without clicking Reimport first will discard changes made in the Import dock."));
 	} else {
+		params->importer_selected = false;
 		// Remove the dirty marker on the Reimport button.
 		import->set_text(TTRC("Reimport"));
 		import->remove_theme_color_override(SceneStringName(font_color));

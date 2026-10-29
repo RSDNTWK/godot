@@ -105,6 +105,8 @@ Error ResourceFormatImporter::_get_path_and_type(const String &p_path, PathAndTy
 				r_path_and_type.type = ClassDB::get_compatibility_remapped_class(value);
 			} else if (assign == "importer") {
 				r_path_and_type.importer = value;
+			} else if (assign == "importer_explicit") {
+				r_path_and_type.importer_explicit = value;
 			} else if (assign == "uid") {
 				r_path_and_type.uid = ResourceUID::get_singleton()->text_to_id(value);
 			} else if (assign == "group_file") {
@@ -264,7 +266,7 @@ Error ResourceFormatImporter::get_import_order_threads_and_importer(const String
 		Error err = _get_path_and_type(p_path, pat, false);
 
 		if (err == OK) {
-			importer = get_importer_by_name(pat.importer);
+			importer = get_importer_for_existing_file(p_path, pat.importer, pat.importer_explicit);
 		}
 	} else {
 		importer = get_importer_by_file(p_path);
@@ -288,7 +290,7 @@ int ResourceFormatImporter::get_import_order(const String &p_path) const {
 		Error err = _get_path_and_type(p_path, pat, false);
 
 		if (err == OK) {
-			importer = get_importer_by_name(pat.importer);
+			importer = get_importer_for_existing_file(p_path, pat.importer, pat.importer_explicit);
 		}
 	} else {
 		importer = get_importer_by_file(p_path);
@@ -544,6 +546,34 @@ Ref<ResourceImporter> ResourceFormatImporter::get_importer_by_file(const String 
 	return importer;
 }
 
+Ref<ResourceImporter> ResourceFormatImporter::get_importer_for_existing_file(const String &p_file, const String &p_importer, bool p_explicit) const {
+	if (p_importer == "keep" || p_importer == "skip") {
+		return Ref<ResourceImporter>();
+	}
+
+	Ref<ResourceImporter> importer = get_importer_by_name(p_importer);
+	if (importer.is_null()) {
+		return get_importer_by_file(p_file);
+	}
+
+	// Priority chooses defaults, not replacements for saved importer choices.
+	// Only the built-in texture pair follows changes to WebP animation content.
+	if (!p_explicit && p_file.get_extension().nocasecmp_to("webp") == 0 && (p_importer == "texture" || p_importer == "webp_texture")) {
+		Ref<ResourceImporter> animated = get_importer_by_name("webp_texture");
+		if (animated.is_valid() && animated->can_import(p_file)) {
+			return animated;
+		}
+		if (p_importer == "webp_texture") {
+			Ref<ResourceImporter> texture = get_importer_by_name("texture");
+			if (texture.is_valid() && texture->can_import(p_file)) {
+				return texture;
+			}
+		}
+	}
+
+	return importer;
+}
+
 String ResourceFormatImporter::get_import_base_path(const String &p_for_file) const {
 	return ProjectSettings::get_singleton()->get_imported_files_path().path_join(p_for_file.get_file() + "-" + p_for_file.md5_text());
 }
@@ -558,7 +588,7 @@ bool ResourceFormatImporter::are_import_settings_valid(const String &p_path) con
 	}
 
 	if (!pat.importer.is_empty() && pat.importer != "keep" && pat.importer != "skip") {
-		Ref<ResourceImporter> preferred_importer = get_importer_by_file(p_path);
+		Ref<ResourceImporter> preferred_importer = get_importer_for_existing_file(p_path, pat.importer, pat.importer_explicit);
 		if (preferred_importer.is_valid() && preferred_importer->get_importer_name() != pat.importer) {
 			return false;
 		}
@@ -592,6 +622,34 @@ ResourceFormatImporter::ResourceFormatImporter() {
 }
 
 //////////////
+
+void ResourceImporter::get_import_options_for_import(const String &p_path, const HashMap<StringName, Variant> &p_values, List<ImportOption> *r_options) const {
+	get_import_options(p_path, r_options);
+	if (get_importer_name() != "webp_texture") {
+		return;
+	}
+
+	// Import-time values include custom options and project defaults which may
+	// not exist in the old sidecar yet. Preserve known Texture options too.
+	Ref<ResourceImporter> texture = ResourceFormatImporter::get_singleton()->get_importer_by_name("texture");
+	if (texture.is_null()) {
+		return;
+	}
+	HashSet<StringName> declared;
+	for (const ImportOption &option : *r_options) {
+		declared.insert(option.option.name);
+	}
+	List<ImportOption> texture_options;
+	texture->get_import_options(p_path, &texture_options);
+	for (const ImportOption &option : texture_options) {
+		if (p_values.has(option.option.name) && !declared.has(option.option.name)) {
+			ImportOption dormant = option;
+			dormant.option.usage = PROPERTY_USAGE_STORAGE;
+			dormant.default_value = p_values[option.option.name];
+			r_options->push_back(dormant);
+		}
+	}
+}
 
 void ResourceImporter::get_build_dependencies(const String &p_path, HashSet<String> *r_dependencies) {
 	Vector<String> ret;

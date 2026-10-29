@@ -40,6 +40,7 @@
 #include "scene/main/node.h"
 
 class ResourceFormatImporter;
+class ResourceImporter;
 class FileAccess;
 
 struct EditorProgressBG;
@@ -273,7 +274,7 @@ class EditorFileSystem : public Node {
 
 	void _update_extensions();
 
-	Error _reimport_file(const String &p_file, const HashMap<StringName, Variant> &p_custom_options = HashMap<StringName, Variant>(), const String &p_custom_importer = String(), Variant *generator_parameters = nullptr, bool p_update_file_system = true);
+	Error _reimport_file(const String &p_file, const HashMap<StringName, Variant> &p_custom_options = HashMap<StringName, Variant>(), const String &p_custom_importer = String(), Variant *generator_parameters = nullptr, bool p_update_file_system = true, const Ref<ResourceImporter> &p_scheduled_importer = Ref<ResourceImporter>());
 	Error _reimport_group(const String &p_group_file, const Vector<String> &p_files);
 
 	bool _test_for_reimport(const String &p_path, const String &p_expected_import_md5);
@@ -355,6 +356,7 @@ class EditorFileSystem : public Node {
 		const ImportFile *reimport_files;
 		int reimport_from;
 		Semaphore *imported_sem = nullptr;
+		Ref<ResourceImporter> importer;
 	};
 
 	void _reimport_thread(uint32_t p_index, ImportThreadData *p_import_data);
