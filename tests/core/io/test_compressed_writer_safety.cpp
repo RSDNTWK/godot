@@ -37,6 +37,11 @@ TEST_FORCE_LINK(test_compressed_writer_safety)
 #include "tests/test_utils.h"
 
 #include <cstring>
+#ifdef LINUXBSD_ENABLED
+#include <sys/resource.h>
+
+#include <csignal>
+#endif
 
 namespace TestCompressedWriterSafety {
 struct Fixture {
@@ -94,13 +99,48 @@ TEST_CASE("[N037][CompressedWriter] Unrepresentable write extents reject before 
 	CHECK(writer.get_error() == ERR_INVALID_PARAMETER);
 }
 #ifdef LINUXBSD_ENABLED
+struct ScopedFileSizeFailure {
+	rlimit previous_limit = {};
+	void (*previous_handler)(int) = SIG_DFL;
+	bool active = false;
+	ScopedFileSizeFailure() {
+		if (getrlimit(RLIMIT_FSIZE, &previous_limit) != 0) {
+			return;
+		}
+		previous_handler = std::signal(SIGXFSZ, SIG_IGN);
+		if (previous_handler == SIG_ERR) {
+			return;
+		}
+		rlimit limit = previous_limit;
+		limit.rlim_cur = 0;
+		if (setrlimit(RLIMIT_FSIZE, &limit) != 0) {
+			std::signal(SIGXFSZ, previous_handler);
+			return;
+		}
+		active = true;
+	}
+	~ScopedFileSizeFailure() {
+		if (active) {
+			CHECK(setrlimit(RLIMIT_FSIZE, &previous_limit) == 0);
+			std::signal(SIGXFSZ, previous_handler);
+		}
+	}
+};
 TEST_CASE("[N037][CompressedWriter] Backing write failures survive cleanup") {
+	Fixture fixture;
 	const Vector<uint8_t> plain = payload(513);
 	FileAccessCompressed writer;
 	writer.configure("GCMP", Compression::MODE_GZIP, 32);
-	REQUIRE(writer.open_internal("/dev/full", FileAccess::WRITE) == OK);
+	REQUIRE(writer.open_internal(fixture.path, FileAccess::WRITE) == OK);
 	REQUIRE(writer.store_buffer(plain.ptr(), plain.size()));
-	writer.close();
+	{
+		ScopedFileSizeFailure failure;
+		REQUIRE(failure.active);
+		if (!failure.active) {
+			return;
+		}
+		writer.close();
+	}
 	CHECK_FALSE(writer.is_open());
 	CHECK(writer.get_error() == ERR_FILE_CANT_WRITE);
 	writer.close();
