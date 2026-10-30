@@ -72,6 +72,7 @@ Error FileAccessCompressed::_load_read_block(uint32_t p_block) const {
 Error FileAccessCompressed::open_after_magic(Ref<FileAccess> p_base) {
 	_close();
 	writing = false;
+	write_error = OK;
 	read_error = OK;
 	read_blocks.clear();
 	ERR_FAIL_COND_V(p_base.is_null() || !p_base->is_open(), ERR_INVALID_PARAMETER);
@@ -141,27 +142,35 @@ Error FileAccessCompressed::open_after_magic(Ref<FileAccess> p_base) {
 Error FileAccessCompressed::open_internal(const String &p_path, int p_mode_flags) {
 	ERR_FAIL_COND_V(p_mode_flags == READ_WRITE, ERR_UNAVAILABLE);
 	_close();
-	ERR_FAIL_COND_V((p_mode_flags & WRITE) && block_size == 0, ERR_INVALID_PARAMETER);
-
+	write_error = OK;
+	Vector<uint8_t> initial;
+	if (p_mode_flags & WRITE) {
+		if (block_size == 0 || cmode < Compression::MODE_FASTLZ || cmode > Compression::MODE_LZMA2 || cmode == Compression::MODE_BROTLI) {
+			write_error = ERR_INVALID_PARAMETER;
+			return write_error;
+		}
+		write_error = initial.resize(256);
+		if (write_error != OK) {
+			return write_error;
+		}
+	}
 	Error err;
 	f = FileAccess::open(p_path, p_mode_flags, &err);
 	if (err != OK) {
-		//not openable
 		f.unref();
+		if (p_mode_flags & WRITE) {
+			write_error = err;
+		}
 		return err;
 	}
-
 	if (p_mode_flags & WRITE) {
 		read_error = OK;
-		buffer.clear();
-		writing = true;
+		buffer = std::move(initial);
 		write_pos = 0;
-		write_buffer_size = 256;
-		buffer.resize(256);
+		write_buffer_size = buffer.size();
 		write_max = 0;
 		write_ptr = buffer.ptrw();
-
-		//don't store anything else unless it's done saving!
+		writing = true;
 	} else {
 		char rmagic[5];
 		if (f->get_buffer((uint8_t *)rmagic, 4) != 4) {
@@ -176,55 +185,80 @@ Error FileAccessCompressed::open_internal(const String &p_path, int p_mode_flags
 			return err;
 		}
 	}
-
 	return OK;
+}
+
+Error FileAccessCompressed::_store_compressed() {
+	if (block_size == 0 || write_max > UINT32_MAX) {
+		return ERR_INVALID_PARAMETER;
+	}
+	const uint64_t count = write_max / block_size + 1;
+	if (count > UINT32_MAX) {
+		return ERR_INVALID_PARAMETER;
+	}
+	const uint32_t last_size = write_max % block_size;
+	const int64_t bound = Compression::get_max_compressed_buffer_size(count == 1 ? last_size : block_size, cmode);
+	if (bound < 0) {
+		return ERR_INVALID_PARAMETER;
+	}
+	Vector<uint8_t> compressed;
+	Error error = compressed.resize(bound);
+	if (error != OK) {
+		return error;
+	}
+	Vector<uint32_t> sizes;
+	error = sizes.resize(count);
+	if (error != OK) {
+		return error;
+	}
+	uint8_t signature[4];
+	for (int i = 0; i < 4; i++) {
+		signature[i] = uint8_t(magic[i]);
+	}
+	if (!f->store_buffer(signature, 4) || !f->store_32(cmode) || !f->store_32(block_size) || !f->store_32(uint32_t(write_max))) {
+		return ERR_FILE_CANT_WRITE;
+	}
+	for (uint64_t i = 0; i < count; i++) {
+		if (!f->store_32(0)) {
+			return ERR_FILE_CANT_WRITE;
+		}
+	}
+	for (uint64_t i = 0; i < count; i++) {
+		const uint32_t length = i == count - 1 ? last_size : block_size;
+		const int64_t actual = Compression::compress(compressed.ptrw(), write_ptr + i * block_size, length, cmode);
+		if (actual < 0 || actual > bound || uint64_t(actual) > UINT32_MAX || (actual == 0 && length > 0)) {
+			return ERR_INVALID_DATA;
+		}
+		if (actual > 0 && !f->store_buffer(compressed.ptr(), actual)) {
+			return ERR_FILE_CANT_WRITE;
+		}
+		sizes.write[i] = uint32_t(actual);
+	}
+	f->seek(16);
+	if (f->get_position() != 16 || f->get_error() != OK) {
+		return ERR_FILE_CANT_WRITE;
+	}
+	for (uint32_t size : sizes) {
+		if (!f->store_32(size)) {
+			return ERR_FILE_CANT_WRITE;
+		}
+	}
+	f->seek_end();
+	if (f->get_error() != OK || !f->store_buffer(signature, 4)) {
+		return ERR_FILE_CANT_WRITE;
+	}
+	f->flush();
+	return f->get_error();
 }
 
 void FileAccessCompressed::_close() {
 	if (f.is_null()) {
 		return;
 	}
-
 	if (writing) {
-		//save block table and all compressed blocks
-
-		CharString mgc = magic.utf8();
-		f->store_buffer((const uint8_t *)mgc.get_data(), mgc.length()); //write header 4
-		f->store_32(cmode); //write compression mode 4
-		f->store_32(block_size); //write block size 4
-		f->store_32(uint32_t(write_max)); //max amount of data written 4
-		uint32_t bc = (write_max / block_size) + 1;
-
-		for (uint32_t i = 0; i < bc; i++) {
-			f->store_32(0); //compressed sizes, will update later
+		if (write_error == OK) {
+			write_error = _store_compressed();
 		}
-
-		uint32_t last_block_size = write_max % block_size;
-
-		// Temporary buffer for compressed data blocks.
-		LocalVector<uint8_t> temp_cblock;
-		temp_cblock.resize(Compression::get_max_compressed_buffer_size(bc == 1 ? last_block_size : block_size, cmode));
-		uint8_t *temp_cblock_ptr = temp_cblock.ptr();
-
-		// Compress and store the blocks.
-		LocalVector<uint32_t> block_sizes;
-		for (uint32_t i = 0; i < bc; i++) {
-			uint32_t bl = i == (bc - 1) ? last_block_size : block_size;
-			uint8_t *bp = &write_ptr[i * block_size];
-
-			const int64_t compressed_size = Compression::compress(temp_cblock_ptr, bp, bl, cmode);
-			ERR_FAIL_COND_MSG(compressed_size < 0, "FileAccessCompressed: Error compressing data.");
-
-			f->store_buffer(temp_cblock_ptr, (uint64_t)compressed_size);
-			block_sizes.push_back(compressed_size);
-		}
-
-		f->seek(16); //ok write block sizes
-		for (uint32_t i = 0; i < bc; i++) {
-			f->store_32(block_sizes[i]);
-		}
-		f->seek_end();
-		f->store_buffer((const uint8_t *)mgc.get_data(), mgc.length()); //magic at the end too
 	} else {
 		comp_buffer.clear();
 		read_blocks.clear();
@@ -347,6 +381,9 @@ uint64_t FileAccessCompressed::get_buffer(uint8_t *p_dst, uint64_t p_length) con
 }
 
 Error FileAccessCompressed::get_error() const {
+	if (write_error != OK) {
+		return write_error;
+	}
 	if (read_error != OK) {
 		return read_error;
 	}
@@ -366,21 +403,34 @@ void FileAccessCompressed::flush() {
 bool FileAccessCompressed::store_buffer(const uint8_t *p_src, uint64_t p_length) {
 	ERR_FAIL_COND_V_MSG(f.is_null(), false, "File must be opened before use.");
 	ERR_FAIL_COND_V_MSG(!writing, false, "File has not been opened in write mode.");
-
-	if (write_pos + (p_length) > write_max) {
-		write_max = write_pos + (p_length);
+	if (write_error != OK) {
+		return false;
 	}
-	if (write_max > write_buffer_size) {
-		write_buffer_size = Math::next_power_of_2(write_max);
-		ERR_FAIL_COND_V(buffer.resize(write_buffer_size) != OK, false);
+	if (write_pos > UINT32_MAX || p_length > UINT32_MAX - write_pos || (!p_src && p_length > 0)) {
+		write_error = ERR_INVALID_PARAMETER;
+		return false;
+	}
+	const uint64_t end = write_pos + p_length;
+	const uint64_t maximum = MAX(write_max, end);
+	if (maximum > write_buffer_size) {
+		const uint64_t capacity = Math::next_power_of_2(maximum);
+		if (capacity > SIZE_MAX || capacity > uint64_t(INT64_MAX)) {
+			write_error = ERR_OUT_OF_MEMORY;
+			return false;
+		}
+		const Error error = buffer.resize(capacity);
+		if (error != OK) {
+			write_error = error;
+			return false;
+		}
 		write_ptr = buffer.ptrw();
+		write_buffer_size = capacity;
 	}
-
-	if (p_length) {
+	if (p_length > 0) {
 		memcpy(write_ptr + write_pos, p_src, p_length);
 	}
-
-	write_pos += p_length;
+	write_max = maximum;
+	write_pos = end;
 	return true;
 }
 
