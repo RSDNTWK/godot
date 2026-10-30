@@ -30,6 +30,8 @@
 
 #include "packed_data_container.h"
 
+#include "packed_data_container_internal.h"
+
 #include "core/io/marshalls.h"
 #include "core/object/class_db.h"
 
@@ -226,16 +228,34 @@ Variant PackedDataContainer::_key_at_ofs(uint32_t p_ofs, const Variant &p_key, b
 	}
 }
 
-uint32_t PackedDataContainer::_pack(const Variant &p_data, Vector<uint8_t> &tmpdata, HashMap<String, uint32_t> &string_cache) {
-	switch (p_data.get_type()) {
+Error PackedDataContainer::_pack(const Variant &p_data, Vector<uint8_t> &tmpdata, HashMap<String, uint32_t> &string_cache, uint32_t &r_offset, const void **p_active, int p_depth) {
+	ERR_FAIL_COND_V_MSG(p_depth > Variant::MAX_RECURSION_DEPTH, ERR_OUT_OF_MEMORY, "PackedDataContainer nesting is too deep.");
+	const uint64_t position = tmpdata.size();
+	ERR_FAIL_COND_V(position > UINT32_MAX, ERR_OUT_OF_MEMORY);
+	r_offset = uint32_t(position);
+
+	const Variant::Type type = p_data.get_type();
+	if (type == Variant::ARRAY || type == Variant::DICTIONARY) {
+		const void *identity = type == Variant::ARRAY ? Array(p_data).id() : Dictionary(p_data).id();
+		for (int i = 0; i < p_depth; i++) {
+			ERR_FAIL_COND_V_MSG(p_active[i] == identity, ERR_INVALID_DATA, "Cannot pack a cyclic container.");
+		}
+		p_active[p_depth] = identity;
+	}
+
+	auto grow = [&](uint64_t p_bytes) {
+		int64_t end = 0;
+		const Error error = PackedDataContainerInternal::checked_extent(tmpdata.size(), p_bytes, end);
+		return error == OK ? tmpdata.resize(end) : error;
+	};
+	switch (type) {
 		case Variant::STRING: {
 			String s = p_data;
 			if (string_cache.has(s)) {
-				return string_cache[s];
+				r_offset = string_cache[s];
+				return OK;
 			}
-
-			string_cache[s] = tmpdata.size();
-
+			string_cache[s] = r_offset;
 			[[fallthrough]];
 		}
 		case Variant::NIL:
@@ -243,14 +263,21 @@ uint32_t PackedDataContainer::_pack(const Variant &p_data, Vector<uint8_t> &tmpd
 		case Variant::INT:
 		case Variant::FLOAT:
 		case Variant::VECTOR2:
+		case Variant::VECTOR2I:
 		case Variant::RECT2:
+		case Variant::RECT2I:
 		case Variant::VECTOR3:
+		case Variant::VECTOR3I:
+		case Variant::VECTOR4:
+		case Variant::VECTOR4I:
 		case Variant::TRANSFORM2D:
 		case Variant::PLANE:
 		case Variant::QUATERNION:
 		case Variant::AABB:
 		case Variant::BASIS:
 		case Variant::TRANSFORM3D:
+		case Variant::PROJECTION:
+		case Variant::COLOR:
 		case Variant::PACKED_BYTE_ARRAY:
 		case Variant::PACKED_INT32_ARRAY:
 		case Variant::PACKED_INT64_ARRAY:
@@ -263,94 +290,90 @@ uint32_t PackedDataContainer::_pack(const Variant &p_data, Vector<uint8_t> &tmpd
 		case Variant::PACKED_VECTOR4_ARRAY:
 		case Variant::STRING_NAME:
 		case Variant::NODE_PATH: {
-			uint32_t pos = tmpdata.size();
-			int len;
-			encode_variant(p_data, nullptr, len, false);
-			tmpdata.resize(tmpdata.size() + len);
-			encode_variant(p_data, &tmpdata.write[pos], len, false);
-			return pos;
-
-		} break;
-		// misc types
+			int len = 0;
+			Error error = PackedDataContainerInternal::check_scalar(p_data);
+			ERR_FAIL_COND_V(error != OK, error);
+			error = encode_variant(p_data, nullptr, len, false);
+			ERR_FAIL_COND_V(error != OK, error);
+			ERR_FAIL_COND_V(len < 0, ERR_INVALID_DATA);
+			error = grow(uint64_t(len));
+			ERR_FAIL_COND_V(error != OK, error);
+			int written = 0;
+			error = encode_variant(p_data, tmpdata.ptrw() + position, written, false);
+			ERR_FAIL_COND_V(error != OK, error);
+			ERR_FAIL_COND_V(written != len, ERR_INVALID_DATA);
+			return OK;
+		}
 		case Variant::RID:
 		case Variant::OBJECT: {
-			return _pack(Variant(), tmpdata, string_cache);
-		} break;
+			// Preserve the established serialization of object handles as NIL.
+			return _pack(Variant(), tmpdata, string_cache, r_offset, p_active, p_depth);
+		}
 		case Variant::DICTIONARY: {
-			Dictionary d = p_data;
-			//size is known, use sort
-			uint32_t pos = tmpdata.size();
-			int len = d.size();
-			tmpdata.resize(tmpdata.size() + len * 12 + 8);
-			encode_uint32(TYPE_DICT, &tmpdata.write[pos + 0]);
-			encode_uint32(len, &tmpdata.write[pos + 4]);
-
+			const Dictionary d = p_data;
+			const int len = d.size();
+			Error error = grow(uint64_t(len) * 12 + 8);
+			ERR_FAIL_COND_V(error != OK, error);
+			encode_uint32(TYPE_DICT, tmpdata.ptrw() + position);
+			encode_uint32(len, tmpdata.ptrw() + position + 4);
 			List<DictKey> sortk;
-
 			for (const KeyValue<Variant, Variant> &kv : d) {
 				DictKey dk;
 				dk.hash = kv.key.hash();
 				dk.key = kv.key;
 				sortk.push_back(dk);
 			}
-
 			sortk.sort();
-
 			int idx = 0;
-			for (const DictKey &E : sortk) {
-				encode_uint32(E.hash, &tmpdata.write[pos + 8 + idx * 12 + 0]);
-				uint32_t ofs = _pack(E.key, tmpdata, string_cache);
-				encode_uint32(ofs, &tmpdata.write[pos + 8 + idx * 12 + 4]);
-				ofs = _pack(d[E.key], tmpdata, string_cache);
-				encode_uint32(ofs, &tmpdata.write[pos + 8 + idx * 12 + 8]);
+			for (const DictKey &entry : sortk) {
+				const uint64_t slot = position + 8 + uint64_t(idx) * 12;
+				encode_uint32(entry.hash, tmpdata.ptrw() + slot);
+				uint32_t offset = 0;
+				error = _pack(entry.key, tmpdata, string_cache, offset, p_active, p_depth + 1);
+				ERR_FAIL_COND_V(error != OK, error);
+				encode_uint32(offset, tmpdata.ptrw() + slot + 4);
+				error = _pack(d[entry.key], tmpdata, string_cache, offset, p_active, p_depth + 1);
+				ERR_FAIL_COND_V(error != OK, error);
+				encode_uint32(offset, tmpdata.ptrw() + slot + 8);
 				idx++;
 			}
-
-			return pos;
-
-		} break;
-		case Variant::ARRAY: {
-			Array a = p_data;
-			//size is known, use sort
-			uint32_t pos = tmpdata.size();
-			int len = a.size();
-			tmpdata.resize(tmpdata.size() + len * 4 + 8);
-			encode_uint32(TYPE_ARRAY, &tmpdata.write[pos + 0]);
-			encode_uint32(len, &tmpdata.write[pos + 4]);
-
-			for (int i = 0; i < len; i++) {
-				uint32_t ofs = _pack(a[i], tmpdata, string_cache);
-				encode_uint32(ofs, &tmpdata.write[pos + 8 + i * 4]);
-			}
-
-			return pos;
-
-		} break;
-
-		default: {
+			return OK;
 		}
+		case Variant::ARRAY: {
+			const Array a = p_data;
+			const int len = a.size();
+			Error error = grow(uint64_t(len) * 4 + 8);
+			ERR_FAIL_COND_V(error != OK, error);
+			encode_uint32(TYPE_ARRAY, tmpdata.ptrw() + position);
+			encode_uint32(len, tmpdata.ptrw() + position + 4);
+			for (int i = 0; i < len; i++) {
+				uint32_t offset = 0;
+				error = _pack(a[i], tmpdata, string_cache, offset, p_active, p_depth + 1);
+				ERR_FAIL_COND_V(error != OK, error);
+				encode_uint32(offset, tmpdata.ptrw() + position + 8 + uint64_t(i) * 4);
+			}
+			return OK;
+		}
+		default:
+			ERR_FAIL_V_MSG(ERR_INVALID_DATA, "Unsupported value in PackedDataContainer.");
 	}
-
-	return OK;
 }
 
 Error PackedDataContainer::pack(const Variant &p_data) {
 	ERR_FAIL_COND_V_MSG(p_data.get_type() != Variant::ARRAY && p_data.get_type() != Variant::DICTIONARY, ERR_INVALID_DATA, "PackedDataContainer can pack only Array and Dictionary type.");
-
 	Vector<uint8_t> tmpdata;
 	HashMap<String, uint32_t> string_cache;
-	_pack(p_data, tmpdata, string_cache);
-	datalen = tmpdata.size();
-	data.resize(tmpdata.size());
-	uint8_t *w = data.ptrw();
-	memcpy(w, tmpdata.ptr(), tmpdata.size());
-
+	const void *active[Variant::MAX_RECURSION_DEPTH + 1] = {};
+	uint32_t offset = 0;
+	const Error error = _pack(p_data, tmpdata, string_cache, offset, active, 0);
+	ERR_FAIL_COND_V(error != OK, error);
+	// Publish only the complete serialization, without another fallible copy.
+	data = std::move(tmpdata);
 	return OK;
 }
 
 void PackedDataContainer::_set_data(const Vector<uint8_t> &p_data) {
 	data = p_data;
-	datalen = data.size();
 }
 
 Vector<uint8_t> PackedDataContainer::_get_data() const {
@@ -378,7 +401,7 @@ void PackedDataContainer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("pack", "value"), &PackedDataContainer::pack);
 	ClassDB::bind_method(D_METHOD("size"), &PackedDataContainer::size);
 
-	BIND_METHOD_ERR_RETURN_DOC("pack", ERR_INVALID_DATA);
+	BIND_METHOD_ERR_RETURN_DOC("pack", ERR_INVALID_DATA, ERR_OUT_OF_MEMORY);
 
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "__data__", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_INTERNAL), "_set_data", "_get_data");
 }
