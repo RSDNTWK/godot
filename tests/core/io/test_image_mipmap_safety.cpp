@@ -36,6 +36,7 @@ TEST_FORCE_LINK(test_image_mipmap_safety)
 #include "tests/core/io/allocation_test_helpers.h"
 #ifdef TOOLS_ENABLED
 #include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/os/os.h"
 #include "editor/import/resource_importer_layered_texture.h"
 #include "scene/resources/compressed_texture.h"
