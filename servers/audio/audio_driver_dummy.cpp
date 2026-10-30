@@ -42,6 +42,9 @@ Error AudioDriverDummy::init() {
 	if (mix_rate == -1) {
 		mix_rate = _get_configured_mix_rate();
 	}
+	if (mix_rate <= 0) {
+		mix_rate = AudioDriverManager::DEFAULT_MIX_RATE;
+	}
 
 	channels = get_channels();
 	samples_in = memnew_arr(int32_t, size_t(buffer_frames) * channels);
