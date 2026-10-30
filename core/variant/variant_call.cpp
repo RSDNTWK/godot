@@ -798,7 +798,9 @@ struct _VariantCall {
 
 		if (p_instance->size() > 0) {
 			Compression::Mode mode = (Compression::Mode)(p_mode);
-			compressed.resize(Compression::get_max_compressed_buffer_size(p_instance->size(), mode));
+			const int64_t bound = Compression::get_max_compressed_buffer_size(p_instance->size(), mode);
+			ERR_FAIL_COND_V(bound < 0, compressed);
+			ERR_FAIL_COND_V(compressed.resize(bound) != OK, compressed);
 			int64_t result = Compression::compress(compressed.ptrw(), p_instance->ptr(), p_instance->size(), mode);
 
 			result = result >= 0 ? result : 0;

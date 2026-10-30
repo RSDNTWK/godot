@@ -62,6 +62,7 @@ static _FORCE_INLINE_ PCKLzmaOptions _get_default_lzma2_options() {
 int64_t Compression::compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_src_size, Mode p_mode) {
 	ERR_FAIL_COND_V(p_src_size < 0 || uint64_t(p_src_size) > SIZE_MAX, -1);
 	ERR_FAIL_COND_V(!p_src && p_src_size > 0, -1);
+	ERR_FAIL_COND_V(!p_dst && (p_src_size > 0 || p_mode != MODE_LZMA2), -1);
 	switch (p_mode) {
 		case MODE_BROTLI: {
 			ERR_FAIL_V_MSG(-1, "Only brotli decompression is supported.");
@@ -130,7 +131,7 @@ int64_t Compression::compress(uint8_t *p_dst, const uint8_t *p_src, int64_t p_sr
 				return 0;
 			}
 			Vector<uint8_t> src_data;
-			src_data.resize((int)p_src_size);
+			ERR_FAIL_COND_V(src_data.resize(p_src_size) != OK, -1);
 			if (p_src_size > 0) {
 				memcpy(src_data.ptrw(), p_src, p_src_size);
 			}
