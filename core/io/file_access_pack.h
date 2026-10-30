@@ -71,12 +71,17 @@ class PackSource;
 namespace TestPCKSafety {
 struct Access;
 }
+namespace TestPCKMountAtomicity {
+struct Access;
+}
 
 class PackedData {
 	friend class FileAccessPack;
 	friend class DirAccessPack;
 	friend class PackSource;
+	friend class PackedSourcePCK;
 	friend struct TestPCKSafety::Access;
+	friend struct TestPCKMountAtomicity::Access;
 
 public:
 	struct PackedFile {

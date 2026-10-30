@@ -33,6 +33,8 @@
 #include "core/crypto/crypto_core.h"
 #include "core/io/file_access_encrypted.h"
 #include "core/io/file_access_patched.h"
+#include "core/io/marshalls.h"
+#include "core/io/pck_directory_entry.h"
 #include "core/io/pck_lzma.h"
 #include "core/object/script_language.h"
 #include "core/os/mutex.h"
@@ -394,153 +396,207 @@ bool PackedSourcePCK::try_open_pack(const String &p_path, bool p_replace_files, 
 	if (f.is_null()) {
 		return false;
 	}
-
-	bool pck_header_found = false;
-
-	// Search for the header at the start offset - standalone PCK file.
-	f->seek(p_offset);
-	uint32_t magic = f->get_32();
-	if (magic == PACK_HEADER_MAGIC) {
-		pck_header_found = true;
-	}
-
-	// Search for the header in the executable "pck" section - self contained executable.
-	if (!pck_header_found) {
-		// Loading with offset feature not supported for self contained exe files.
-		if (p_offset != 0) {
-			ERR_FAIL_V_MSG(false, "Loading self-contained executable with offset not supported.");
+	const uint64_t physical_length = f->get_length();
+	uint64_t active_length = physical_length;
+	const auto seek_checked = [&](uint64_t p_position) {
+		if (p_position > active_length) {
+			return false;
 		}
-
-		int64_t pck_off = OS::get_singleton()->get_embedded_pck_offset();
-		if (pck_off != 0) {
-			// Search for the header, in case PCK start and section have different alignment.
-			for (int i = 0; i < 8; i++) {
-				f->seek(pck_off);
-				magic = f->get_32();
-				if (magic == PACK_HEADER_MAGIC) {
-#ifdef DEBUG_ENABLED
-					print_verbose("PCK header found in executable pck section, loading from offset 0x" + String::num_int64(pck_off - 4, 16));
-#endif
-					pck_header_found = true;
-					break;
-				}
-				pck_off++;
-			}
+		f->seek(p_position);
+		const Error error = f->get_error();
+		return f->get_position() == p_position && (error == OK || error == ERR_FILE_EOF);
+	};
+	const auto read_bytes = [&](uint8_t *p_bytes, uint64_t p_length) {
+		const uint64_t position = f->get_position();
+		if (position > active_length || p_length > active_length - position) {
+			return false;
 		}
-	}
-
-	// Search for the header at the end of file - self contained executable.
-	if (!pck_header_found) {
-		// Loading with offset feature not supported for self contained exe files.
-		if (p_offset != 0) {
-			ERR_FAIL_V_MSG(false, "Loading self-contained executable with offset not supported.");
+		if (p_length > 0 && f->get_buffer(p_bytes, p_length) != p_length) {
+			return false;
 		}
-
-		f->seek_end();
-		f->seek(f->get_position() - 4);
-		magic = f->get_32();
-
-		if (magic == PACK_HEADER_MAGIC) {
-			f->seek(f->get_position() - 12);
-			uint64_t ds = f->get_64();
-			f->seek(f->get_position() - ds - 8);
-			magic = f->get_32();
-			if (magic == PACK_HEADER_MAGIC) {
-#ifdef DEBUG_ENABLED
-				print_verbose("PCK header found at the end of executable, loading from offset 0x" + String::num_int64(f->get_position() - 4, 16));
-#endif
-				pck_header_found = true;
-			}
+		const Error error = f->get_error();
+		return f->get_position() == position + p_length && (error == OK || error == ERR_FILE_EOF);
+	};
+	const auto read_u32 = [&](uint32_t &r_value) {
+		uint8_t bytes[4];
+		if (!read_bytes(bytes, sizeof(bytes))) {
+			return false;
 		}
-	}
+		r_value = decode_uint32(bytes);
+		return true;
+	};
+	const auto read_u64 = [&](uint64_t &r_value) {
+		uint8_t bytes[8];
+		if (!read_bytes(bytes, sizeof(bytes))) {
+			return false;
+		}
+		r_value = decode_uint64(bytes);
+		return true;
+	};
 
-	if (!pck_header_found) {
+	uint32_t magic = 0;
+	if (!seek_checked(p_offset) || !read_u32(magic)) {
 		return false;
 	}
-
-	int64_t pck_start_pos = f->get_position() - 4;
-
-	// Read header.
-	uint32_t version = f->get_32();
-	uint32_t ver_major = f->get_32();
-	uint32_t ver_minor = f->get_32();
-	uint32_t ver_patch = f->get_32(); // Not used for validation.
-
-	ERR_FAIL_COND_V_MSG(version != PACK_FORMAT_VERSION_V5 && version != PACK_FORMAT_VERSION_V4 && version != PACK_FORMAT_VERSION_V3 && version != PACK_FORMAT_VERSION_V2, false, vformat("Pack version unsupported: %d.", version));
-	ERR_FAIL_COND_V_MSG(ver_major > GODOT_VERSION_MAJOR || (ver_major == GODOT_VERSION_MAJOR && ver_minor > GODOT_VERSION_MINOR), false, vformat("Pack created with a newer version of the engine: %d.%d.%d.", ver_major, ver_minor, ver_patch));
-
-	uint32_t pack_flags = f->get_32();
-	bool enc_directory = (pack_flags & PACK_DIR_ENCRYPTED);
-	bool rel_filebase = (pack_flags & PACK_REL_FILEBASE); // Note: Always enabled for V3.
-	bool sparse_bundle = (pack_flags & PACK_SPARSE_BUNDLE);
+	bool header_found = magic == PACK_HEADER_MAGIC;
+	if (!header_found && p_offset != 0) {
+		ERR_FAIL_V_MSG(false, "Loading self-contained executable with offset not supported.");
+	}
+	if (!header_found && physical_length >= 4) {
+		const uint64_t embedded = OS::get_singleton()->get_embedded_pck_offset();
+		if (embedded > 0 && embedded <= physical_length - 4) {
+			const uint64_t probes = MIN(uint64_t(7), physical_length - 4 - embedded);
+			for (uint64_t i = 0; i <= probes; i++) {
+				if (!seek_checked(embedded + i) || !read_u32(magic)) {
+					return false;
+				}
+				if (magic == PACK_HEADER_MAGIC) {
+					header_found = true;
+					break;
+				}
+			}
+		}
+	}
+	if (!header_found && physical_length >= 12) {
+		if (!seek_checked(physical_length - 4) || !read_u32(magic)) {
+			return false;
+		}
+		if (magic == PACK_HEADER_MAGIC) {
+			uint64_t pack_size;
+			if (!seek_checked(physical_length - 12) || !read_u64(pack_size) || pack_size > physical_length - 12 ||
+					!seek_checked(physical_length - 12 - pack_size) || !read_u32(magic)) {
+				return false;
+			}
+			header_found = magic == PACK_HEADER_MAGIC;
+		}
+	}
+	if (!header_found) {
+		return false;
+	}
+	const uint64_t pack_start = f->get_position() - 4;
+	uint32_t version, major, minor, patch, pack_flags;
+	uint64_t file_base;
+	if (!read_u32(version) || !read_u32(major) || !read_u32(minor) || !read_u32(patch) || !read_u32(pack_flags) || !read_u64(file_base)) {
+		return false;
+	}
+	ERR_FAIL_COND_V_MSG(version != PACK_FORMAT_VERSION_V2 && version != PACK_FORMAT_VERSION_V3 &&
+					version != PACK_FORMAT_VERSION_V4 && version != PACK_FORMAT_VERSION_V5,
+			false, vformat("Pack version unsupported: %d.", version));
+	ERR_FAIL_COND_V_MSG(major > GODOT_VERSION_MAJOR || (major == GODOT_VERSION_MAJOR && minor > GODOT_VERSION_MINOR),
+			false, vformat("Pack created with a newer version of the engine: %d.%d.%d.", major, minor, patch));
+	const bool encrypted_directory = pack_flags & PACK_DIR_ENCRYPTED;
+	const bool sparse_bundle = pack_flags & PACK_SPARSE_BUNDLE;
+	if (version >= PACK_FORMAT_VERSION_V3 || (pack_flags & PACK_REL_FILEBASE)) {
+		if (file_base > UINT64_MAX - pack_start) {
+			return false;
+		}
+		file_base += pack_start;
+	}
 	String salt;
-
-	uint64_t file_base = f->get_64();
-	if ((version == PACK_FORMAT_VERSION_V5) || (version == PACK_FORMAT_VERSION_V4) || (version == PACK_FORMAT_VERSION_V3) || (version == PACK_FORMAT_VERSION_V2 && rel_filebase)) {
-		file_base += pck_start_pos;
-	}
-
-	if (version == PACK_FORMAT_VERSION_V5 || version == PACK_FORMAT_VERSION_V4 || version == PACK_FORMAT_VERSION_V3) {
-		// V5/V4/V3: Read directory offset and skip reserved part of the header.
-		uint64_t dir_offset = f->get_64() + pck_start_pos;
-		if (sparse_bundle && enc_directory && (version == PACK_FORMAT_VERSION_V5 || version == PACK_FORMAT_VERSION_V4)) {
-			// V5/V4: Read encrypted directory salt.
-			Vector<uint8_t> salt_data = f->get_buffer(32);
-			salt.append_latin1(Span((const char *)salt_data.ptr(), salt_data.size()));
+	if (version >= PACK_FORMAT_VERSION_V3) {
+		uint64_t directory_offset;
+		if (!read_u64(directory_offset) || directory_offset > UINT64_MAX - pack_start) {
+			return false;
 		}
-		f->seek(dir_offset);
-	} else if (version == PACK_FORMAT_VERSION_V2) {
-		// V2: Directory directly after the header.
+		if (sparse_bundle && encrypted_directory && version >= PACK_FORMAT_VERSION_V4) {
+			uint8_t salt_bytes[32];
+			if (!read_bytes(salt_bytes, sizeof(salt_bytes))) {
+				return false;
+			}
+			if (salt.reserve(33) != OK) {
+				return false;
+			}
+			salt.append_latin1(Span((const char *)salt_bytes, sizeof(salt_bytes)));
+			if (salt.length() != 32) {
+				return false;
+			}
+		}
+		if (!seek_checked(directory_offset + pack_start)) {
+			return false;
+		}
+	} else {
+		uint32_t reserved;
 		for (int i = 0; i < 16; i++) {
-			f->get_32(); // Reserved.
+			if (!read_u32(reserved)) {
+				return false;
+			}
 		}
 	}
-
-	// Read directory.
-	int file_count = f->get_32();
-	if (enc_directory) {
-		Ref<FileAccessEncrypted> fae;
-		fae.instantiate();
-		ERR_FAIL_COND_V_MSG(fae.is_null(), false, "Can't open encrypted pack directory.");
-
+	uint32_t file_count;
+	if (!read_u32(file_count)) {
+		return false;
+	}
+	if (encrypted_directory) {
+		Ref<FileAccessEncrypted> encrypted;
+		encrypted.instantiate();
+		ERR_FAIL_COND_V(encrypted.is_null(), false);
 		Vector<uint8_t> key;
-		const Error key_error = PCKEncryption::select_key(p_decryption_key, script_encryption_key, pck_key_override_enabled, key);
-		ERR_FAIL_COND_V_MSG(key_error != OK, false, "Can't prepare encrypted pack directory key.");
-
-		Error err = fae->open_and_parse(f, key, FileAccessEncrypted::MODE_READ, false);
-		ERR_FAIL_COND_V_MSG(err, false, "Can't open encrypted pack directory.");
-		f = fae;
+		if (PCKEncryption::select_key(p_decryption_key, script_encryption_key, pck_key_override_enabled, key) != OK ||
+				encrypted->open_and_parse(f, key, FileAccessEncrypted::MODE_READ, false) != OK) {
+			return false;
+		}
+		f = encrypted;
+		active_length = f->get_length();
+	}
+	const uint64_t directory_position = f->get_position();
+	const uint64_t minimum_entry = version >= PACK_FORMAT_VERSION_V5 ? 48 : 40;
+	if (directory_position > active_length || file_count > INT_MAX || file_count > (active_length - directory_position) / minimum_entry) {
+		return false;
+	}
+	Vector<PCKDirectory::Entry> pending;
+	ERR_FAIL_COND_V(pending.resize(file_count) != OK, false);
+	for (uint32_t i = 0; i < file_count; i++) {
+		PCKDirectory::Entry &entry = pending.write[i];
+		uint32_t path_length;
+		if (!read_u32(path_length) || path_length >= INT_MAX) {
+			return false;
+		}
+		const uint64_t position = f->get_position();
+		const uint64_t metadata_bytes = minimum_entry - 4;
+		if (position > active_length || active_length - position < metadata_bytes ||
+				path_length > active_length - position - metadata_bytes) {
+			return false;
+		}
+		CharString path_bytes;
+		if (path_bytes.resize_uninitialized(uint64_t(path_length) + 1) != OK ||
+				!read_bytes((uint8_t *)path_bytes.ptr(), path_length)) {
+			return false;
+		}
+		path_bytes[path_length] = 0;
+		if (entry.path.reserve(uint64_t(path_length) + 1) != OK ||
+				entry.path.append_utf8(path_bytes.ptr(), int(path_length)) != OK ||
+				!read_u64(entry.offset) || !read_u64(entry.size)) {
+			return false;
+		}
+		entry.stored_size = entry.size;
+		if (version >= PACK_FORMAT_VERSION_V5 && !read_u64(entry.stored_size)) {
+			return false;
+		}
+		if (!read_bytes(entry.md5, sizeof(entry.md5)) || !read_u32(entry.flags)) {
+			return false;
+		}
+		if (!(entry.flags & PACK_FILE_REMOVAL)) {
+			if (entry.offset > UINT64_MAX - file_base) {
+				return false;
+			}
+			entry.offset += file_base;
+		}
 	}
 
-	for (int i = 0; i < file_count; i++) {
-		uint32_t sl = f->get_32();
-		CharString cs;
-		cs.resize_uninitialized(sl + 1);
-		f->get_buffer((uint8_t *)cs.ptr(), sl);
-		cs[sl] = 0;
-
-		String path = String::utf8(cs.ptr(), sl);
-		uint64_t ofs = f->get_64();
-		uint64_t size = f->get_64();
-		uint64_t stored_size = size;
-		uint8_t md5[16];
-		uint32_t flags = 0;
-		if (version >= PACK_FORMAT_VERSION_V5) {
-			stored_size = f->get_64();
-			f->get_buffer(md5, 16);
-			flags = f->get_32();
+	// Parsing has no mount side effects. Commit in directory order only once
+	// every entry is validated, under the existing recursive metadata lock.
+	PackedData *packed = PackedData::get_singleton();
+	ERR_FAIL_NULL_V(packed, false);
+	MutexLock lock(packed->files_mutex);
+	for (const PCKDirectory::Entry &entry : pending) {
+		if (entry.flags & PACK_FILE_REMOVAL) {
+			packed->remove_path(entry.path);
 		} else {
-			f->get_buffer(md5, 16);
-			flags = f->get_32();
-		}
-
-		if (flags & PACK_FILE_REMOVAL) { // The file was removed.
-			PackedData::get_singleton()->remove_path(path);
-		} else {
-			PackedData::get_singleton()->add_path(p_path, path, file_base + ofs, size, stored_size, md5, this, p_replace_files, (flags & PACK_FILE_ENCRYPTED), sparse_bundle, (flags & PACK_FILE_DELTA), (flags & PACK_FILE_LZMA2), salt);
+			packed->add_path(p_path, entry.path, entry.offset, entry.size, entry.stored_size, entry.md5, this,
+					p_replace_files, entry.flags & PACK_FILE_ENCRYPTED, sparse_bundle,
+					entry.flags & PACK_FILE_DELTA, entry.flags & PACK_FILE_LZMA2, salt);
 		}
 	}
-
 	return true;
 }
 
