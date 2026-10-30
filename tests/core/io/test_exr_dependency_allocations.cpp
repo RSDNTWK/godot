@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  test_image_loader_staging.cpp                                         */
+/*  test_exr_dependency_allocations.cpp                                   */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */

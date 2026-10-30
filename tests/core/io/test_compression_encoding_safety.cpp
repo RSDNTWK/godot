@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  test_image_loader_staging.cpp                                         */
+/*  test_compression_encoding_safety.cpp                                  */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
