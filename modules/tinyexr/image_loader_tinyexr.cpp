@@ -30,6 +30,8 @@
 
 #include "image_loader_tinyexr.h"
 
+#include "exr_image_size.h"
+
 #include "core/io/file_access_memory.h"
 
 #include <zlib.h>
@@ -40,11 +42,14 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 	Vector<uint8_t> src_image;
 	uint64_t src_image_len = f->get_length();
 	ERR_FAIL_COND_V(src_image_len == 0, ERR_FILE_CORRUPT);
-	src_image.resize(src_image_len);
-
+	ERR_FAIL_COND_V(src_image_len > MIN(uint64_t(INT64_MAX), uint64_t(SIZE_MAX)), ERR_FILE_CORRUPT);
+	const Error allocation = src_image.resize(src_image_len);
+	ERR_FAIL_COND_V(allocation != OK, allocation);
 	uint8_t *w = src_image.ptrw();
-
-	f->get_buffer(&w[0], src_image_len);
+	const uint64_t read = f->get_buffer(w, src_image_len);
+	const Error read_error = f->get_error();
+	ERR_FAIL_COND_V(read_error != OK && read_error != ERR_FILE_EOF, read_error);
+	ERR_FAIL_COND_V(read != src_image_len, ERR_FILE_CORRUPT);
 
 	// Re-implementation of tinyexr's LoadEXRFromMemory using Godot types to store the Image data
 	// and Godot's error codes.
@@ -81,6 +86,12 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 		}
 		return ERR_FILE_CORRUPT;
 	}
+
+	int64_t validated_bytes = 0;
+	const Error dimensions_error = EXRImageSize::output_bytes(
+			int64_t(exr_header.data_window.max_x) - exr_header.data_window.min_x + 1,
+			int64_t(exr_header.data_window.max_y) - exr_header.data_window.min_y + 1, 1, 2, validated_bytes);
+	ERR_FAIL_COND_V(dimensions_error != OK, dimensions_error);
 
 	// Read HALF channel as FLOAT. (GH-13490)
 	bool use_float16 = false;
@@ -130,26 +141,28 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 	int channel_size = use_float16 ? 2 : 4;
 	if (idxA != -1) {
 		ERR_FAIL_COND_V(idxR == -1 || idxG == -1 || idxB == -1, ERR_FILE_CORRUPT);
-		imgdata.resize(exr_image.width * exr_image.height * 4 * channel_size); //RGBA
 		format = use_float16 ? Image::FORMAT_RGBAH : Image::FORMAT_RGBAF;
 		output_channels = 4;
 	} else if (idxB != -1) {
 		ERR_FAIL_COND_V(idxG == -1, ERR_FILE_CORRUPT);
 		ERR_FAIL_COND_V(idxR == -1, ERR_FILE_CORRUPT);
-		imgdata.resize(exr_image.width * exr_image.height * 3 * channel_size); //RGB
 		format = use_float16 ? Image::FORMAT_RGBH : Image::FORMAT_RGBF;
 		output_channels = 3;
 	} else if (idxG != -1) {
 		ERR_FAIL_COND_V(idxR == -1, ERR_FILE_CORRUPT);
-		imgdata.resize(exr_image.width * exr_image.height * 2 * channel_size); //RG
 		format = use_float16 ? Image::FORMAT_RGH : Image::FORMAT_RGF;
 		output_channels = 2;
 	} else {
 		ERR_FAIL_COND_V(idxR == -1, ERR_FILE_CORRUPT);
-		imgdata.resize(exr_image.width * exr_image.height * 1 * channel_size); //R
 		format = use_float16 ? Image::FORMAT_RH : Image::FORMAT_RF;
 		output_channels = 1;
 	}
+
+	int64_t output_size = 0;
+	const Error size_error = EXRImageSize::output_bytes(exr_image.width, exr_image.height, output_channels, channel_size, output_size);
+	ERR_FAIL_COND_V(size_error != OK, size_error);
+	const Error output_allocation = imgdata.resize(output_size);
+	ERR_FAIL_COND_V(output_allocation != OK, output_allocation);
 
 	EXRTile single_image_tile;
 	int num_tiles;
@@ -206,8 +219,8 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 				a_channel_start = reinterpret_cast<const float *>(tile.images[idxA]);
 			}
 
-			uint16_t *first_row_w16 = iw16 + (tile.offset_y * tile_height * exr_image.width + tile.offset_x * tile_width) * output_channels;
-			float *first_row_w32 = iw32 + (tile.offset_y * tile_height * exr_image.width + tile.offset_x * tile_width) * output_channels;
+			uint16_t *first_row_w16 = iw16 + (int64_t(tile.offset_y) * tile_height * exr_image.width + int64_t(tile.offset_x) * tile_width) * output_channels;
+			float *first_row_w32 = iw32 + (int64_t(tile.offset_y) * tile_height * exr_image.width + int64_t(tile.offset_x) * tile_width) * output_channels;
 
 			for (int y = 0; y < th; y++) {
 				const float *r_channel = r_channel_start + y * tile_width;
@@ -225,7 +238,7 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 				}
 
 				if (use_float16) {
-					uint16_t *row_w = first_row_w16 + (y * exr_image.width * output_channels);
+					uint16_t *row_w = first_row_w16 + (int64_t(y) * exr_image.width * output_channels);
 
 					for (int x = 0; x < tw; x++) {
 						Color color;
@@ -256,7 +269,7 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 						}
 					}
 				} else {
-					float *row_w = first_row_w32 + (y * exr_image.width * output_channels);
+					float *row_w = first_row_w32 + (int64_t(y) * exr_image.width * output_channels);
 
 					for (int x = 0; x < tw; x++) {
 						Color color;

@@ -32,6 +32,8 @@
 
 #include <turbojpeg.h>
 
+#include <climits>
+
 Error jpeg_turbo_load_image_from_buffer(Image *p_image, const uint8_t *p_buffer, int p_buffer_len) {
 	tjhandle tj_instance = tj3Init(TJINIT_DECOMPRESS);
 	if (tj_instance == nullptr) {
@@ -100,11 +102,14 @@ Error ImageLoaderLibJPEGTurbo::load_image(Ref<Image> p_image, Ref<FileAccess> f,
 	Vector<uint8_t> src_image;
 	uint64_t src_image_len = f->get_length();
 	ERR_FAIL_COND_V(src_image_len == 0, ERR_FILE_CORRUPT);
-	src_image.resize(src_image_len);
-
+	ERR_FAIL_COND_V(src_image_len > uint64_t(INT_MAX), ERR_FILE_CORRUPT);
+	const Error allocation = src_image.resize(src_image_len);
+	ERR_FAIL_COND_V(allocation != OK, allocation);
 	uint8_t *w = src_image.ptrw();
-
-	f->get_buffer(&w[0], src_image_len);
+	const uint64_t read = f->get_buffer(w, src_image_len);
+	const Error read_error = f->get_error();
+	ERR_FAIL_COND_V(read_error != OK && read_error != ERR_FILE_EOF, read_error);
+	ERR_FAIL_COND_V(read != src_image_len, ERR_FILE_CORRUPT);
 
 	Error err = jpeg_turbo_load_image_from_buffer(p_image.ptr(), w, src_image_len);
 
