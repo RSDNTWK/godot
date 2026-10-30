@@ -51,6 +51,11 @@ static Vector<uint8_t> payload() {
 	}
 	return bytes;
 }
+static Vector<uint8_t> encode(Variant &p_source, const Variant **p_arguments, Callable::CallError &r_error) {
+	Variant result;
+	p_source.callp("compress", p_arguments, 1, result, r_error);
+	return result;
+}
 TEST_CASE("[N039][CompressionEncoding] Public encoding preserves supported successful round trips") {
 	for (Compression::Mode mode : { Compression::MODE_FASTLZ, Compression::MODE_GZIP, Compression::MODE_LZMA2 }) {
 		const Vector<uint8_t> plain = payload();
@@ -58,7 +63,7 @@ TEST_CASE("[N039][CompressionEncoding] Public encoding preserves supported succe
 		Callable::CallError error;
 		Variant argument = int(mode);
 		const Variant *arguments[] = { &argument };
-		const Vector<uint8_t> encoded = source.callp("compress", arguments, 1, error);
+		const Vector<uint8_t> encoded = encode(source, arguments, error);
 		REQUIRE(error.error == Callable::CallError::CALL_OK);
 		REQUIRE_FALSE(encoded.is_empty());
 		Vector<uint8_t> decoded;
@@ -83,11 +88,11 @@ TEST_CASE("[N039][CompressionEncoding] Invalid modes and empty public inputs ret
 	const Variant *arguments[] = { &mode };
 	Callable::CallError error;
 	QuietErrors quiet;
-	CHECK(Vector<uint8_t>(source.callp("compress", arguments, 1, error)).is_empty());
+	CHECK(Vector<uint8_t>(encode(source, arguments, error)).is_empty());
 	CHECK(error.error == Callable::CallError::CALL_OK);
 	Variant empty = Vector<uint8_t>();
 	mode = int(Compression::MODE_LZMA2);
-	CHECK(Vector<uint8_t>(empty.callp("compress", arguments, 1, error)).is_empty());
+	CHECK(Vector<uint8_t>(encode(empty, arguments, error)).is_empty());
 	CHECK(error.error == Callable::CallError::CALL_OK);
 }
 #ifdef B01_ALLOCATION_TESTS
@@ -102,16 +107,16 @@ TEST_CASE("[N039][CompressionEncodingAllocation] Failed public output allocation
 	Variant mode = int(Compression::MODE_FASTLZ);
 	const Variant *arguments[] = { &mode };
 	Callable::CallError error;
-	REQUIRE_FALSE(Vector<uint8_t>(source.callp("compress", arguments, 1, error)).is_empty());
+	REQUIRE_FALSE(Vector<uint8_t>(encode(source, arguments, error)).is_empty());
 	QuietErrors quiet;
 	{
 		TestAllocation::Failure failure(allocation);
-		const Vector<uint8_t> output = source.callp("compress", arguments, 1, error);
+		const Vector<uint8_t> output = encode(source, arguments, error);
 		CHECK(output.is_empty());
 		CHECK(error.error == Callable::CallError::CALL_OK);
 		CHECK(TestAllocation::failures() == 1);
 	}
-	REQUIRE_FALSE(Vector<uint8_t>(source.callp("compress", arguments, 1, error)).is_empty());
+	REQUIRE_FALSE(Vector<uint8_t>(encode(source, arguments, error)).is_empty());
 }
 TEST_CASE("[N039][CompressionEncodingAllocation] Failed LZMA2 input staging preserves the output buffer") {
 	const Vector<uint8_t> plain = payload();
