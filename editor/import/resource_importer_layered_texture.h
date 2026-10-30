@@ -83,6 +83,8 @@ public:
 private:
 	Mode mode;
 	static const char *compression_formats[];
+	Error _save_tex_checked(Vector<Ref<Image>> p_images, const String &p_to_path, int p_compress_mode, float p_lossy, const Image::BasisUniversalPackerParams &p_basisu_params, Image::CompressMode p_vram_compression, Image::CompressSource p_csource, Image::UsedChannels used_channels, bool p_mipmaps, bool p_force_po2, Image::BPTCFormat p_bptc_format);
+	Error _check_compress_ctex_checked(const String &p_source_file, Ref<LayeredTextureImport> r_texture_import);
 
 protected:
 	static ResourceImporterLayeredTexture *singleton;

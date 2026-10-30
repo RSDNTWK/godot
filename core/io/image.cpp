@@ -4178,14 +4178,19 @@ Ref<Image> Image::get_image_from_mipmap(int p_mipmap) const {
 
 void Image::bump_map_to_normal_map(float bump_scale) {
 	ERR_FAIL_COND(is_compressed());
-	clear_mipmaps();
-	convert(Image::FORMAT_RF);
+	Image source;
+	source._copy_internals_from(*this);
+	source.clear_mipmaps();
+	ERR_FAIL_COND(source.has_mipmaps());
+	source.convert(Image::FORMAT_RF);
+	ERR_FAIL_COND(source.is_empty() || source.get_format() != FORMAT_RF);
 
 	Vector<uint8_t> result_image; //rgba output
-	result_image.resize(width * height * 4);
+	const Error allocation_error = result_image.resize(get_image_data_size(width, height, FORMAT_RGBA8, false));
+	ERR_FAIL_COND(allocation_error != OK);
 
 	{
-		const uint8_t *rp = data.ptr();
+		const uint8_t *rp = source.data.ptr();
 		uint8_t *wp = result_image.ptrw();
 
 		ERR_FAIL_NULL(rp);
@@ -4221,7 +4226,8 @@ void Image::bump_map_to_normal_map(float bump_scale) {
 		}
 	}
 	format = FORMAT_RGBA8;
-	data = result_image;
+	data = std::move(result_image);
+	mipmaps = false;
 }
 
 bool Image::detect_signed(bool p_include_mips) const {
