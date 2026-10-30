@@ -1717,6 +1717,12 @@ Error EditorExportPlatform::export_project_files(const Ref<EditorExportPreset> &
 		export_plugins.write[i]->set_export_base_path(export_base_path);
 	}
 
+	// Internal files are emitted below; reserve their paths before ordinary export.
+	Dictionary int_export = get_internal_export_files(p_preset, p_debug);
+	for (const KeyValue<Variant, Variant> &int_export_kv : int_export) {
+		paths.erase(String(int_export_kv.key).simplify_path());
+	}
+
 	//store everything in the export medium
 	int total = paths.size();
 	// idx is incremented at the beginning of the paths loop to easily allow
@@ -2033,7 +2039,6 @@ Error EditorExportPlatform::export_project_files(const Ref<EditorExportPreset> &
 		return err;
 	}
 
-	Dictionary int_export = get_internal_export_files(p_preset, p_debug);
 	for (const KeyValue<Variant, Variant> &int_export_kv : int_export) {
 		const PackedByteArray &array = int_export_kv.value;
 		err = save_proxy.save_file(p_preset, p_udata, int_export_kv.key, array, idx, total, enc_in_filters, enc_ex_filters, key, seed, false);
