@@ -75,6 +75,21 @@ TEST_CASE("[N039][CompressionEncoding] Missing nonempty destinations fail before
 	}
 	CHECK(Compression::compress(nullptr, nullptr, 0, Compression::MODE_LZMA2) == 0);
 }
+
+TEST_CASE("[N039][CompressionEncoding] Invalid modes and empty public inputs return empty safely") {
+	const Vector<uint8_t> plain = payload();
+	Variant source = plain;
+	Variant mode = INT_MAX;
+	const Variant *arguments[] = { &mode };
+	Callable::CallError error;
+	QuietErrors quiet;
+	CHECK(Vector<uint8_t>(source.callp("compress", arguments, 1, error)).is_empty());
+	CHECK(error.error == Callable::CallError::CALL_OK);
+	Variant empty = Vector<uint8_t>();
+	mode = int(Compression::MODE_LZMA2);
+	CHECK(Vector<uint8_t>(empty.callp("compress", arguments, 1, error)).is_empty());
+	CHECK(error.error == Callable::CallError::CALL_OK);
+}
 #ifdef B01_ALLOCATION_TESTS
 TEST_CASE("[N039][CompressionEncodingAllocation] Failed public output allocation returns empty without encoding") {
 	const Vector<uint8_t> plain = payload();

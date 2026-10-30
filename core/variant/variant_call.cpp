@@ -803,8 +803,8 @@ struct _VariantCall {
 			ERR_FAIL_COND_V(compressed.resize(bound) != OK, compressed);
 			int64_t result = Compression::compress(compressed.ptrw(), p_instance->ptr(), p_instance->size(), mode);
 
-			result = result >= 0 ? result : 0;
-			compressed.resize(result);
+			ERR_FAIL_COND_V(result < 0 || result > bound, PackedByteArray());
+			ERR_FAIL_COND_V(compressed.resize(result) != OK, PackedByteArray());
 		}
 
 		return compressed;
