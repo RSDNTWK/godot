@@ -7,6 +7,7 @@ func _ready() -> void:
 	generator.mix_rate = AudioServer.get_mix_rate()
 	generator.buffer_length = 0.1
 	var player := AudioStreamPlayer.new()
+	player.playback_type = AudioServer.PLAYBACK_TYPE_STREAM
 	player.stream = generator
 	add_child(player)
 	player.play()
@@ -23,8 +24,15 @@ func _ready() -> void:
 		"threaded": OS.has_feature("threads"),
 		"web": OS.has_feature("web"),
 		"player_started": player.playing and playback != null,
+		"streaming": player.playback_type == AudioServer.PLAYBACK_TYPE_STREAM,
 	}
-	report["passed"] = report.web and report.threaded and report.driver == expected and report.player_started
+	report["passed"] = report.web and report.threaded and report.driver == expected and report.player_started and report.streaming
 	print("WORKLET_SHUTDOWN_RESULT " + JSON.stringify(report))
 	await get_tree().create_timer(0.25).timeout
+	player.stop()
+	player.stream = null
+	playback = null
+	generator = null
+	player.queue_free()
+	await get_tree().process_frame
 	get_tree().quit(0 if report.passed else 1)
