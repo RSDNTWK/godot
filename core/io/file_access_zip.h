@@ -33,6 +33,7 @@
 #ifdef MINIZIP_ENABLED
 
 #include "core/io/file_access_pack.h"
+#include "core/os/mutex.h"
 
 #include <thirdparty/minizip/unzip.h>
 
@@ -49,7 +50,11 @@ private:
 	};
 	Vector<Package> packages;
 
-	HashMap<String, File> files;
+	Vector<File> entries;
+	HashMap<String, uint64_t> files;
+	mutable Mutex files_mutex;
+	friend class FileAccessZip;
+	unzFile _get_file_handle(uint64_t p_entry_id) const;
 
 	static inline ZipArchive *instance = nullptr;
 
@@ -79,6 +84,7 @@ class FileAccessZip : public FileAccess {
 	mutable Error last_error = OK;
 
 	void _close();
+	Error _open_handle(unzFile p_file);
 
 public:
 	virtual Error open_internal(const String &p_path, int p_mode_flags) override; ///< open a file

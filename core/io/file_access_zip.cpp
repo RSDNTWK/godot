@@ -115,9 +115,25 @@ void ZipArchive::close_handle(unzFile p_file) const {
 }
 
 unzFile ZipArchive::get_file_handle(const String &p_file) const {
-	ERR_FAIL_COND_V_MSG(!file_exists(p_file), nullptr, vformat("File '%s' doesn't exist.", p_file));
-	File file = files[p_file];
+	uint64_t id;
+	{
+		MutexLock lock(files_mutex);
+		const uint64_t *selected = files.getptr(p_file.simplify_path().trim_prefix("res://"));
+		ERR_FAIL_NULL_V(selected, nullptr);
+		id = *selected;
+	}
+	return _get_file_handle(id);
+}
 
+unzFile ZipArchive::_get_file_handle(uint64_t p_entry_id) const {
+	File file;
+	String archive;
+	{
+		MutexLock lock(files_mutex);
+		ERR_FAIL_COND_V(p_entry_id == 0 || p_entry_id > uint64_t(entries.size()), nullptr);
+		file = entries[p_entry_id - 1];
+		archive = packages[file.package].filename;
+	}
 	zlib_filefunc_def io;
 	memset(&io, 0, sizeof(io));
 
@@ -134,8 +150,8 @@ unzFile ZipArchive::get_file_handle(const String &p_file) const {
 	io.alloc_mem = godot_alloc;
 	io.free_mem = godot_free;
 
-	unzFile pkg = unzOpen2(packages[file.package].filename.utf8().get_data(), &io);
-	ERR_FAIL_NULL_V_MSG(pkg, nullptr, vformat("Cannot open file '%s'.", packages[file.package].filename));
+	unzFile pkg = unzOpen2(archive.utf8().get_data(), &io);
+	ERR_FAIL_NULL_V_MSG(pkg, nullptr, vformat("Cannot open file '%s'.", archive));
 	int unz_err = unzGoToFilePos(pkg, &file.file_pos);
 	if (unz_err != UNZ_OK || unzOpenCurrentFile(pkg) != UNZ_OK) {
 		unzClose(pkg);
@@ -193,7 +209,12 @@ bool ZipArchive::try_open_pack(const String &p_path, bool p_replace_files, uint6
 			ERR_FAIL_V(false);
 		}
 		pending.name = String("res://") + pending.name;
-		pending_files.push_back(pending);
+		const int64_t count = pending_files.size();
+		if (count == INT64_MAX || pending_files.resize(count + 1) != OK) {
+			unzClose(zfile);
+			return false;
+		}
+		pending_files.write[count] = pending;
 		if ((i + 1) < gi.number_entry && unzGoToNextFile(zfile) != UNZ_OK) {
 			unzClose(zfile);
 			ERR_FAIL_V(false);
@@ -201,22 +222,37 @@ bool ZipArchive::try_open_pack(const String &p_path, bool p_replace_files, uint6
 	}
 	unzClose(zfile);
 
-	Package pkg;
-	pkg.filename = p_path;
-	packages.push_back(pkg);
-	const int pkg_num = packages.size() - 1;
-	for (PendingFile &pending : pending_files) {
-		pending.file.package = pkg_num;
-		files[pending.name] = pending.file;
-		uint8_t md5[16] = {};
-		PackedData::get_singleton()->add_path(p_path, pending.name, 1, 0, 0, md5, this, p_replace_files, false);
+	MutexLock lock(files_mutex);
+	ERR_FAIL_COND_V(packages.size() >= INT_MAX || pending_files.size() > INT64_MAX - entries.size(), false);
+	const int package_index = packages.size();
+	const int64_t first_entry = entries.size();
+	Vector<Package> next_packages = packages;
+	ERR_FAIL_COND_V(next_packages.resize(package_index + 1) != OK, false);
+	next_packages.write[package_index].filename = p_path;
+	Vector<File> next_entries = entries;
+	ERR_FAIL_COND_V(next_entries.resize(first_entry + pending_files.size()) != OK, false);
+	for (int64_t i = 0; i < pending_files.size(); i++) {
+		File file = pending_files[i].file;
+		file.package = package_index;
+		next_entries.write[first_entry + i] = file;
 	}
-
+	packages = std::move(next_packages);
+	entries = std::move(next_entries);
+	for (int64_t i = 0; i < pending_files.size(); i++) {
+		const PendingFile &pending = pending_files[i];
+		const uint64_t id = first_entry + i + 1;
+		// Path-based direct opens retain the convenience lookup. Packed reads
+		// use the immutable entry ID selected by PackedData's replacement policy.
+		files[pending.name.simplify_path().trim_prefix("res://")] = id;
+		uint8_t md5[16] = {};
+		PackedData::get_singleton()->add_path(p_path, pending.name, id, 0, 0, md5, this, p_replace_files, false);
+	}
 	return true;
 }
 
 bool ZipArchive::file_exists(const String &p_name) const {
-	return files.has(p_name);
+	MutexLock lock(files_mutex);
+	return files.has(p_name.simplify_path().trim_prefix("res://"));
 }
 
 Ref<FileAccess> ZipArchive::get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key, const Vector<PackedData::PackedFile> *p_delta_snapshot) {
@@ -239,23 +275,29 @@ ZipArchive::~ZipArchive() {
 	packages.clear();
 }
 
+Error FileAccessZip::_open_handle(unzFile p_file) {
+	zfile = p_file;
+	if (!zfile) {
+		last_error = ERR_FILE_CANT_OPEN;
+		return last_error;
+	}
+	const int error = unzGetCurrentFileInfo64(zfile, &file_info, nullptr, 0, nullptr, 0, nullptr, 0);
+	if (error != UNZ_OK) {
+		_close();
+		last_error = ERR_FILE_CORRUPT;
+		return last_error;
+	}
+	at_eof = false;
+	last_error = OK;
+	return OK;
+}
+
 Error FileAccessZip::open_internal(const String &p_path, int p_mode_flags) {
 	_close();
-
 	ERR_FAIL_COND_V(p_mode_flags & FileAccess::WRITE, FAILED);
-	ZipArchive *arch = ZipArchive::get_singleton();
-	ERR_FAIL_NULL_V(arch, FAILED);
-	zfile = arch->get_file_handle(p_path);
-	ERR_FAIL_NULL_V(zfile, FAILED);
-
-	int err = unzGetCurrentFileInfo64(zfile, &file_info, nullptr, 0, nullptr, 0, nullptr, 0);
-	if (err != UNZ_OK) {
-		_close();
-		return FAILED;
-	}
-	last_error = OK;
-
-	return OK;
+	ZipArchive *archive = ZipArchive::get_singleton();
+	ERR_FAIL_NULL_V(archive, FAILED);
+	return _open_handle(archive->get_file_handle(p_path));
 }
 
 void FileAccessZip::_close() {
@@ -370,7 +412,10 @@ void FileAccessZip::close() {
 }
 
 FileAccessZip::FileAccessZip(const String &p_path, const PackedData::PackedFile &p_file) {
-	open_internal(p_path, FileAccess::READ);
+	ZipArchive *archive = ZipArchive::get_singleton();
+	last_error = ERR_UNCONFIGURED;
+	ERR_FAIL_NULL(archive);
+	_open_handle(archive->_get_file_handle(p_file.offset));
 }
 
 FileAccessZip::~FileAccessZip() {
