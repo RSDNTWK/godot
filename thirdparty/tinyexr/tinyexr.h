@@ -5774,74 +5774,48 @@ static bool ComputeChannelLayout(std::vector<size_t> *channel_offset_list,
   return true;
 }
 
-// TODO: Simply return nullptr when failed to allocate?
 static unsigned char **AllocateImage(int num_channels,
                                      const EXRChannelInfo *channels,
                                      const int *requested_pixel_types,
                                      int data_width, int data_height, bool *success) {
-  unsigned char **images =
-      reinterpret_cast<unsigned char **>(static_cast<float **>(
-          malloc(sizeof(float *) * static_cast<size_t>(num_channels))));
-
-  for (size_t c = 0; c < static_cast<size_t>(num_channels); c++) {
-    images[c] = NULL;
+  if (success) (*success) = false;
+  if (num_channels <= 0 || channels == NULL || requested_pixel_types == NULL ||
+      data_width <= 0 || data_height <= 0 ||
+      size_t(num_channels) > SIZE_MAX / sizeof(unsigned char *) ||
+      size_t(data_width) > SIZE_MAX / size_t(data_height)) {
+    return NULL;
   }
+  const size_t data_len = size_t(data_width) * size_t(data_height);
+  if (data_len > SIZE_MAX / sizeof(float)) return NULL;
+  unsigned char **images = static_cast<unsigned char **>(
+      calloc(size_t(num_channels), sizeof(unsigned char *)));
+  if (images == NULL) return NULL;
 
-  bool valid = true;
-
-  for (size_t c = 0; c < static_cast<size_t>(num_channels); c++) {
-    size_t data_len =
-        static_cast<size_t>(data_width) * static_cast<size_t>(data_height);
+  for (int c = 0; c < num_channels; c++) {
+    size_t element_size = 0;
     if (channels[c].pixel_type == TINYEXR_PIXELTYPE_HALF) {
-      // pixel_data_size += sizeof(unsigned short);
-      // channel_offset += sizeof(unsigned short);
-      // Alloc internal image for half type.
       if (requested_pixel_types[c] == TINYEXR_PIXELTYPE_HALF) {
-        images[c] =
-            reinterpret_cast<unsigned char *>(static_cast<unsigned short *>(
-                malloc(sizeof(unsigned short) * data_len)));
+        element_size = sizeof(unsigned short);
       } else if (requested_pixel_types[c] == TINYEXR_PIXELTYPE_FLOAT) {
-        images[c] = reinterpret_cast<unsigned char *>(
-            static_cast<float *>(malloc(sizeof(float) * data_len)));
-      } else {
-        images[c] = NULL; // just in case.
-        valid = false;
-        break;
+        element_size = sizeof(float);
       }
-    } else if (channels[c].pixel_type == TINYEXR_PIXELTYPE_FLOAT) {
-      // pixel_data_size += sizeof(float);
-      // channel_offset += sizeof(float);
-      images[c] = reinterpret_cast<unsigned char *>(
-          static_cast<float *>(malloc(sizeof(float) * data_len)));
-    } else if (channels[c].pixel_type == TINYEXR_PIXELTYPE_UINT) {
-      // pixel_data_size += sizeof(unsigned int);
-      // channel_offset += sizeof(unsigned int);
-      images[c] = reinterpret_cast<unsigned char *>(
-          static_cast<unsigned int *>(malloc(sizeof(unsigned int) * data_len)));
-    } else {
-      images[c] = NULL; // just in case.
-      valid = false;
-      break;
+    } else if (channels[c].pixel_type == TINYEXR_PIXELTYPE_FLOAT &&
+               requested_pixel_types[c] == TINYEXR_PIXELTYPE_FLOAT) {
+      element_size = sizeof(float);
+    } else if (channels[c].pixel_type == TINYEXR_PIXELTYPE_UINT &&
+               requested_pixel_types[c] == TINYEXR_PIXELTYPE_UINT) {
+      element_size = sizeof(unsigned int);
+    }
+    if (element_size != 0 && data_len <= SIZE_MAX / element_size) {
+      images[c] = static_cast<unsigned char *>(malloc(element_size * data_len));
+    }
+    if (images[c] == NULL) {
+      for (int i = 0; i < num_channels; i++) free(images[i]);
+      free(images);
+      return NULL;
     }
   }
-
-  if (!valid) {
-    for (size_t c = 0; c < static_cast<size_t>(num_channels); c++) {
-      if (images[c]) {
-        free(images[c]);
-        images[c] = NULL;
-      }
-    }
-
-    if (success) {
-      (*success) = false;
-    }
-  } else {
-    if (success) {
-      (*success) = true;
-    }
-  }
-
+  if (success) (*success) = true;
   return images;
 }
 
@@ -6137,10 +6111,20 @@ static int ParseEXRHeader(HeaderInfo *info, bool *empty_header,
         attrib.name[255] = '\0';
         attrib.type[255] = '\0';
         //std::cout << "i = " << info->attributes.size() << ", dsize = " << data.size() << "\n";
+        if (data.size() > size_t(std::numeric_limits<int>::max())) {
+          if (err) (*err) += "Custom attribute is too large.\n";
+          return TINYEXR_ERROR_INVALID_HEADER;
+        }
         attrib.size = static_cast<int>(data.size());
-        attrib.value = static_cast<unsigned char *>(malloc(data.size()));
-        memcpy(reinterpret_cast<char *>(attrib.value), &data.at(0),
-               data.size());
+        attrib.value = NULL;
+        if (!data.empty()) {
+          attrib.value = static_cast<unsigned char *>(malloc(data.size()));
+          if (attrib.value == NULL) {
+            if (err) (*err) += "Failed to allocate custom attribute.\n";
+            return TINYEXR_ERROR_INVALID_HEADER;
+          }
+          memcpy(attrib.value, &data.at(0), data.size());
+        }
         info->attributes.push_back(attrib);
       }
     }
@@ -6284,10 +6268,14 @@ static bool ConvertHeader(EXRHeader *exr_header, const HeaderInfo &info, std::st
     }
   }
 
+  if (info.channels.empty() || info.channels.size() > size_t(std::numeric_limits<int>::max()) ||
+      info.channels.size() > SIZE_MAX / sizeof(EXRChannelInfo) ||
+      info.channels.size() > SIZE_MAX / sizeof(int)) return false;
   exr_header->num_channels = static_cast<int>(info.channels.size());
 
   exr_header->channels = static_cast<EXRChannelInfo *>(malloc(
       sizeof(EXRChannelInfo) * static_cast<size_t>(exr_header->num_channels)));
+  if (exr_header->channels == NULL) return false;
   for (size_t c = 0; c < static_cast<size_t>(exr_header->num_channels); c++) {
 #ifdef _MSC_VER
     strncpy_s(exr_header->channels[c].name, info.channels[c].name.c_str(), 255);
@@ -6305,6 +6293,7 @@ static bool ConvertHeader(EXRHeader *exr_header, const HeaderInfo &info, std::st
 
   exr_header->pixel_types = static_cast<int *>(
       malloc(sizeof(int) * static_cast<size_t>(exr_header->num_channels)));
+  if (exr_header->pixel_types == NULL) return false;
   for (size_t c = 0; c < static_cast<size_t>(exr_header->num_channels); c++) {
     exr_header->pixel_types[c] = info.channels[c].pixel_type;
   }
@@ -6312,35 +6301,31 @@ static bool ConvertHeader(EXRHeader *exr_header, const HeaderInfo &info, std::st
   // Initially fill with values of `pixel_types`
   exr_header->requested_pixel_types = static_cast<int *>(
       malloc(sizeof(int) * static_cast<size_t>(exr_header->num_channels)));
+  if (exr_header->requested_pixel_types == NULL) return false;
   for (size_t c = 0; c < static_cast<size_t>(exr_header->num_channels); c++) {
     exr_header->requested_pixel_types[c] = info.channels[c].pixel_type;
   }
 
-  exr_header->num_custom_attributes = static_cast<int>(info.attributes.size());
-
-  if (exr_header->num_custom_attributes > 0) {
-    // TODO(syoyo): Report warning when # of attributes exceeds
-    // `TINYEXR_MAX_CUSTOM_ATTRIBUTES`
-    if (exr_header->num_custom_attributes > TINYEXR_MAX_CUSTOM_ATTRIBUTES) {
-      exr_header->num_custom_attributes = TINYEXR_MAX_CUSTOM_ATTRIBUTES;
+  const size_t attribute_count =
+      std::min(info.attributes.size(), size_t(TINYEXR_MAX_CUSTOM_ATTRIBUTES));
+  if (attribute_count > SIZE_MAX / sizeof(EXRAttribute)) return false;
+  EXRAttribute *attributes = NULL;
+  if (attribute_count > 0) {
+    attributes = static_cast<EXRAttribute *>(malloc(sizeof(EXRAttribute) * attribute_count));
+    if (attributes == NULL) {
+      if (err) (*err) += "Failed to allocate custom attribute table.\n";
+      return false;
     }
-
-    exr_header->custom_attributes = static_cast<EXRAttribute *>(malloc(
-        sizeof(EXRAttribute) * size_t(exr_header->num_custom_attributes)));
-
-    for (size_t i = 0; i < size_t(exr_header->num_custom_attributes); i++) {
-      memcpy(exr_header->custom_attributes[i].name, info.attributes[i].name,
-             256);
-      memcpy(exr_header->custom_attributes[i].type, info.attributes[i].type,
-             256);
-      exr_header->custom_attributes[i].size = info.attributes[i].size;
-      // Just copy pointer
-      exr_header->custom_attributes[i].value = info.attributes[i].value;
+    for (size_t i = 0; i < attribute_count; i++) {
+      memcpy(attributes[i].name, info.attributes[i].name, 256);
+      memcpy(attributes[i].type, info.attributes[i].type, 256);
+      attributes[i].size = info.attributes[i].size;
+      attributes[i].value = info.attributes[i].value;
     }
-
-  } else {
-    exr_header->custom_attributes = NULL;
   }
+  // Attribute values remain owned by HeaderInfo until all allocations succeed.
+  exr_header->custom_attributes = attributes;
+  exr_header->num_custom_attributes = static_cast<int>(attribute_count);
 
   exr_header->header_len = info.header_len;
 
@@ -6403,6 +6388,10 @@ static int DecodeTiledLevel(EXRImage* exr_image, const EXRHeader* exr_header,
   if (num_x_tiles < 1) {
     return TINYEXR_ERROR_INVALID_DATA;
   }
+  if (num_x_tiles > std::numeric_limits<int>::max() / num_y_tiles ||
+      size_t(num_x_tiles) * size_t(num_y_tiles) > SIZE_MAX / sizeof(EXRTile)) {
+    return TINYEXR_ERROR_INVALID_DATA;
+  }
   int num_tiles = num_x_tiles * num_y_tiles;
 
   int err_code = TINYEXR_SUCCESS;
@@ -6432,6 +6421,7 @@ static int DecodeTiledLevel(EXRImage* exr_image, const EXRHeader* exr_header,
 #endif
   exr_image->tiles = static_cast<EXRTile*>(
     calloc(static_cast<size_t>(num_tiles), sizeof(EXRTile)));
+  if (exr_image->tiles == NULL) return TINYEXR_ERROR_INVALID_DATA;
 
 #if TINYEXR_HAS_CXX11 && (TINYEXR_USE_THREAD > 0)
   std::vector<std::thread> workers;
@@ -8015,6 +8005,11 @@ int ParseEXRHeaderFromMemory(EXRHeader *exr_header, const EXRVersion *version,
         tinyexr::SetErrorMessage(err_str, err);
       }
     }
+  }
+
+  if (ret != TINYEXR_SUCCESS) {
+    for (size_t i = 0; i < info.attributes.size(); i++) free(info.attributes[i].value);
+    return ret;
   }
 
   {

@@ -92,7 +92,7 @@ inline float base(const String &p_name) {
 
 // Small uncompressed EXR fixtures. Channel order is explicit, as in the
 // dependency's writer. Rows contain each channel's contiguous pixel samples.
-inline Vector<uint8_t> fixture(const char *p_names, bool p_half, bool p_tiled, bool p_ignored_half = false, const char *p_uint_names = "", uint32_t p_uint_value = 1, int p_tile_size = 2) {
+inline Vector<uint8_t> fixture(const char *p_names, bool p_half, bool p_tiled, bool p_ignored_half = false, const char *p_uint_names = "", uint32_t p_uint_value = 1, int p_tile_size = 2, int p_custom_size = -1) {
 	const Vector<String> names = String(p_names).split(",");
 	const Vector<String> uint_names = String(p_uint_names).split(",");
 	const int width = 17;
@@ -136,6 +136,12 @@ inline Vector<uint8_t> fixture(const char *p_names, bool p_half, bool p_tiled, b
 		u32(tile, p_tile_size);
 		tile.push_back(0); // One level, rounded down.
 		attribute(result, "tiles", "tiledesc", tile);
+	}
+	if (p_custom_size >= 0) {
+		Vector<uint8_t> custom;
+		REQUIRE(custom.resize(p_custom_size) == OK);
+		custom.fill(0x67);
+		attribute(result, "testAttribute", "opaque", custom);
 	}
 	result.push_back(0);
 	Vector<Vector<uint8_t>> chunks;
