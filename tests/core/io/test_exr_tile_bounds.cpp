@@ -32,10 +32,14 @@
 TEST_FORCE_LINK(test_exr_tile_bounds)
 #include "modules/modules_enabled.gen.h"
 #ifdef MODULE_TINYEXR_ENABLED
+#include "thirdparty/tinyexr/tinyexr.h"
+
 #include "core/io/marshalls.h"
 #include "tests/core/io/exr_test_helpers.h"
 
 #include "modules/tinyexr/exr_image_size.h"
+
+#include <cstring>
 
 namespace TestEXRTileBounds {
 struct QuietErrors {
@@ -94,6 +98,98 @@ TEST_CASE("[N034][EXRTileBounds] Defensive destination geometry checks wide orig
 	}
 	CHECK(EXRImageSize::tile_rectangle(17, 19, 2, 2, 8, 9, 2, 2, x, y) == ERR_FILE_CORRUPT);
 	CHECK(EXRImageSize::tile_rectangle(17, 19, 0, 2, 0, 0, 1, 1, x, y) == ERR_FILE_CORRUPT);
+}
+static int tile_descriptor(const Vector<uint8_t> &p_bytes) {
+	const char marker[] = "tiles\0tiledesc\0";
+	constexpr int marker_size = sizeof(marker) - 1;
+	for (int i = 8; i + marker_size + 4 + 9 <= p_bytes.size(); i++) {
+		if (memcmp(p_bytes.ptr() + i, marker, marker_size) == 0) {
+			REQUIRE(decode_uint32(p_bytes.ptr() + i + marker_size) == 9);
+			return i + marker_size + 4;
+		}
+	}
+	CHECK(false);
+	return -1;
+}
+TEST_CASE("[N034][EXRTileBounds] Zero descriptor extents reject through the actual image loader") {
+	for (bool half : { false, true }) {
+		const Vector<uint8_t> original = TestEXRFixture::fixture("R,G,B,A", half, true);
+		const int descriptor = tile_descriptor(original);
+		REQUIRE(descriptor >= 0);
+		if (descriptor < 0) {
+			return;
+		}
+		for (int zero_mask : { 1, 2, 3 }) {
+			Vector<uint8_t> encoded = original;
+			if (zero_mask & 1) {
+				encode_uint32(0, encoded.ptrw() + descriptor);
+			}
+			if (zero_mask & 2) {
+				encode_uint32(0, encoded.ptrw() + descriptor + 4);
+			}
+			Ref<Image> image = Image::create_empty(2, 3, false, Image::FORMAT_RGBA8);
+			image->fill(Color(0.25, 0.5, 0.75));
+			const Vector<uint8_t> before = image->get_data();
+			QuietErrors quiet;
+			CHECK(TestEXRFixture::load(encoded, image) == ERR_FILE_CORRUPT);
+			CHECK(image->get_size() == Vector2i(2, 3));
+			CHECK(image->get_data() == before);
+			REQUIRE(TestEXRFixture::load(original, image) == OK);
+			CHECK(image->get_size() == Vector2i(17, 19));
+		}
+	}
+}
+TEST_CASE("[N034][EXRTileBounds] Constructed dependency headers reject nonpositive extents before tile counting") {
+	const Vector<uint8_t> encoded = TestEXRFixture::fixture("R", false, true);
+	EXRVersion version = {};
+	const int version_result = ParseEXRVersionFromMemory(&version, encoded.ptr(), encoded.size());
+	REQUIRE(version_result == TINYEXR_SUCCESS);
+	if (version_result != TINYEXR_SUCCESS) {
+		return;
+	}
+	EXRHeader header;
+	InitEXRHeader(&header);
+	struct HeaderCleanup {
+		EXRHeader *header;
+		~HeaderCleanup() { FreeEXRHeader(header); }
+	} cleanup = { &header };
+	const char *message = nullptr;
+	const int parsed = ParseEXRHeaderFromMemory(&header, &version, encoded.ptr(), encoded.size(), &message);
+	if (message) {
+		FreeEXRErrorMessage(message);
+	}
+	REQUIRE(parsed == TINYEXR_SUCCESS);
+	if (parsed != TINYEXR_SUCCESS) {
+		return;
+	}
+	const int original_x = header.tile_size_x;
+	const int original_y = header.tile_size_y;
+	for (int axis : { 0, 1 }) {
+		for (int extent : { 0, -1 }) {
+			header.tile_size_x = axis == 0 ? extent : original_x;
+			header.tile_size_y = axis == 1 ? extent : original_y;
+			EXRImage decoded;
+			InitEXRImage(&decoded);
+			message = nullptr;
+			CHECK(LoadEXRImageFromMemory(&decoded, &header, encoded.ptr(), encoded.size(), &message) == TINYEXR_ERROR_INVALID_DATA);
+			CHECK(decoded.images == nullptr);
+			CHECK(decoded.tiles == nullptr);
+			FreeEXRImage(&decoded);
+			if (message) {
+				FreeEXRErrorMessage(message);
+			}
+		}
+	}
+	header.tile_size_x = original_x;
+	header.tile_size_y = original_y;
+	EXRImage valid;
+	InitEXRImage(&valid);
+	message = nullptr;
+	CHECK(LoadEXRImageFromMemory(&valid, &header, encoded.ptr(), encoded.size(), &message) == TINYEXR_SUCCESS);
+	FreeEXRImage(&valid);
+	if (message) {
+		FreeEXRErrorMessage(message);
+	}
 }
 } //namespace TestEXRTileBounds
 #endif

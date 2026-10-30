@@ -5941,7 +5941,8 @@ static int ParseEXRHeader(HeaderInfo *info, bool *empty_header,
       tinyexr::swap4(&x_size);
       tinyexr::swap4(&y_size);
 
-      if (x_size > static_cast<unsigned int>(std::numeric_limits<int>::max()) ||
+      if (x_size == 0 || y_size == 0 ||
+          x_size > static_cast<unsigned int>(std::numeric_limits<int>::max()) ||
           y_size > static_cast<unsigned int>(std::numeric_limits<int>::max())) {
         if (err) {
           (*err) = "Tile sizes were invalid.";
@@ -7088,6 +7089,9 @@ static bool CalculateNumTiles(std::vector<int>& numTiles,
   int toplevel_size,
   int size,
   int tile_rounding_mode) {
+  if (size <= 0) {
+    return false;
+  }
   for (unsigned i = 0; i < numTiles.size(); i++) {
     int l = LevelSize(toplevel_size, int(i), tile_rounding_mode);
     if (l < 0) {
