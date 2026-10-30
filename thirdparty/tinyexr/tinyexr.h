@@ -5722,23 +5722,20 @@ static bool DecodeTiledPixelData(
     const EXRChannelInfo *channels,
     const std::vector<size_t> &channel_offset_list) {
   // Here, data_width and data_height are the dimensions of the current (sub)level.
-  if (tile_size_x * tile_offset_x > data_width ||
-      tile_size_y * tile_offset_y > data_height) {
+  if (data_width <= 0 || data_height <= 0 ||
+      tile_size_x <= 0 || tile_size_y <= 0 ||
+      tile_offset_x < 0 || tile_offset_y < 0) {
+    return false;
+  }
+  const int64_t origin_x = int64_t(tile_size_x) * tile_offset_x;
+  const int64_t origin_y = int64_t(tile_size_y) * tile_offset_y;
+  if (origin_x >= data_width || origin_y >= data_height) {
     return false;
   }
 
-  // Compute actual image size in a tile.
-  if ((tile_offset_x + 1) * tile_size_x >= data_width) {
-    (*width) = data_width - (tile_offset_x * tile_size_x);
-  } else {
-    (*width) = tile_size_x;
-  }
-
-  if ((tile_offset_y + 1) * tile_size_y >= data_height) {
-    (*height) = data_height - (tile_offset_y * tile_size_y);
-  } else {
-    (*height) = tile_size_y;
-  }
+  // Oversized tiles are legal; only their intersection with the level is decoded.
+  (*width) = int(std::min(int64_t(tile_size_x), int64_t(data_width) - origin_x));
+  (*height) = int(std::min(int64_t(tile_size_y), int64_t(data_height) - origin_y));
 
   // Image size = tile size.
   // Line order within tiles is always increasing.

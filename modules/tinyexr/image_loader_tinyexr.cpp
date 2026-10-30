@@ -216,6 +216,10 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 
 			int tw = tile.width;
 			int th = tile.height;
+			int64_t tile_x, tile_y;
+			ERR_FAIL_COND_V(EXRImageSize::tile_rectangle(exr_image.width, exr_image.height, tile_width, tile_height,
+									tile.offset_x, tile.offset_y, tw, th, tile_x, tile_y) != OK,
+					ERR_FILE_CORRUPT);
 
 			const uint8_t *r_channel_start = reinterpret_cast<const uint8_t *>(tile.images[idxR]);
 			const uint8_t *g_channel_start = nullptr;
@@ -232,8 +236,9 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 				a_channel_start = reinterpret_cast<const uint8_t *>(tile.images[idxA]);
 			}
 
-			uint16_t *first_row_w16 = iw16 + (int64_t(tile.offset_y) * tile_height * exr_image.width + int64_t(tile.offset_x) * tile_width) * output_channels;
-			float *first_row_w32 = iw32 + (int64_t(tile.offset_y) * tile_height * exr_image.width + int64_t(tile.offset_x) * tile_width) * output_channels;
+			const int64_t output_offset = (tile_y * exr_image.width + tile_x) * output_channels;
+			uint16_t *first_row_w16 = use_float16 ? iw16 + output_offset : nullptr;
+			float *first_row_w32 = use_float16 ? nullptr : iw32 + output_offset;
 
 			for (int y = 0; y < th; y++) {
 				const uint8_t *r_channel = r_channel_start + int64_t(y) * tile_width * sizeof(uint32_t);

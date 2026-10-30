@@ -47,4 +47,21 @@ inline Error output_bytes(int64_t p_width, int64_t p_height, int p_channels, int
 	r_bytes = int64_t(bytes);
 	return OK;
 }
+inline Error tile_rectangle(int p_width, int p_height, int p_tile_width, int p_tile_height, int p_tile_x, int p_tile_y, int p_actual_width, int p_actual_height, int64_t &r_x, int64_t &r_y) {
+	r_x = 0;
+	r_y = 0;
+	if (p_width <= 0 || p_height <= 0 || p_tile_width <= 0 || p_tile_height <= 0 ||
+			p_tile_x < 0 || p_tile_y < 0 || p_actual_width <= 0 || p_actual_height <= 0 ||
+			p_actual_width > p_tile_width || p_actual_height > p_tile_height) {
+		return ERR_FILE_CORRUPT;
+	}
+	const int64_t x = int64_t(p_tile_x) * p_tile_width;
+	const int64_t y = int64_t(p_tile_y) * p_tile_height;
+	if (x >= p_width || y >= p_height || p_actual_width > p_width - x || p_actual_height > p_height - y) {
+		return ERR_FILE_CORRUPT;
+	}
+	r_x = x;
+	r_y = y;
+	return OK;
+}
 } // namespace EXRImageSize
