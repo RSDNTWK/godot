@@ -402,7 +402,7 @@ void AudioDriverWorklet::_audio_thread_func(void *p_data) {
 	int rpos = 0;
 	int to_read = 0;
 	int32_t step = 0;
-	while (!driver->quit) {
+	while (!driver->quit.is_set()) {
 		if (to_read) {
 			driver->lock();
 			driver->_audio_driver_capture(rpos, to_read);
@@ -437,6 +437,7 @@ Error AudioDriverWorklet::create(int &p_buffer_size, int p_channels) {
 }
 
 void AudioDriverWorklet::start(float *p_out_buf, int p_out_buf_size, float *p_in_buf, int p_in_buf_size) {
+	quit.clear();
 	godot_audio_worklet_start(p_in_buf, p_in_buf_size, p_out_buf, p_out_buf_size, state);
 	thread.start(_audio_thread_func, this);
 }
@@ -450,7 +451,7 @@ void AudioDriverWorklet::unlock() {
 }
 
 void AudioDriverWorklet::finish_driver() {
-	quit = true; // Ask thread to quit.
+	quit.set(); // Ask thread to quit.
 	if (thread.is_started()) {
 		thread.wait_to_finish();
 	}
