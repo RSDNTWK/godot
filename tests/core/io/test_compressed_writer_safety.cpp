@@ -93,6 +93,20 @@ TEST_CASE("[N037][CompressedWriter] Unrepresentable write extents reject before 
 	writer.close();
 	CHECK(writer.get_error() == ERR_INVALID_PARAMETER);
 }
+#ifdef LINUXBSD_ENABLED
+TEST_CASE("[N037][CompressedWriter] Backing write failures survive cleanup") {
+	const Vector<uint8_t> plain = payload(513);
+	FileAccessCompressed writer;
+	writer.configure("GCMP", Compression::MODE_GZIP, 32);
+	REQUIRE(writer.open_internal("/dev/full", FileAccess::WRITE) == OK);
+	REQUIRE(writer.store_buffer(plain.ptr(), plain.size()));
+	writer.close();
+	CHECK_FALSE(writer.is_open());
+	CHECK(writer.get_error() == ERR_FILE_CANT_WRITE);
+	writer.close();
+	CHECK(writer.get_error() == ERR_FILE_CANT_WRITE);
+}
+#endif
 #ifdef B01_ALLOCATION_TESTS
 struct QuietErrors {
 	bool previous = CoreGlobals::print_error_enabled;
@@ -162,7 +176,7 @@ TEST_CASE("[N037][CompressedWriterAllocation] Close allocation failures report e
 		Fixture fixture;
 		const Vector<uint8_t> plain = payload(513);
 		FileAccessCompressed writer;
-		writer.configure("GCMP", Compression::MODE_GZIP, 32);
+		writer.configure("GCMP", Compression::MODE_LZMA2, 32);
 		REQUIRE(writer.open_internal(fixture.path, FileAccess::WRITE) == OK);
 		REQUIRE(writer.store_buffer(plain.ptr(), plain.size()));
 		const size_t allocation = TestAllocation::allocation_size([&]() {
@@ -171,7 +185,7 @@ TEST_CASE("[N037][CompressedWriterAllocation] Close allocation failures report e
 				REQUIRE(sizes.resize(plain.size() / 32 + 1) == OK);
 			} else {
 				Vector<uint8_t> compressed;
-				REQUIRE(compressed.resize(Compression::get_max_compressed_buffer_size(32, Compression::MODE_GZIP)) == OK);
+				REQUIRE(compressed.resize(Compression::get_max_compressed_buffer_size(32, Compression::MODE_LZMA2)) == OK);
 			}
 		});
 		QuietErrors quiet;
@@ -185,6 +199,64 @@ TEST_CASE("[N037][CompressedWriterAllocation] Close allocation failures report e
 		writer.close();
 		CHECK(writer.get_error() == ERR_OUT_OF_MEMORY);
 	}
+}
+TEST_CASE("[N037][CompressedWriterAllocation] Failed initial allocation preserves an existing backing file") {
+	Fixture fixture;
+	{
+		Ref<FileAccess> file = FileAccess::open(fixture.path, FileAccess::WRITE);
+		REQUIRE(file.is_valid());
+		REQUIRE(file->store_string("retained"));
+	}
+	FileAccessCompressed writer;
+	writer.configure("GCMP", Compression::MODE_GZIP, 32);
+	const size_t allocation = TestAllocation::allocation_size([]() {
+		Vector<uint8_t> initial;
+		REQUIRE(initial.resize(256) == OK);
+	});
+	QuietErrors quiet;
+	{
+		TestAllocation::Failure failure(allocation);
+		CHECK(writer.open_internal(fixture.path, FileAccess::WRITE) == ERR_OUT_OF_MEMORY);
+		CHECK(TestAllocation::failures() == 1);
+	}
+	CHECK_FALSE(writer.is_open());
+	writer.close();
+	CHECK(writer.get_error() == ERR_OUT_OF_MEMORY);
+	Ref<FileAccess> file = FileAccess::open(fixture.path, FileAccess::READ);
+	REQUIRE(file.is_valid());
+	CHECK(file->get_as_utf8_string() == "retained");
+}
+TEST_CASE("[N037][CompressedWriterAllocation] Encoder failure during close remains observable and permits recovery") {
+	Fixture fixture;
+	const Vector<uint8_t> plain = payload(513);
+	FileAccessCompressed writer;
+	writer.configure("GCMP", Compression::MODE_LZMA2, 32);
+	REQUIRE(writer.open_internal(fixture.path, FileAccess::WRITE) == OK);
+	REQUIRE(writer.store_buffer(plain.ptr(), plain.size()));
+	const size_t allocation = TestAllocation::allocation_size([]() {
+		Vector<uint8_t> input;
+		REQUIRE(input.resize(32) == OK);
+	});
+	QuietErrors quiet;
+	{
+		TestAllocation::Failure failure(allocation);
+		writer.close();
+		CHECK(TestAllocation::failures() == 1);
+	}
+	CHECK_FALSE(writer.is_open());
+	CHECK(writer.get_error() == ERR_INVALID_DATA);
+	FileAccessCompressed rejected;
+	CHECK(rejected.open_internal(fixture.path, FileAccess::READ) == ERR_FILE_CORRUPT);
+	REQUIRE(writer.open_internal(fixture.path, FileAccess::WRITE) == OK);
+	REQUIRE(writer.store_buffer(plain.ptr(), plain.size()));
+	writer.close();
+	FileAccessCompressed reader;
+	REQUIRE(reader.open_internal(fixture.path, FileAccess::READ) == OK);
+	CHECK(reader.get_length() == uint64_t(plain.size()));
+	Vector<uint8_t> decoded;
+	REQUIRE(decoded.resize(plain.size()) == OK);
+	CHECK(reader.get_buffer(decoded.ptrw(), decoded.size()) == uint64_t(decoded.size()));
+	CHECK(decoded == plain);
 }
 #endif
 } //namespace TestCompressedWriterSafety
