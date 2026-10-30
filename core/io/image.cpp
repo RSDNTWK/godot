@@ -34,6 +34,7 @@
 #include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
 #include "core/io/image_loader.h"
+#include "core/io/image_mipmap_layout.h"
 #include "core/io/resource_loader.h"
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
@@ -1327,7 +1328,10 @@ void Image::resize(int p_width, int p_height, Interpolation p_interpolation) {
 
 	bool had_mipmaps = mipmaps;
 	if (interpolate_mipmaps && !had_mipmaps) {
-		generate_mipmaps();
+		if (generate_mipmaps() != OK) {
+			restore_source();
+			ERR_FAIL_MSG("Could not generate source mipmaps for resizing.");
+		}
 	}
 	// --
 
@@ -1644,7 +1648,10 @@ void Image::resize(int p_width, int p_height, Interpolation p_interpolation) {
 	}
 
 	if (had_mipmaps) {
-		dst.generate_mipmaps();
+		if (dst.generate_mipmaps() != OK) {
+			restore_source();
+			ERR_FAIL_MSG("Could not generate resized mipmaps.");
+		}
 	}
 
 	// Reconvert before committing so initialization failure preserves the source.
@@ -1703,7 +1710,7 @@ void Image::crop_from_point(int p_x, int p_y, int p_width, int p_height) {
 	}
 
 	if (has_mipmaps()) {
-		dst.generate_mipmaps();
+		ERR_FAIL_COND(dst.generate_mipmaps() != OK);
 	}
 	_copy_internals_from(dst);
 }
@@ -1718,8 +1725,13 @@ void Image::rotate_90(ClockDirection p_direction) {
 	ERR_FAIL_COND_MSG(height <= 0, vformat("The Image height specified (%d pixels) must be greater than 0 pixels.", height));
 
 	bool used_mipmaps = has_mipmaps();
+	Vector<uint8_t> original_data;
+	const int original_width = width;
+	const int original_height = height;
 	if (used_mipmaps) {
+		original_data = data;
 		clear_mipmaps();
+		ERR_FAIL_COND(has_mipmaps());
 	}
 
 	// In-place 90 degrees rotation by following the permutation cycles.
@@ -1825,8 +1837,12 @@ void Image::rotate_90(ClockDirection p_direction) {
 #undef PREV_INDEX_IN_CYCLE
 	}
 
-	if (used_mipmaps) {
-		generate_mipmaps();
+	if (used_mipmaps && generate_mipmaps() != OK) {
+		data = std::move(original_data);
+		width = original_width;
+		height = original_height;
+		mipmaps = true;
+		ERR_FAIL_MSG("Could not regenerate transformed mipmaps.");
 	}
 }
 
@@ -1836,8 +1852,13 @@ void Image::rotate_180() {
 	ERR_FAIL_COND_MSG(height <= 0, vformat("The Image height specified (%d pixels) must be greater than 0 pixels.", height));
 
 	bool used_mipmaps = has_mipmaps();
+	Vector<uint8_t> original_data;
+	const int original_width = width;
+	const int original_height = height;
 	if (used_mipmaps) {
+		original_data = data;
 		clear_mipmaps();
+		ERR_FAIL_COND(has_mipmaps());
 	}
 
 	{
@@ -1859,8 +1880,12 @@ void Image::rotate_180() {
 		}
 	}
 
-	if (used_mipmaps) {
-		generate_mipmaps();
+	if (used_mipmaps && generate_mipmaps() != OK) {
+		data = std::move(original_data);
+		width = original_width;
+		height = original_height;
+		mipmaps = true;
+		ERR_FAIL_MSG("Could not regenerate transformed mipmaps.");
 	}
 }
 
@@ -1868,8 +1893,13 @@ void Image::flip_y() {
 	ERR_FAIL_COND_MSG(is_compressed(), "Cannot flip_y in compressed image formats.");
 
 	bool used_mipmaps = has_mipmaps();
+	Vector<uint8_t> original_data;
+	const int original_width = width;
+	const int original_height = height;
 	if (used_mipmaps) {
+		original_data = data;
 		clear_mipmaps();
+		ERR_FAIL_COND(has_mipmaps());
 	}
 
 	{
@@ -1889,8 +1919,12 @@ void Image::flip_y() {
 		}
 	}
 
-	if (used_mipmaps) {
-		generate_mipmaps();
+	if (used_mipmaps && generate_mipmaps() != OK) {
+		data = std::move(original_data);
+		width = original_width;
+		height = original_height;
+		mipmaps = true;
+		ERR_FAIL_MSG("Could not regenerate transformed mipmaps.");
 	}
 }
 
@@ -1898,8 +1932,13 @@ void Image::flip_x() {
 	ERR_FAIL_COND_MSG(is_compressed(), "Cannot flip_x in compressed image formats.");
 
 	bool used_mipmaps = has_mipmaps();
+	Vector<uint8_t> original_data;
+	const int original_width = width;
+	const int original_height = height;
 	if (used_mipmaps) {
+		original_data = data;
 		clear_mipmaps();
+		ERR_FAIL_COND(has_mipmaps());
 	}
 
 	{
@@ -1919,8 +1958,12 @@ void Image::flip_x() {
 		}
 	}
 
-	if (used_mipmaps) {
-		generate_mipmaps();
+	if (used_mipmaps && generate_mipmaps() != OK) {
+		data = std::move(original_data);
+		width = original_width;
+		height = original_height;
+		mipmaps = true;
+		ERR_FAIL_MSG("Could not regenerate transformed mipmaps.");
 	}
 }
 
@@ -2165,8 +2208,13 @@ void Image::shrink_x2() {
 
 void Image::normalize() {
 	bool used_mipmaps = has_mipmaps();
+	Vector<uint8_t> original_data;
+	const int original_width = width;
+	const int original_height = height;
 	if (used_mipmaps) {
+		original_data = data;
 		clear_mipmaps();
+		ERR_FAIL_COND(has_mipmaps());
 	}
 
 	for (int y = 0; y < height; y++) {
@@ -2181,8 +2229,12 @@ void Image::normalize() {
 		}
 	}
 
-	if (used_mipmaps) {
-		generate_mipmaps(true);
+	if (used_mipmaps && generate_mipmaps(true) != OK) {
+		data = std::move(original_data);
+		width = original_width;
+		height = original_height;
+		mipmaps = true;
+		ERR_FAIL_MSG("Could not regenerate transformed mipmaps.");
 	}
 }
 
@@ -2190,30 +2242,22 @@ Error Image::generate_mipmaps(bool p_renormalize) {
 	ERR_FAIL_COND_V_MSG(is_compressed(), ERR_UNAVAILABLE, "Cannot generate mipmaps from compressed image formats.");
 	ERR_FAIL_COND_V_MSG(width == 0 || height == 0, ERR_UNCONFIGURED, "Cannot generate mipmaps with width or height equal to 0.");
 
-	int gen_mipmap_count;
-
-	int64_t size = _get_dst_image_size(width, height, format, gen_mipmap_count);
-	data.resize(size);
-	uint8_t *wp = data.ptrw();
-
-	int prev_ofs = 0;
-	int prev_h = height;
-	int prev_w = width;
-
-	for (int i = 1; i <= gen_mipmap_count; i++) {
-		int64_t ofs;
-		int w, h;
-		_get_mipmap_offset_and_size(i, ofs, w, h);
-
-		_generate_mipmap_from_format(format, wp + prev_ofs, wp + ofs, prev_w, prev_h, p_renormalize);
-
-		prev_ofs = ofs;
-		prev_w = w;
-		prev_h = h;
+	ImageMipmapLayout::Layout layout;
+	const Error layout_error = ImageMipmapLayout::calculate(width, height, get_format_pixel_size(format), layout);
+	ERR_FAIL_COND_V(layout_error != OK, layout_error);
+	ERR_FAIL_COND_V(data.size() < layout.base_bytes, ERR_INVALID_DATA);
+	Vector<uint8_t> generated;
+	const Error allocation_error = generated.resize(layout.total_bytes);
+	ERR_FAIL_COND_V(allocation_error != OK, allocation_error);
+	uint8_t *wp = generated.ptrw();
+	memcpy(wp, data.ptr(), layout.base_bytes);
+	for (int i = 0; i < layout.count; i++) {
+		const ImageMipmapLayout::Level &level = layout.levels[i];
+		_generate_mipmap_from_format(format, wp + level.source_offset, wp + level.destination_offset,
+				level.source_width, level.source_height, p_renormalize);
 	}
-
+	data = std::move(generated);
 	mipmaps = true;
-
 	return OK;
 }
 
@@ -2397,8 +2441,11 @@ void Image::clear_mipmaps() {
 	int64_t ofs;
 	int w, h;
 	_get_mipmap_offset_and_size(1, ofs, w, h);
-	data.resize(ofs);
-
+	Vector<uint8_t> base;
+	const Error error = base.resize(ofs);
+	ERR_FAIL_COND(error != OK);
+	memcpy(base.ptrw(), data.ptr(), ofs);
+	data = std::move(base);
 	mipmaps = false;
 }
 
@@ -4089,6 +4136,7 @@ Ref<Image> Image::rgbe_to_srgb() {
 	ERR_FAIL_COND_V(format != FORMAT_RGBE9995, Ref<Image>());
 
 	Ref<Image> new_image = create_empty(width, height, false, Image::FORMAT_RGB8);
+	ERR_FAIL_COND_V(new_image.is_null() || new_image->is_empty(), Ref<Image>());
 
 	for (int row = 0; row < height; row++) {
 		for (int col = 0; col < width; col++) {
@@ -4097,7 +4145,7 @@ Ref<Image> Image::rgbe_to_srgb() {
 	}
 
 	if (has_mipmaps()) {
-		new_image->generate_mipmaps();
+		ERR_FAIL_COND_V(new_image->generate_mipmaps() != OK, Ref<Image>());
 	}
 
 	return new_image;
