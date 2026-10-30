@@ -86,7 +86,11 @@ int test_main(int argc, char *argv[]) {
 	OS::get_singleton()->set_cmdline("", args, List<String>());
 	DisplayServerMock::register_mock_driver();
 
+#ifdef THREADS_ENABLED
 	WorkerThreadPool::get_singleton()->init();
+#else
+	WorkerThreadPool::get_singleton()->init(0, 0);
+#endif
 
 	{
 		const String test_path = TestUtils::get_temp_path("");
