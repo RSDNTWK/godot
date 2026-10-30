@@ -197,6 +197,19 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 		uint16_t *iw16 = (uint16_t *)wd;
 		float *iw32 = (float *)wd;
 
+		const auto read_sample = [](const uint8_t *&r_channel, int p_pixel_type) {
+			float result;
+			if (p_pixel_type == TINYEXR_PIXELTYPE_UINT) {
+				uint32_t value;
+				memcpy(&value, r_channel, sizeof(value));
+				result = float(value);
+			} else {
+				memcpy(&result, r_channel, sizeof(result));
+			}
+			r_channel += sizeof(uint32_t);
+			return result;
+		};
+
 		// Assume `out_rgba` have enough memory allocated.
 		for (int tile_index = 0; tile_index < num_tiles; tile_index++) {
 			const EXRTile &tile = exr_tiles[tile_index];
@@ -204,37 +217,37 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 			int tw = tile.width;
 			int th = tile.height;
 
-			const float *r_channel_start = reinterpret_cast<const float *>(tile.images[idxR]);
-			const float *g_channel_start = nullptr;
-			const float *b_channel_start = nullptr;
-			const float *a_channel_start = nullptr;
+			const uint8_t *r_channel_start = reinterpret_cast<const uint8_t *>(tile.images[idxR]);
+			const uint8_t *g_channel_start = nullptr;
+			const uint8_t *b_channel_start = nullptr;
+			const uint8_t *a_channel_start = nullptr;
 
 			if (idxG != -1) {
-				g_channel_start = reinterpret_cast<const float *>(tile.images[idxG]);
+				g_channel_start = reinterpret_cast<const uint8_t *>(tile.images[idxG]);
 			}
 			if (idxB != -1) {
-				b_channel_start = reinterpret_cast<const float *>(tile.images[idxB]);
+				b_channel_start = reinterpret_cast<const uint8_t *>(tile.images[idxB]);
 			}
 			if (idxA != -1) {
-				a_channel_start = reinterpret_cast<const float *>(tile.images[idxA]);
+				a_channel_start = reinterpret_cast<const uint8_t *>(tile.images[idxA]);
 			}
 
 			uint16_t *first_row_w16 = iw16 + (int64_t(tile.offset_y) * tile_height * exr_image.width + int64_t(tile.offset_x) * tile_width) * output_channels;
 			float *first_row_w32 = iw32 + (int64_t(tile.offset_y) * tile_height * exr_image.width + int64_t(tile.offset_x) * tile_width) * output_channels;
 
 			for (int y = 0; y < th; y++) {
-				const float *r_channel = r_channel_start + y * tile_width;
-				const float *g_channel = nullptr;
-				const float *b_channel = nullptr;
-				const float *a_channel = nullptr;
+				const uint8_t *r_channel = r_channel_start + int64_t(y) * tile_width * sizeof(uint32_t);
+				const uint8_t *g_channel = nullptr;
+				const uint8_t *b_channel = nullptr;
+				const uint8_t *a_channel = nullptr;
 				if (g_channel_start) {
-					g_channel = g_channel_start + y * tile_width;
+					g_channel = g_channel_start + int64_t(y) * tile_width * sizeof(uint32_t);
 				}
 				if (b_channel_start) {
-					b_channel = b_channel_start + y * tile_width;
+					b_channel = b_channel_start + int64_t(y) * tile_width * sizeof(uint32_t);
 				}
 				if (a_channel_start) {
-					a_channel = a_channel_start + y * tile_width;
+					a_channel = a_channel_start + int64_t(y) * tile_width * sizeof(uint32_t);
 				}
 
 				if (use_float16) {
@@ -242,15 +255,15 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 
 					for (int x = 0; x < tw; x++) {
 						Color color;
-						color.r = *r_channel++;
+						color.r = read_sample(r_channel, exr_header.pixel_types[idxR]);
 						if (g_channel) {
-							color.g = *g_channel++;
+							color.g = read_sample(g_channel, exr_header.pixel_types[idxG]);
 						}
 						if (b_channel) {
-							color.b = *b_channel++;
+							color.b = read_sample(b_channel, exr_header.pixel_types[idxB]);
 						}
 						if (a_channel) {
-							color.a = *a_channel++;
+							color.a = read_sample(a_channel, exr_header.pixel_types[idxA]);
 						}
 
 						if (p_flags & FLAG_FORCE_LINEAR) {
@@ -273,15 +286,15 @@ Error ImageLoaderTinyEXR::load_image(Ref<Image> p_image, Ref<FileAccess> f, BitF
 
 					for (int x = 0; x < tw; x++) {
 						Color color;
-						color.r = *r_channel++;
+						color.r = read_sample(r_channel, exr_header.pixel_types[idxR]);
 						if (g_channel) {
-							color.g = *g_channel++;
+							color.g = read_sample(g_channel, exr_header.pixel_types[idxG]);
 						}
 						if (b_channel) {
-							color.b = *b_channel++;
+							color.b = read_sample(b_channel, exr_header.pixel_types[idxB]);
 						}
 						if (a_channel) {
-							color.a = *a_channel++;
+							color.a = read_sample(a_channel, exr_header.pixel_types[idxA]);
 						}
 
 						if (p_flags & FLAG_FORCE_LINEAR) {
