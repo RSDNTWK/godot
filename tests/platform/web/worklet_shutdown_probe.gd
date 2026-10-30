@@ -30,6 +30,11 @@ func _ready() -> void:
 	print("WORKLET_SHUTDOWN_RESULT " + JSON.stringify(report))
 	await get_tree().create_timer(0.25).timeout
 	player.stop()
+	# Playback retirement needs a mixer pass followed by main-thread cleanup.
+	# Keep the generator alive while the fading playback can still use it.
+	for cleanup_frame in range(8):
+		await get_tree().process_frame
+	await get_tree().create_timer(0.25).timeout
 	player.stream = null
 	playback = null
 	generator = null
