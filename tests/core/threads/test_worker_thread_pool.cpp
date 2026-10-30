@@ -174,4 +174,66 @@ TEST_CASE("[WorkerThreadPool] Run a yielding daemon as the only hope for other t
 	CHECK_MESSAGE(all_needed_yield, "All legit tasks should have needed the daemon yielding to run.");
 }
 
+static void reclamation_increment(void *p_counter, uint32_t) {
+	static_cast<SafeNumeric<int> *>(p_counter)->increment();
+}
+
+TEST_CASE("[N042][WorkerThreadPool] Awaiting groups releases zero and positive group IDs") {
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	for (int repeat = 0; repeat < 32; repeat++) {
+		for (int elements : { 0, 1, 9 }) {
+			for (int tasks : { 1, 3, 12 }) {
+				SafeNumeric<int> completed;
+				WorkerThreadPool::GroupID group = pool->add_native_group_task(reclamation_increment, &completed, elements, tasks);
+#ifndef THREADS_ENABLED
+				CHECK(pool->is_group_task_completed(group));
+#endif
+				pool->wait_for_group_task_completion(group);
+				CHECK(completed.get() == elements);
+				const bool previous = CoreGlobals::print_error_enabled;
+				CoreGlobals::print_error_enabled = false;
+				const bool still_registered = pool->is_group_task_completed(group);
+				pool->wait_for_group_task_completion(group); // Invalid second wait must remain safe.
+				CoreGlobals::print_error_enabled = previous;
+				CHECK_FALSE(still_registered);
+			}
+		}
+	}
+}
+
+#ifndef THREADS_ENABLED
+struct NestedReclamation {
+	WorkerThreadPool *pool = nullptr;
+	SafeNumeric<int> completed;
+};
+
+static void reclamation_nested(void *p_userdata, uint32_t p_index) {
+	NestedReclamation *context = static_cast<NestedReclamation *>(p_userdata);
+	if (p_index == 0) {
+		WorkerThreadPool::GroupID child = context->pool->add_native_group_task(reclamation_increment, &context->completed, 3, 5);
+		context->pool->wait_for_group_task_completion(child);
+	}
+	context->completed.increment();
+}
+
+TEST_CASE("[N042][WorkerThreadPool] No-thread custom pools reclaim nested synchronous groups") {
+	WorkerThreadPool pool(false);
+	pool.init(0);
+	for (int repeat = 0; repeat < 64; repeat++) {
+		NestedReclamation context;
+		context.pool = &pool;
+		WorkerThreadPool::GroupID group = pool.add_native_group_task(reclamation_nested, &context, 4, 6);
+		CHECK(pool.is_group_task_completed(group));
+		pool.wait_for_group_task_completion(group);
+		CHECK(context.completed.get() == 7);
+		const bool previous = CoreGlobals::print_error_enabled;
+		CoreGlobals::print_error_enabled = false;
+		const bool still_registered = pool.is_group_task_completed(group);
+		CoreGlobals::print_error_enabled = previous;
+		CHECK_FALSE(still_registered);
+	}
+	pool.finish();
+}
+#endif
+
 } // namespace TestWorkerThreadPool
