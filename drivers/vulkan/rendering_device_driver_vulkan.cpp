@@ -1971,6 +1971,10 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	uint32_t vma_flags_to_remove = 0;
 
 	VmaAllocationCreateInfo alloc_create_info = {};
+	if (p_usage.has_flag(BUFFER_USAGE_SHADER_BINDING_TABLE_BIT)) {
+		// SBT addresses have an API alignment beyond the buffer's memory requirements.
+		alloc_create_info.minAlignment = raytracing_capabilities.shader_group_base_alignment;
+	}
 	switch (p_allocation_type) {
 		case MEMORY_ALLOCATION_TYPE_CPU: {
 			bool is_src = p_usage.has_flag(BUFFER_USAGE_TRANSFER_FROM_BIT);
