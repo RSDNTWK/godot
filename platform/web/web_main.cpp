@@ -82,7 +82,10 @@ void main_loop_callback() {
 	uint64_t current_ticks = os->get_ticks_usec();
 #endif
 
-	bool force_draw = DisplayServerWeb::get_singleton()->check_size_force_redraw();
+	bool force_draw = false;
+	if (DisplayServer::get_singleton()->get_name() == "web") {
+		force_draw = DisplayServerWeb::get_singleton()->check_size_force_redraw();
+	}
 	if (force_draw) {
 		Main::force_redraw();
 #ifndef PROXY_TO_PTHREAD_ENABLED
