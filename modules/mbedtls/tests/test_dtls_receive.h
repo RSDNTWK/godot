@@ -52,4 +52,11 @@ TEST_CASE("[F01][DTLS] Initial server handshake and connected reads progress aft
 	server_handshake_and_connected_progression();
 }
 
+
+#ifdef B01_ALLOCATION_TESTS
+void setup_failure_does_not_accept();
+TEST_CASE("[R4][DTLS][Allocation] Failed provider setup never enters acceptance or transport IO") {
+	setup_failure_does_not_accept();
+}
+#endif
 } // namespace TestDTLSReceive

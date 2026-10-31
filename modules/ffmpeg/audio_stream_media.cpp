@@ -223,6 +223,9 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 				if (!format) {
 					return false;
 				}
+				if (FFmpegFileIO::configure_local_input(format) < 0) {
+					return false;
+				}
 				io_context->seekable = AVIO_SEEKABLE_NORMAL;
 				format->pb = io_context;
 				format->flags |= AVFMT_FLAG_CUSTOM_IO;
@@ -863,6 +866,10 @@ String AudioStreamMedia::get_file() const {
 }
 
 Ref<AudioStreamPlayback> AudioStreamMedia::instantiate_playback() {
+	// Raw ADTS reads through FileAccess before creating a decoder.
+	if (FFmpegFileIO::is_remote_path(file)) {
+		return Ref<AudioStreamPlayback>();
+	}
 	Ref<AudioStreamPlaybackFFmpeg> playback;
 	if (file.get_extension().to_lower() == "aac") {
 		Vector<uint8_t> data = FileAccess::get_file_as_bytes(file);
@@ -895,6 +902,10 @@ bool ffmpeg_probe_audio_buffer(const Vector<uint8_t> &p_data, FFmpegAudioMetadat
 	io.size = p_data.size();
 	AVFormatContext *format = avformat_alloc_context();
 	if (!format) {
+		return false;
+	}
+	if (FFmpegFileIO::configure_local_input(format) < 0) {
+		avformat_free_context(format);
 		return false;
 	}
 	uint8_t *io_buffer = static_cast<uint8_t *>(av_malloc(32768));
@@ -982,7 +993,7 @@ double AudioStreamMedia::get_length() const {
 		return length;
 	}
 	length = 0.0;
-	if (file.is_empty()) {
+	if (file.is_empty() || FFmpegFileIO::is_remote_path(file)) {
 		return length;
 	}
 	// Use container metadata without decoding or retaining the whole file.

@@ -30,6 +30,7 @@
 
 #include "file_access_encrypted.h"
 
+#include "core/io/marshalls.h"
 #include "core/variant/variant.h"
 
 CryptoCore::RandomGenerator *FileAccessEncrypted::_fae_static_rng = nullptr;
@@ -41,10 +42,12 @@ void FileAccessEncrypted::deinitialize() {
 	}
 }
 
-Error FileAccessEncrypted::open_and_parse(Ref<FileAccess> p_base, const Vector<uint8_t> &p_key, Mode p_mode, bool p_with_magic, const Vector<uint8_t> &p_iv) {
+Error FileAccessEncrypted::open_and_parse(Ref<FileAccess> p_base, const Vector<uint8_t> &p_key, Mode p_mode, bool p_with_magic, const Vector<uint8_t> &p_iv, bool p_owns_base) {
 	ERR_FAIL_COND_V(file.is_valid(), ERR_ALREADY_IN_USE);
 
 	pos = 0;
+	write_error = OK;
+	owns_base = p_owns_base;
 	eofed = false;
 	use_magic = p_with_magic;
 	length = 0;
@@ -61,6 +64,7 @@ Error FileAccessEncrypted::open_and_parse(Ref<FileAccess> p_base, const Vector<u
 		pos = 0;
 		eofed = false;
 		writing = false;
+		write_error = p_error;
 		return p_error;
 	};
 	if (p_base.is_null() || !p_base->is_open() || p_key.size() != 32 || p_mode < MODE_READ || p_mode >= MODE_MAX) {
@@ -164,7 +168,7 @@ Error FileAccessEncrypted::open_and_parse(Ref<FileAccess> p_base, const Vector<u
 	return OK;
 }
 
-Error FileAccessEncrypted::open_and_parse_password(Ref<FileAccess> p_base, const String &p_key, Mode p_mode) {
+Error FileAccessEncrypted::open_and_parse_password(Ref<FileAccess> p_base, const String &p_key, Mode p_mode, bool p_owns_base) {
 	ERR_FAIL_COND_V(file.is_valid(), ERR_ALREADY_IN_USE);
 	data.clear();
 	iv.clear();
@@ -183,7 +187,7 @@ Error FileAccessEncrypted::open_and_parse_password(Ref<FileAccess> p_base, const
 		key_md5.write[i] = cs[i];
 	}
 
-	return open_and_parse(p_base, key_md5, p_mode);
+	return open_and_parse(p_base, key_md5, p_mode, true, Vector<uint8_t>(), p_owns_base);
 }
 
 Error FileAccessEncrypted::open_internal(const String &p_path, int p_mode_flags) {
@@ -195,42 +199,75 @@ void FileAccessEncrypted::_close() {
 		return;
 	}
 
-	if (writing) {
-		LocalVector<uint8_t> compressed;
-		uint64_t len = data.size();
-		if (len % 16) {
-			len += 16 - (len % 16);
-		}
-
-		unsigned char hash[16];
-		ERR_FAIL_COND(CryptoCore::md5(data.ptr(), data.size(), hash) != OK); // Bug?
-
-		compressed.resize(len);
-		if (!data.is_empty()) {
-			memcpy(compressed.ptr(), data.ptr(), data.size());
-		}
-		if (len > uint64_t(data.size())) {
-			memset(compressed.ptr() + data.size(), 0, len - data.size());
-		}
-
-		CryptoCore::AESContext ctx;
-		ctx.set_encode_key(key.ptrw(), 256);
-
-		if (use_magic) {
-			file->store_32(ENCRYPTED_HEADER_MAGIC);
-		}
-
-		file->store_buffer(hash, 16);
-		file->store_64(data.size());
-		file->store_buffer(iv.ptr(), 16);
-
-		if (len > 0) {
-			ctx.encrypt_cfb(len, iv.ptrw(), compressed.ptr(), compressed.ptr());
-			file->store_buffer(compressed.ptr(), compressed.size());
-		}
-		data.clear();
+	if (writing && write_error == OK) {
+		// Complete all fallible preparation before publishing any header bytes.
+		write_error = [&]() -> Error {
+			const uint64_t len = uint64_t(data.size()) + (16 - data.size() % 16) % 16;
+			if (len > uint64_t(INT64_MAX) || len > SIZE_MAX) {
+				return ERR_OUT_OF_MEMORY;
+			}
+			Vector<uint8_t> encrypted;
+			Error error = encrypted.resize(len);
+			if (error != OK) {
+				return error;
+			}
+			uint8_t header[44];
+			uint8_t *cursor = header;
+			if (use_magic) {
+				encode_uint32(file->is_big_endian() ? BSWAP32(ENCRYPTED_HEADER_MAGIC) : ENCRYPTED_HEADER_MAGIC, cursor);
+				cursor += 4;
+			}
+			error = CryptoCore::md5(data.ptr(), data.size(), cursor);
+			if (error != OK) {
+				return error;
+			}
+			cursor += 16;
+			encode_uint64(file->is_big_endian() ? BSWAP64(uint64_t(data.size())) : uint64_t(data.size()), cursor);
+			cursor += 8;
+			memcpy(cursor, iv.ptr(), 16);
+			cursor += 16;
+			if (len > 0) {
+				memcpy(encrypted.ptrw(), data.ptr(), data.size());
+				memset(encrypted.ptrw() + data.size(), 0, len - data.size());
+				CryptoCore::AESContext context;
+				error = context.set_encode_key(key.ptr(), 256);
+				if (error != OK) {
+					return error;
+				}
+				uint8_t working_iv[16];
+				memcpy(working_iv, iv.ptr(), 16);
+				error = context.encrypt_cfb(len, working_iv, encrypted.ptrw(), encrypted.ptrw());
+				if (error != OK) {
+					return error;
+				}
+			}
+			auto store = [&](const uint8_t *p_bytes, uint64_t p_size) -> Error {
+				const bool stored = file->store_buffer(p_bytes, p_size);
+				const Error backing_error = file->get_error();
+				return backing_error != OK ? backing_error : (stored ? OK : ERR_FILE_CANT_WRITE);
+			};
+			error = store(header, cursor - header);
+			if (error != OK) {
+				return error;
+			}
+			if (len > 0) {
+				error = store(encrypted.ptr(), len);
+				if (error != OK) {
+					return error;
+				}
+			}
+			file->flush();
+			return file->get_error();
+		}();
 	}
-
+	if (owns_base) {
+		file->close();
+		if (write_error == OK && file->get_error() != ERR_FILE_EOF) {
+			write_error = file->get_error();
+		}
+	}
+	data.clear();
+	writing = false;
 	file.unref();
 }
 
@@ -280,7 +317,7 @@ bool FileAccessEncrypted::eof_reached() const {
 }
 
 uint64_t FileAccessEncrypted::get_buffer(uint8_t *p_dst, uint64_t p_length) const {
-	ERR_FAIL_COND_V_MSG(writing, -1, "File has not been opened in read mode.");
+	ERR_FAIL_COND_V_MSG(writing || file.is_null(), 0, "File has not been opened in read mode.");
 
 	if (!p_length) {
 		return 0;
@@ -303,20 +340,33 @@ uint64_t FileAccessEncrypted::get_buffer(uint8_t *p_dst, uint64_t p_length) cons
 }
 
 Error FileAccessEncrypted::get_error() const {
-	return eofed ? ERR_FILE_EOF : OK;
+	return write_error != OK ? write_error : (eofed ? ERR_FILE_EOF : OK);
 }
 
 bool FileAccessEncrypted::store_buffer(const uint8_t *p_src, uint64_t p_length) {
-	ERR_FAIL_COND_V_MSG(!writing, false, "File has not been opened in write mode.");
+	if (!writing || file.is_null()) {
+		if (write_error == OK) {
+			write_error = ERR_FILE_CANT_WRITE;
+		}
+		return false;
+	}
+	if (write_error != OK) {
+		return false;
+	}
 
 	if (!p_length) {
 		return true;
 	}
 
-	ERR_FAIL_NULL_V(p_src, false);
-
-	if (pos + p_length >= get_length()) {
-		ERR_FAIL_COND_V(data.resize(pos + p_length) != OK, false);
+	if (!p_src || p_length > uint64_t(INT64_MAX) - pos || p_length > SIZE_MAX - pos) {
+		write_error = ERR_INVALID_PARAMETER;
+		return false;
+	}
+	if (pos + p_length > get_length()) {
+		write_error = data.resize(pos + p_length);
+		if (write_error != OK) {
+			return false;
+		}
 	}
 
 	memcpy(data.ptrw() + pos, p_src, p_length);

@@ -18,8 +18,13 @@ tests_obj = []
 tests_env = env.Clone()
 if env["module_theora_enabled"]:
     tests_env.Prepend(CPPPATH=["#thirdparty/libtheora/", "#thirdparty/libvorbis/", "#thirdparty/libogg/"])
+    if env["builtin_libtheora"]:
+        tests_env.Append(CPPDEFINES=["THEORA_BUILTIN_TESTS_ENABLED"])
 if env["module_ffmpeg_enabled"]:
     tests_env.Prepend(CPPPATH=["#thirdparty/libogg/"])
+if env["module_ktx_enabled"]:
+    tests_env.Prepend(CPPPATH=["#thirdparty/libktx/include", "#thirdparty/libktx/lib"])
+    tests_env.Append(CPPDEFINES=[("KHRONOS_STATIC", 1)])
 asset_test_source = "platform/android/test_csv_android_asset.cpp"
 if env["scu_build"]:
     # HACK: SCU setup doesn't support recursive/dynamic setup, so we must manually pass the files.

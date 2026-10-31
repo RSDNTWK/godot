@@ -1211,13 +1211,13 @@ static unsigned oc_mb_activity(oc_enc_ctx *_enc,unsigned _mbi,
       s=src+frag_offs-1;
       for(i=0;i<8;i++){
         for(j=0;j<8;j++){
-          e1+=abs((s[j+2]-s[j]<<1)+(s-ystride)[j+2]-(s-ystride)[j]
+          e1+=abs((2*(s[j+2]-s[j]))+(s-ystride)[j+2]-(s-ystride)[j]
            +(s+ystride)[j+2]-(s+ystride)[j]);
-          e2+=abs(((s+ystride)[j+1]-(s-ystride)[j+1]<<1)
+          e2+=abs((2*((s+ystride)[j+1]-(s-ystride)[j+1]))
            +(s+ystride)[j]-(s-ystride)[j]+(s+ystride)[j+2]-(s-ystride)[j+2]);
-          e3+=abs(((s+ystride)[j+2]-(s-ystride)[j]<<1)
+          e3+=abs((2*((s+ystride)[j+2]-(s-ystride)[j]))
            +(s+ystride)[j+1]-s[j]+s[j+2]-(s-ystride)[j+1]);
-          e4+=abs(((s+ystride)[j]-(s-ystride)[j+2]<<1)
+          e4+=abs((2*((s+ystride)[j]-(s-ystride)[j+2]))
            +(s+ystride)[j+1]-s[j+2]+s[j]-(s-ystride)[j+1]);
         }
         s+=ystride;

@@ -187,7 +187,11 @@ Error TLSContextMbedTLS::init_server(int p_transport, Ref<TLSOptions> p_options,
 	}
 #endif
 
-	mbedtls_ssl_setup(&tls, &conf);
+	ret = mbedtls_ssl_setup(&tls, &conf);
+	if (ret != 0) {
+		clear();
+		ERR_FAIL_V_MSG(FAILED, "mbedtls_ssl_setup returned an error " + itos(ret));
+	}
 	return OK;
 }
 
@@ -203,15 +207,20 @@ Error TLSContextMbedTLS::init_client(int p_transport, const String &p_hostname, 
 	Error err = _setup(MBEDTLS_SSL_IS_CLIENT, p_transport, authmode);
 	ERR_FAIL_COND_V(err != OK, err);
 
+	int ret = 0;
 	if (unsafe) {
 		// No hostname verification for unsafe clients.
-		mbedtls_ssl_set_hostname(&tls, nullptr);
+		ret = mbedtls_ssl_set_hostname(&tls, nullptr);
 	} else {
 		String cn = p_options->get_common_name_override();
 		if (cn.is_empty()) {
 			cn = p_hostname;
 		}
-		mbedtls_ssl_set_hostname(&tls, cn.utf8().get_data());
+		ret = mbedtls_ssl_set_hostname(&tls, cn.utf8().get_data());
+	}
+	if (ret != 0) {
+		clear();
+		ERR_FAIL_V_MSG(FAILED, "mbedtls_ssl_set_hostname returned an error " + itos(ret));
 	}
 
 	Ref<X509CertificateMbedTLS> cas;
@@ -247,7 +256,11 @@ Error TLSContextMbedTLS::init_client(int p_transport, const String &p_hostname, 
 
 	// Set valid CAs
 	mbedtls_ssl_conf_ca_chain(&conf, &(cas->cert), nullptr);
-	mbedtls_ssl_setup(&tls, &conf);
+	ret = mbedtls_ssl_setup(&tls, &conf);
+	if (ret != 0) {
+		clear();
+		ERR_FAIL_V_MSG(FAILED, "mbedtls_ssl_setup returned an error " + itos(ret));
+	}
 	return OK;
 }
 

@@ -146,7 +146,10 @@ Error PacketPeerMbedDTLS::accept_peer(Ref<PacketPeerUDP> p_base, Ref<TLSOptions>
 	base = p_base;
 	base->set_blocking_mode(false);
 
-	mbedtls_ssl_session_reset(tls_ctx->get_context());
+	if (mbedtls_ssl_session_reset(tls_ctx->get_context()) != 0) {
+		_cleanup();
+		return FAILED;
+	}
 
 	int ret = _set_cookie();
 	if (ret != 0) {

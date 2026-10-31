@@ -1099,12 +1099,13 @@ Error ProjectSettings::_save_settings_binary(const String &p_file, const RBMap<S
 		ERR_FAIL_COND_V(err != OK, err);
 
 		Vector<uint8_t> buff;
-		buff.resize(len);
+		err = buff.resize(len);
+		ERR_FAIL_COND_V(err != OK, err);
 
-		err = encode_variant(p_custom_features, buff.ptrw(), len, false);
+		err = encode_variant(p_custom_features, buff.ptrw(), len, false, 0, buff.size());
 		ERR_FAIL_COND_V(err != OK, err);
 		file->store_32(uint32_t(len));
-		file->store_buffer(buff.ptr(), buff.size());
+		file->store_buffer(buff.ptr(), len);
 
 	} else {
 		// Store how many properties are saved.
@@ -1131,12 +1132,13 @@ Error ProjectSettings::_save_settings_binary(const String &p_file, const RBMap<S
 			ERR_FAIL_COND_V_MSG(err != OK, ERR_INVALID_DATA, "Error when trying to encode Variant.");
 
 			Vector<uint8_t> buff;
-			buff.resize(len);
+			err = buff.resize(len);
+			ERR_FAIL_COND_V(err != OK, err);
 
-			err = encode_variant(value, buff.ptrw(), len, true);
+			err = encode_variant(value, buff.ptrw(), len, true, 0, buff.size());
 			ERR_FAIL_COND_V_MSG(err != OK, ERR_INVALID_DATA, "Error when trying to encode Variant.");
 			file->store_32(uint32_t(len));
-			file->store_buffer(buff.ptr(), buff.size());
+			file->store_buffer(buff.ptr(), len);
 		}
 	}
 

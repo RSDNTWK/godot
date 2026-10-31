@@ -1149,10 +1149,13 @@ struct _VariantCall {
 		if (err != OK) {
 			return -1;
 		}
-		if (uint64_t(p_offset + len) > size) {
+		if (uint64_t(p_offset) > size || uint64_t(len) > size - p_offset) {
 			return -1; // did not fit
 		}
-		encode_variant(p_value, w + p_offset, len, p_allow_objects);
+		err = encode_variant(p_value, w + p_offset, len, p_allow_objects, 0, len);
+		if (err != OK) {
+			return -1;
+		}
 
 		return len;
 	}

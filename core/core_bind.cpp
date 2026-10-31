@@ -1317,10 +1317,10 @@ String Marshalls::variant_to_base64(const Variant &p_var, bool p_full_objects) {
 	ERR_FAIL_COND_V_MSG(err != OK, "", "Error when trying to encode Variant.");
 
 	Vector<uint8_t> buff;
-	buff.resize(len);
+	ERR_FAIL_COND_V(buff.resize(len) != OK, String());
 	uint8_t *w = buff.ptrw();
 
-	err = encode_variant(p_var, &w[0], len, p_full_objects);
+	err = encode_variant(p_var, &w[0], len, p_full_objects, 0, buff.size());
 	ERR_FAIL_COND_V_MSG(err != OK, "", "Error when trying to encode Variant.");
 
 	String ret = CryptoCore::b64_encode_str(&w[0], len);

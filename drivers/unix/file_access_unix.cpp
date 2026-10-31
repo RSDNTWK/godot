@@ -211,6 +211,9 @@ void FileAccessUnix::_close() {
 
 	if (!save_path.is_empty()) {
 		int rename_error = rename(path.utf8().get_data(), save_path.utf8().get_data());
+		if (rename_error && (last_error == OK || last_error == ERR_FILE_EOF)) {
+			last_error = ERR_FILE_CANT_WRITE;
+		}
 
 		if (rename_error && close_fail_notify) {
 			close_fail_notify(save_path);

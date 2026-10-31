@@ -51,6 +51,7 @@ public:
 
 	public:
 		char32_t saved = 0;
+		int parse_depth = 0;
 
 		char32_t get_char();
 		virtual bool is_utf8() const = 0;

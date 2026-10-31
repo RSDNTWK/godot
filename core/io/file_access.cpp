@@ -199,7 +199,7 @@ Ref<FileAccess> FileAccess::open_encrypted(const String &p_path, ModeFlags p_mod
 
 	Ref<FileAccessEncrypted> fae;
 	fae.instantiate();
-	Error err = fae->open_and_parse(fa, p_key, (p_mode_flags == WRITE) ? FileAccessEncrypted::MODE_WRITE_AES256 : FileAccessEncrypted::MODE_READ, true, p_iv);
+	Error err = fae->open_and_parse(fa, p_key, (p_mode_flags == WRITE) ? FileAccessEncrypted::MODE_WRITE_AES256 : FileAccessEncrypted::MODE_READ, true, p_iv, true);
 	last_file_open_error = err;
 	if (err) {
 		return Ref<FileAccess>();
@@ -215,7 +215,7 @@ Ref<FileAccess> FileAccess::open_encrypted_pass(const String &p_path, ModeFlags 
 
 	Ref<FileAccessEncrypted> fae;
 	fae.instantiate();
-	Error err = fae->open_and_parse_password(fa, p_pass, (p_mode_flags == WRITE) ? FileAccessEncrypted::MODE_WRITE_AES256 : FileAccessEncrypted::MODE_READ);
+	Error err = fae->open_and_parse_password(fa, p_pass, (p_mode_flags == WRITE) ? FileAccessEncrypted::MODE_WRITE_AES256 : FileAccessEncrypted::MODE_READ, true);
 	last_file_open_error = err;
 	if (err) {
 		return Ref<FileAccess>();
@@ -891,13 +891,13 @@ bool FileAccess::store_var(const Variant &p_var, bool p_full_objects) {
 	ERR_FAIL_COND_V_MSG(err != OK, false, "Error when trying to encode Variant.");
 
 	Vector<uint8_t> buff;
-	buff.resize(len);
+	ERR_FAIL_COND_V(buff.resize(len) != OK, false);
 
 	uint8_t *w = buff.ptrw();
-	err = encode_variant(p_var, &w[0], len, p_full_objects);
+	err = encode_variant(p_var, &w[0], len, p_full_objects, 0, buff.size());
 	ERR_FAIL_COND_V_MSG(err != OK, false, "Error when trying to encode Variant.");
 
-	return store_32(uint32_t(len)) && store_buffer(buff);
+	return store_32(uint32_t(len)) && store_buffer(buff.ptr(), len);
 }
 
 Vector<uint8_t> FileAccess::get_file_as_bytes(const String &p_path, Error *r_error) {

@@ -163,11 +163,13 @@ Error ConfigFile::save_encrypted(const String &p_path, const Vector<uint8_t> &p_
 
 	Ref<FileAccessEncrypted> fae;
 	fae.instantiate();
-	err = fae->open_and_parse(f, p_key, FileAccessEncrypted::MODE_WRITE_AES256);
+	err = fae->open_and_parse(f, p_key, FileAccessEncrypted::MODE_WRITE_AES256, true, Vector<uint8_t>(), true);
 	if (err) {
 		return err;
 	}
-	return _internal_save(fae);
+	err = _internal_save(fae);
+	fae->close();
+	return err != OK ? err : fae->get_error();
 }
 
 Error ConfigFile::save_encrypted_pass(const String &p_path, const String &p_pass) {
@@ -180,12 +182,14 @@ Error ConfigFile::save_encrypted_pass(const String &p_path, const String &p_pass
 
 	Ref<FileAccessEncrypted> fae;
 	fae.instantiate();
-	err = fae->open_and_parse_password(f, p_pass, FileAccessEncrypted::MODE_WRITE_AES256);
+	err = fae->open_and_parse_password(f, p_pass, FileAccessEncrypted::MODE_WRITE_AES256, true);
 	if (err) {
 		return err;
 	}
 
-	return _internal_save(fae);
+	err = _internal_save(fae);
+	fae->close();
+	return err != OK ? err : fae->get_error();
 }
 
 Error ConfigFile::_internal_save(Ref<FileAccess> file) {

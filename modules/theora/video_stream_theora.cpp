@@ -36,7 +36,7 @@
 #include "scene/resources/image_texture.h"
 
 #ifndef MODULE_FFMPEG_ENABLED
-#include <thirdparty/misc/yuv2rgb.h>
+#include "theora_frame_helpers.h"
 
 int VideoStreamPlaybackTheora::buffer_data() {
 	char *buffer = ogg_sync_buffer(&oy, 4096);
@@ -233,27 +233,17 @@ int64_t VideoStreamPlaybackTheora::seek_streams(double p_time, int64_t &cur_vide
 	return seek_pos;
 }
 
-void VideoStreamPlaybackTheora::video_write(th_ycbcr_buffer yuv) {
-	uint8_t *w = frame_data.ptrw();
-	char *dst = (char *)w;
-	uint32_t y_offset = region.position.y * yuv[0].stride + region.position.x;
-	uint32_t uv_offset = 0;
-
-	if (px_fmt == TH_PF_444) {
-		uv_offset += region.position.y * yuv[1].stride + region.position.x;
-		yuv444_2_rgb8888((uint8_t *)dst, (uint8_t *)yuv[0].data + y_offset, (uint8_t *)yuv[1].data + uv_offset, (uint8_t *)yuv[2].data + uv_offset, region.size.x, region.size.y, yuv[0].stride, yuv[1].stride, region.size.x << 2);
-	} else if (px_fmt == TH_PF_422) {
-		uv_offset += region.position.y * yuv[1].stride + region.position.x / 2;
-		yuv422_2_rgb8888((uint8_t *)dst, (uint8_t *)yuv[0].data + y_offset, (uint8_t *)yuv[1].data + uv_offset, (uint8_t *)yuv[2].data + uv_offset, region.size.x, region.size.y, yuv[0].stride, yuv[1].stride, region.size.x << 2);
-	} else if (px_fmt == TH_PF_420) {
-		uv_offset += region.position.y * yuv[1].stride / 2 + region.position.x / 2;
-		yuv420_2_rgb8888((uint8_t *)dst, (uint8_t *)yuv[0].data + y_offset, (uint8_t *)yuv[1].data + uv_offset, (uint8_t *)yuv[2].data + uv_offset, region.size.x, region.size.y, yuv[0].stride, yuv[1].stride, region.size.x << 2);
+bool VideoStreamPlaybackTheora::video_write(th_ycbcr_buffer yuv) {
+	Vector<uint8_t> frame_data;
+	if (TheoraFrame::convert(yuv, region, px_fmt, frame_data) != OK) {
+		return false;
 	}
-
-	Ref<Image> img;
-	img.instantiate(region.size.x, region.size.y, false, Image::FORMAT_RGBA8, frame_data); //zero copy image creation
-
-	texture->update(img); // Zero-copy send to rendering server.
+	Ref<Image> image = Image::create_from_data(region.size.x, region.size.y, false, Image::FORMAT_RGBA8, frame_data);
+	if (image.is_null() || image->is_empty()) {
+		return false;
+	}
+	texture->update(image);
+	return true;
 }
 
 void VideoStreamPlaybackTheora::clear() {
@@ -279,6 +269,8 @@ void VideoStreamPlaybackTheora::clear() {
 	}
 
 	audio_buffer = nullptr;
+	audio_buffer_size = 0;
+	td = nullptr;
 	playing = false;
 	has_video = false;
 	has_audio = false;
@@ -434,23 +426,19 @@ void VideoStreamPlaybackTheora::set_file(const String &p_file) {
 		ERR_FAIL_MSG("File '" + p_file + "' has no video stream.");
 	}
 
-	/* And now we have it all. Initialize decoders. */
-	td = th_decode_alloc(&ti, ts);
-	th_setup_free(ts);
-	px_fmt = ti.pixel_fmt;
-	switch (ti.pixel_fmt) {
-		case TH_PF_420:
-		case TH_PF_422:
-		case TH_PF_444:
-			break;
-		default:
-			WARN_PRINT(" video\n  (UNKNOWN Chroma sampling!)\n");
-			break;
-	}
-	th_decode_ctl(td, TH_DECCTL_GET_PPLEVEL_MAX, &pp_level_max, sizeof(pp_level_max));
-	pp_level = 0;
-	th_decode_ctl(td, TH_DECCTL_SET_PPLEVEL, &pp_level, sizeof(pp_level));
-	pp_inc = 0;
+	// Audio headers exist here, but the Vorbis DSP/block are not initialized yet.
+	auto fail_setup = [&](const char *p_message) {
+		th_setup_free(ts);
+		ts = nullptr;
+		if (has_audio) {
+			vorbis_comment_clear(&vc);
+			vorbis_info_clear(&vi);
+			ogg_stream_clear(&vo);
+			has_audio = false;
+		}
+		clear();
+		ERR_PRINT(p_message);
+	};
 
 	size.x = ti.frame_width;
 	size.y = ti.frame_height;
@@ -458,16 +446,52 @@ void VideoStreamPlaybackTheora::set_file(const String &p_file) {
 	region.position.y = ti.pic_y;
 	region.size.x = ti.pic_width;
 	region.size.y = ti.pic_height;
+	Vector<uint8_t> initial_frame;
+	if (TheoraFrame::prepare_rgba(region.size, initial_frame) != OK) {
+		fail_setup("Cannot allocate a valid Theora image.");
+		return;
+	}
+	px_fmt = ti.pixel_fmt;
+	switch (px_fmt) {
+		case TH_PF_420:
+		case TH_PF_422:
+		case TH_PF_444:
+			break;
+		default:
+			fail_setup("Unsupported Theora chroma sampling.");
+			return;
+	}
 
-	Ref<Image> img = Image::create_empty(region.size.x, region.size.y, false, Image::FORMAT_RGBA8);
+	td = th_decode_alloc(&ti, ts);
+	th_setup_free(ts);
+	ts = nullptr;
+	if (td == nullptr) {
+		fail_setup("Cannot initialize the Theora decoder.");
+		return;
+	}
+	th_decode_ctl(td, TH_DECCTL_GET_PPLEVEL_MAX, &pp_level_max, sizeof(pp_level_max));
+	pp_level = 0;
+	th_decode_ctl(td, TH_DECCTL_SET_PPLEVEL, &pp_level, sizeof(pp_level));
+	pp_inc = 0;
+
+	Ref<Image> img = Image::create_from_data(region.size.x, region.size.y, false, Image::FORMAT_RGBA8, initial_frame);
+	if (img.is_null() || img->is_empty()) {
+		fail_setup("Cannot initialize the Theora image.");
+		return;
+	}
 	texture->set_image(img);
-	frame_data.resize(region.size.x * region.size.y * 4);
-
 	frame_duration = (double)ti.fps_denominator / ti.fps_numerator;
 
 	if (has_audio) {
-		vorbis_synthesis_init(&vd, &vi);
-		vorbis_block_init(&vd, &vb);
+		if (vorbis_synthesis_init(&vd, &vi) != 0) {
+			fail_setup("Cannot initialize Theora audio.");
+			return;
+		}
+		if (vorbis_block_init(&vd, &vb) != 0) {
+			vorbis_dsp_clear(&vd);
+			fail_setup("Cannot initialize the Theora audio block.");
+			return;
+		}
 		audio_buffer_size = MIN(vi.channels, 8) * 1024;
 		audio_buffer = memnew_arr(float, audio_buffer_size);
 	}
@@ -614,8 +638,10 @@ void VideoStreamPlaybackTheora::update(double p_delta) {
 	if (video_ready && comp_time >= current_frame_time) {
 		if (!dup_frame) {
 			th_ycbcr_buffer yuv;
-			th_decode_ycbcr_out(td, yuv);
-			video_write(yuv);
+			if (th_decode_ycbcr_out(td, yuv) != 0 || !video_write(yuv)) {
+				clear();
+				ERR_FAIL_MSG("Cannot convert the decoded Theora frame.");
+			}
 		}
 		dup_frame = false;
 		video_ready = false;
@@ -768,8 +794,10 @@ void VideoStreamPlaybackTheora::seek(double p_time) {
 		if (is_playing()) {
 			// Draw the current frame.
 			th_ycbcr_buffer yuv;
-			th_decode_ycbcr_out(td, yuv);
-			video_write(yuv);
+			if (th_decode_ycbcr_out(td, yuv) != 0 || !video_write(yuv)) {
+				clear();
+				ERR_FAIL_MSG("Cannot convert the decoded Theora frame.");
+			}
 			current_frame_time = last_video_time;
 		} else {
 			next_frame_time = current_frame_time;

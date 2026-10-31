@@ -37,6 +37,7 @@
 
 #include <zstd.h>
 
+#include <climits>
 #include <cstring>
 
 #ifdef BROTLI_ENABLED
@@ -300,66 +301,89 @@ int64_t Compression::decompress(uint8_t *p_dst, int64_t p_dst_max_size, const ui
 	This is much slower however than using Compression::decompress because it may result in multiple full copies of the output buffer.
 */
 int Compression::decompress_dynamic(Vector<uint8_t> *p_dst_vect, int64_t p_max_dst_size, const uint8_t *p_src, int64_t p_src_size, Mode p_mode) {
-	uint8_t *dst = nullptr;
-	int out_mark = 0;
-
-	ERR_FAIL_COND_V(p_src_size <= 0, Z_DATA_ERROR);
+	ERR_FAIL_NULL_V(p_dst_vect, Z_STREAM_ERROR);
+	p_dst_vect->clear();
+	ERR_FAIL_COND_V(!p_src || p_src_size <= 0 || uint64_t(p_src_size) > SIZE_MAX, Z_DATA_ERROR);
+	ERR_FAIL_COND_V(gzip_chunk <= 0 || p_max_dst_size < -1, Z_STREAM_ERROR);
+	const int64_t limit = p_max_dst_size < 0 ? INT64_MAX : p_max_dst_size;
+	int64_t produced = 0;
+	uint8_t overflow_byte = 0;
+	auto fail = [&](int p_error) {
+		p_dst_vect->clear();
+		return p_error;
+	};
+	auto finish = [&]() {
+		if (produced == p_dst_vect->size()) {
+			return Z_OK;
+		}
+		// CowData's exclusive shrink treats a failed realloc as fatal. Use a
+		// checked allocation so this API can still report finalization failure.
+		Vector<uint8_t> compact;
+		if (compact.resize(produced) != OK) {
+			return fail(Z_MEM_ERROR);
+		}
+		if (produced) {
+			memcpy(compact.ptrw(), p_dst_vect->ptr(), produced);
+		}
+		*p_dst_vect = std::move(compact);
+		return Z_OK;
+	};
+	auto output_buffer = [&](uint8_t *&r_pointer, size_t &r_available) {
+		if (produced == limit) {
+			// A stream may still need to consume its trailer at the exact limit.
+			r_pointer = &overflow_byte;
+			r_available = 1;
+			return OK;
+		}
+		if (produced == p_dst_vect->size()) {
+			const int64_t amount = MIN(int64_t(gzip_chunk), limit - produced);
+			const Error allocation = p_dst_vect->resize(produced + amount);
+			if (allocation != OK) {
+				return allocation;
+			}
+		}
+		r_pointer = p_dst_vect->ptrw() + produced;
+		r_available = size_t(p_dst_vect->size() - produced);
+		return OK;
+	};
 
 	if (p_mode == MODE_BROTLI) {
 #ifdef BROTLI_ENABLED
-		BrotliDecoderResult ret;
 		BrotliDecoderState *state = BrotliDecoderCreateInstance(nullptr, nullptr, nullptr);
-		ERR_FAIL_NULL_V(state, Z_DATA_ERROR);
-
-		// Setup the stream inputs.
+		ERR_FAIL_NULL_V(state, Z_MEM_ERROR);
+		struct DecoderCleanup {
+			BrotliDecoderState *state;
+			~DecoderCleanup() { BrotliDecoderDestroyInstance(state); }
+		} cleanup{ state };
 		const uint8_t *next_in = p_src;
 		size_t avail_in = p_src_size;
-		uint8_t *next_out = nullptr;
-		size_t avail_out = 0;
 		size_t total_out = 0;
-
-		// Ensure the destination buffer is empty.
-		p_dst_vect->clear();
-
-		// Decompress until stream ends or end of file.
-		do {
-			// Add another chunk size to the output buffer.
-			// This forces a copy of the whole buffer.
-			p_dst_vect->resize(p_dst_vect->size() + gzip_chunk);
-			// Get pointer to the actual output buffer.
-			dst = p_dst_vect->ptrw();
-
-			// Set the stream to the new output stream.
-			// Since it was copied, we need to reset the stream to the new buffer.
-			next_out = &(dst[out_mark]);
-			avail_out += gzip_chunk;
-
-			ret = BrotliDecoderDecompressStream(state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+		while (true) {
+			uint8_t *next_out = nullptr;
+			size_t avail_out = 0;
+			if (output_buffer(next_out, avail_out) != OK) {
+				return fail(Z_MEM_ERROR);
+			}
+			const size_t before_in = avail_in;
+			const size_t before_out = avail_out;
+			const bool probing = produced == limit;
+			const BrotliDecoderResult ret = BrotliDecoderDecompressStream(state, &avail_in, &next_in, &avail_out, &next_out, &total_out);
+			const size_t amount = before_out - avail_out;
+			if (probing && amount != 0) {
+				return fail(Z_BUF_ERROR);
+			}
+			produced += amount;
 			if (ret == BROTLI_DECODER_RESULT_ERROR) {
 				WARN_PRINT(BrotliDecoderErrorString(BrotliDecoderGetErrorCode(state)));
-				BrotliDecoderDestroyInstance(state);
-				p_dst_vect->clear();
-				return Z_DATA_ERROR;
+				return fail(Z_DATA_ERROR);
 			}
-
-			out_mark += gzip_chunk - avail_out;
-
-			// Enforce max output size.
-			if (p_max_dst_size > -1 && total_out > (uint64_t)p_max_dst_size) {
-				BrotliDecoderDestroyInstance(state);
-				p_dst_vect->clear();
-				return Z_BUF_ERROR;
+			if (ret == BROTLI_DECODER_RESULT_SUCCESS) {
+				return finish();
 			}
-		} while (ret != BROTLI_DECODER_RESULT_SUCCESS);
-
-		// If all done successfully, resize the output if it's larger than the actual output.
-		if ((unsigned long)p_dst_vect->size() > total_out) {
-			p_dst_vect->resize(total_out);
+			if ((ret == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT && avail_in == 0) || (before_in == avail_in && amount == 0)) {
+				return fail(Z_DATA_ERROR);
+			}
 		}
-
-		// Clean up and return.
-		BrotliDecoderDestroyInstance(state);
-		return Z_OK;
 #else
 		ERR_FAIL_V_MSG(Z_ERRNO, "Godot was compiled without brotli support.");
 #endif
@@ -367,78 +391,44 @@ int Compression::decompress_dynamic(Vector<uint8_t> *p_dst_vect, int64_t p_max_d
 		// This function only supports GZip and Deflate.
 		ERR_FAIL_COND_V_MSG(p_mode != MODE_DEFLATE && p_mode != MODE_GZIP, Z_ERRNO, "Dynamic decompression is only supported with gzip, DEFLATE, and Brotli compression methods.");
 
-		int ret;
-		z_stream strm;
+		z_stream strm{};
 		int window_bits = p_mode == MODE_DEFLATE ? 15 : 15 + 16;
-
-		// Initialize the stream.
-		strm.zalloc = Z_NULL;
-		strm.zfree = Z_NULL;
-		strm.opaque = Z_NULL;
-		strm.avail_in = 0;
-		strm.next_in = Z_NULL;
-
-		int err = inflateInit2(&strm, window_bits);
-		ERR_FAIL_COND_V(err != Z_OK, -1);
-
-		// Setup the stream inputs.
-		strm.next_in = (Bytef *)p_src;
-		strm.avail_in = p_src_size;
-
-		// Ensure the destination buffer is empty.
-		p_dst_vect->clear();
-
-		// Decompress until deflate stream ends or end of file.
-		do {
-			// Add another chunk size to the output buffer.
-			// This forces a copy of the whole buffer.
-			p_dst_vect->resize(p_dst_vect->size() + gzip_chunk);
-			// Get pointer to the actual output buffer.
-			dst = p_dst_vect->ptrw();
-
-			// Set the stream to the new output stream.
-			// Since it was copied, we need to reset the stream to the new buffer.
-			strm.next_out = &(dst[out_mark]);
-			strm.avail_out = gzip_chunk;
-
-			// Run inflate() on input until output buffer is full and needs to be resized or input runs out.
-			do {
-				ret = inflate(&strm, Z_SYNC_FLUSH);
-
-				switch (ret) {
-					case Z_NEED_DICT:
-						ret = Z_DATA_ERROR;
-						[[fallthrough]];
-					case Z_DATA_ERROR:
-					case Z_MEM_ERROR:
-					case Z_STREAM_ERROR:
-					case Z_BUF_ERROR:
-						if (strm.msg) {
-							WARN_PRINT(strm.msg);
-						}
-						(void)inflateEnd(&strm);
-						p_dst_vect->clear();
-						return ret;
-				}
-			} while (strm.avail_out > 0 && strm.avail_in > 0);
-
-			out_mark += gzip_chunk;
-
-			// Enforce max output size.
-			if (p_max_dst_size > -1 && strm.total_out > (uint64_t)p_max_dst_size) {
-				(void)inflateEnd(&strm);
-				p_dst_vect->clear();
-				return Z_BUF_ERROR;
+		const int initialized = inflateInit2(&strm, window_bits);
+		ERR_FAIL_COND_V(initialized != Z_OK, initialized);
+		struct InflateCleanup {
+			z_stream *stream;
+			~InflateCleanup() { inflateEnd(stream); }
+		} cleanup{ &strm };
+		int64_t supplied = 0;
+		while (true) {
+			if (strm.avail_in == 0 && supplied < p_src_size) {
+				const uInt amount = uInt(MIN(uint64_t(p_src_size - supplied), uint64_t(UINT_MAX)));
+				strm.next_in = const_cast<Bytef *>(p_src + supplied);
+				strm.avail_in = amount;
+				supplied += amount;
 			}
-		} while (ret != Z_STREAM_END);
-
-		// If all done successfully, resize the output if it's larger than the actual output.
-		if ((unsigned long)p_dst_vect->size() > strm.total_out) {
-			p_dst_vect->resize(strm.total_out);
+			uint8_t *next_out = nullptr;
+			size_t available = 0;
+			if (output_buffer(next_out, available) != OK) {
+				return fail(Z_MEM_ERROR);
+			}
+			strm.next_out = next_out;
+			strm.avail_out = uInt(available);
+			const uInt before_in = strm.avail_in;
+			const uInt before_out = strm.avail_out;
+			const bool probing = produced == limit;
+			const int ret = inflate(&strm, Z_SYNC_FLUSH);
+			const uInt amount = before_out - strm.avail_out;
+			if (probing && amount != 0) {
+				return fail(Z_BUF_ERROR);
+			}
+			produced += amount;
+			if (ret == Z_STREAM_END) {
+				return finish();
+			}
+			if (ret != Z_OK || (before_in == strm.avail_in && amount == 0)) {
+				return fail(ret == Z_NEED_DICT || ret == Z_BUF_ERROR || ret == Z_OK ? Z_DATA_ERROR : ret);
+			}
 		}
-
-		// Clean up and return.
-		(void)inflateEnd(&strm);
-		return Z_OK;
 	}
 }

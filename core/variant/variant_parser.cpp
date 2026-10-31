@@ -591,7 +591,10 @@ Error VariantParser::_parse_construct(Stream *p_stream, Vector<T> &r_construct, 
 			}
 		}
 
-		r_construct.push_back(token.value);
+		if (r_construct.push_back(token.value)) {
+			r_err_str = "Could not allocate packed array.";
+			return ERR_OUT_OF_MEMORY;
+		}
 		first = false;
 	}
 
@@ -614,14 +617,31 @@ Error VariantParser::_parse_byte_array(Stream *p_stream, Vector<uint8_t> &r_cons
 		CharString cstr = base64_encoded_string.ascii();
 
 		size_t arr_len = 0;
-		r_construct.resize(strlen / 4 * 3 + 1);
+		{
+			const Error allocation = r_construct.resize(strlen / 4 * 3 + 1);
+			if (allocation != OK) {
+				r_err_str = "Could not allocate packed array.";
+				return allocation;
+			}
+		}
 		uint8_t *w = r_construct.ptrw();
 		Error err = CryptoCore::b64_decode(&w[0], r_construct.size(), &arr_len, (unsigned char *)cstr.get_data(), strlen);
 		if (err) {
 			r_err_str = "Invalid base64-encoded string";
 			return ERR_PARSE_ERROR;
 		}
-		r_construct.resize(arr_len);
+		{
+			Vector<uint8_t> decoded;
+			const Error allocation = decoded.resize(arr_len);
+			if (allocation != OK) {
+				r_err_str = "Could not allocate packed array.";
+				return allocation;
+			}
+			if (arr_len) {
+				memcpy(decoded.ptrw(), r_construct.ptr(), arr_len);
+			}
+			r_construct = std::move(decoded);
+		}
 
 		get_token(p_stream, token, line, r_err_str);
 		if (token.type != TK_PARENTHESIS_CLOSE) {
@@ -648,7 +668,10 @@ Error VariantParser::_parse_byte_array(Stream *p_stream, Vector<uint8_t> &r_cons
 				}
 			}
 
-			r_construct.push_back(token.value);
+			if (r_construct.push_back(token.value)) {
+				r_err_str = "Could not allocate packed array.";
+				return ERR_OUT_OF_MEMORY;
+			}
 
 			get_token(p_stream, token, line, r_err_str);
 
@@ -675,6 +698,16 @@ Error VariantParser::_parse_byte_array(Stream *p_stream, Vector<uint8_t> &r_cons
 }
 
 Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream, int &line, String &r_err_str, ResourceParser *p_res_parser) {
+	if (p_stream->parse_depth >= Variant::MAX_RECURSION_DEPTH) {
+		r_err_str = "Variant nesting is too deep.";
+		return ERR_PARSE_ERROR;
+	}
+	struct DepthScope {
+		int &depth;
+		DepthScope(int &p_depth) : depth(p_depth) { depth++; }
+		~DepthScope() { depth--; }
+	} depth_scope(p_stream->parse_depth);
+
 	if (token.type == TK_CURLY_BRACKET_OPEN) {
 		Dictionary d;
 		Error err = _parse_dictionary(d, p_stream, line, r_err_str, p_res_parser);
@@ -1418,7 +1451,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<uint8_t> arr;
 			{
 				int len = args.size();
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				uint8_t *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = args[i];
@@ -1436,7 +1475,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<int32_t> arr;
 			{
 				int32_t len = args.size();
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				int32_t *w = arr.ptrw();
 				for (int32_t i = 0; i < len; i++) {
 					w[i] = int32_t(args[i]);
@@ -1454,7 +1499,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<int64_t> arr;
 			{
 				int64_t len = args.size();
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				int64_t *w = arr.ptrw();
 				for (int64_t i = 0; i < len; i++) {
 					w[i] = int64_t(args[i]);
@@ -1472,7 +1523,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<float> arr;
 			{
 				int len = args.size();
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				float *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = args[i];
@@ -1490,7 +1547,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<double> arr;
 			{
 				int len = args.size();
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				double *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = args[i];
@@ -1530,13 +1593,22 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 				}
 
 				first = false;
-				cs.push_back(token.value);
+				if (cs.push_back(token.value)) {
+					r_err_str = "Could not allocate packed array.";
+					return ERR_OUT_OF_MEMORY;
+				}
 			}
 
 			Vector<String> arr;
 			{
 				int len = cs.size();
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				String *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = cs[i];
@@ -1554,7 +1626,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<Vector2> arr;
 			{
 				int len = args.size() / 2;
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				Vector2 *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = Vector2(args[i * 2 + 0], args[i * 2 + 1]);
@@ -1572,7 +1650,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<Vector3> arr;
 			{
 				int len = args.size() / 3;
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				Vector3 *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = Vector3(args[i * 3 + 0], args[i * 3 + 1], args[i * 3 + 2]);
@@ -1590,7 +1674,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<Vector4> arr;
 			{
 				int len = args.size() / 4;
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				Vector4 *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = Vector4(args[i * 4 + 0], args[i * 4 + 1], args[i * 4 + 2], args[i * 4 + 3]);
@@ -1608,7 +1698,13 @@ Error VariantParser::parse_value(Token &token, Variant &value, Stream *p_stream,
 			Vector<Color> arr;
 			{
 				int len = args.size() / 4;
-				arr.resize(len);
+				{
+					const Error allocation = arr.resize(len);
+					if (allocation != OK) {
+						r_err_str = "Could not allocate packed array.";
+						return allocation;
+					}
+				}
 				Color *w = arr.ptrw();
 				for (int i = 0; i < len; i++) {
 					w[i] = Color(args[i * 4 + 0], args[i * 4 + 1], args[i * 4 + 2], args[i * 4 + 3]);

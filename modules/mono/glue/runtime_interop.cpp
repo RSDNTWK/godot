@@ -1520,8 +1520,18 @@ void godotsharp_var_to_bytes(const godot_variant *p_var, bool p_full_objects, go
 	Error err = encode_variant(var, nullptr, len, p_full_objects);
 	ERR_FAIL_COND_MSG(err != OK, "Unexpected error encoding variable to bytes, likely unserializable type found (Object or RID).");
 
-	bytes.resize(len);
-	encode_variant(var, bytes.ptrw(), len, p_full_objects);
+	ERR_FAIL_COND(bytes.resize(len) != OK);
+	err = encode_variant(var, bytes.ptrw(), len, p_full_objects, 0, bytes.size());
+	if (err != OK) {
+		bytes.clear();
+		return;
+	}
+	if (bytes.size() != len) {
+		PackedByteArray compact;
+		if (compact.resize(len) != OK) { bytes.clear(); return; }
+		if (len) { memcpy(compact.ptrw(), bytes.ptr(), len); }
+		bytes = std::move(compact);
+	}
 }
 
 void godotsharp_bytes_to_var(const godot_packed_array *p_bytes, bool p_allow_objects, godot_variant *r_ret) {

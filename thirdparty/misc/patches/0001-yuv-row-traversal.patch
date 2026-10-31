@@ -1,0 +1,307 @@
+--- a/yuv2rgb.h
++++ b/yuv2rgb.h
+@@ -31,6 +31,7 @@
+  * 3. Output has been reordered to struct { uint8_t r, g, b, a; } precisely in accordance with the function names
+  * 4. Removing unused 'dither' parameter
+  * 5. Fix last line not being converted (and therefore was transparent)
++ * 6. Traverse rows and columns independently, including odd 4:2:0 columns
+  */
+ 
+ #ifndef YUV2RGB_H
+@@ -839,258 +840,53 @@
+ 
+ /* -- End Common -- */
+ 
+-static void yuv422_2_rgb8888(uint8_t  *dst_ptr,
+-		const uint8_t  *y_ptr,
+-		const uint8_t  *u_ptr,
+-		const uint8_t  *v_ptr,
+-		      int32_t   width,
+-		      int32_t   height,
+-		      int32_t   y_span,
+-		      int32_t   uv_span,
+-		      int32_t   dst_span)
++/* Keep row and column counters separate: dimensions are not 16-bit fields. */
++static void yuv_to_rgb8888(uint8_t *dst_ptr,
++                          const uint8_t *y_ptr, const uint8_t *u_ptr, const uint8_t *v_ptr,
++                          int32_t width, int32_t height, int32_t y_span,
++                          int32_t uv_span, int32_t dst_span,
++                          int chroma_shift_x, int chroma_shift_y)
+ {
+-    while (height > 0)
++    for (int32_t row = 0; row < height; ++row)
+     {
+-	height -= width<<16;
+-	height += 1<<16;
+-	while (height < 0)
+-	{
+-	    /* Do top row pair */
+-	    uint32_t uv, y0, y1;
+-
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y0  = uv + READY(*y_ptr++);
+-	    y1  = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    FIXUP(y1);
+-	    STORE(y0, dst_ptr);
+-	    STORE(y1, dst_ptr);
+-	    height += (2<<16);
+-	}
+-	if ((height>>16) == 0)
+-	{
+-	    /* Trailing top row pix */
+-	    uint32_t uv, y0;
+-
+-	    uv = READUV(*u_ptr,*v_ptr);
+-	    y0 = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr);
+-	}
+-	dst_ptr += dst_span-width*4;
+-	y_ptr   += y_span-width;
+-	u_ptr   += uv_span-(width>>1);
+-	v_ptr   += uv_span-(width>>1);
+-	height = (height<<16)>>16;
+-	height -= 1;
+-	if (height == 0)
+-	    break;
+-	height -= width<<16;
+-	height += 1<<16;
+-	while (height < 0)
+-	{
+-	    /* Do second row pair */
+-	    uint32_t uv, y0, y1;
+-
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y0  = uv + READY(*y_ptr++);
+-	    y1  = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    FIXUP(y1);
+-	    STORE(y0, dst_ptr);
+-	    STORE(y1, dst_ptr);
+-	    height += (2<<16);
+-	}
+-	if ((height>>16) == 0)
+-	{
+-	    /* Trailing bottom row pix */
+-	    uint32_t uv, y0;
+-
+-	    uv = READUV(*u_ptr,*v_ptr);
+-	    y0 = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr);
+-	}
+-	dst_ptr += dst_span-width*4;
+-	y_ptr   += y_span-width;
+-	u_ptr   += uv_span-(width>>1);
+-	v_ptr   += uv_span-(width>>1);
+-	height = (height<<16)>>16;
+-	height -= 1;
++        const uint8_t *y_row = y_ptr + int64_t(row) * y_span;
++        const uint8_t *u_row = u_ptr + int64_t(row >> chroma_shift_y) * uv_span;
++        const uint8_t *v_row = v_ptr + int64_t(row >> chroma_shift_y) * uv_span;
++        uint8_t *dst_row = dst_ptr + int64_t(row) * dst_span;
++        for (int32_t column = 0; column < width; ++column)
++        {
++            uint32_t pixel = READUV(u_row[column >> chroma_shift_x], v_row[column >> chroma_shift_x]) + READY(y_row[column]);
++            FIXUP(pixel);
++            STORE(pixel, dst_row);
++        }
+     }
+ }
+ 
+-static void yuv420_2_rgb8888(uint8_t  *dst_ptr,
+-		const uint8_t  *y_ptr,
+-		const uint8_t  *u_ptr,
+-		const uint8_t  *v_ptr,
+-		      int32_t   width,
+-		      int32_t   height,
+-		      int32_t   y_span,
+-		      int32_t   uv_span,
+-		      int32_t   dst_span)
++static void yuv422_2_rgb8888(uint8_t *dst_ptr,
++                           const uint8_t *y_ptr, const uint8_t *u_ptr, const uint8_t *v_ptr,
++                           int32_t width, int32_t height, int32_t y_span,
++                           int32_t uv_span, int32_t dst_span)
+ {
+-    /* The 'dst_ptr as uint32_t' thing is not endianness-aware, so that's been removed. */
+-    height -= 1;
+-    while (height > 0)
+-    {
+-	height -= width<<16;
+-	height += 1<<16;
+-	while (height < 0)
+-	{
+-	    /* Do 2 column pairs */
+-	    uint32_t uv, y0, y1;
+-        uint8_t * dst_ptr_1span = dst_ptr + dst_span;
+-
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y1  = uv + READY(y_ptr[y_span]);
+-	    y0  = uv + READY(*y_ptr++);
+-	    FIXUP(y1);
+-	    FIXUP(y0);
+-	    STORE(y1, dst_ptr_1span);
+-	    STORE(y0, dst_ptr);
+-	    y1  = uv + READY(y_ptr[y_span]);
+-	    y0  = uv + READY(*y_ptr++);
+-	    FIXUP(y1);
+-	    FIXUP(y0);
+-	    STORE(y1, dst_ptr_1span);
+-	    STORE(y0, dst_ptr);
+-	    height += (2<<16);
+-	}
+-	if ((height>>16) == 0)
+-	{
+-	    /* Trailing column pair */
+-	    uint32_t uv, y0, y1;
+-        uint8_t * dst_ptr_1span = dst_ptr + dst_span;
+-
+-	    uv = READUV(*u_ptr,*v_ptr);
+-	    y1 = uv + READY(y_ptr[y_span]);
+-	    y0 = uv + READY(*y_ptr++);
+-	    FIXUP(y1);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr_1span);
+-	    STORE(y1, dst_ptr);
+-	}
+-	dst_ptr += (dst_span * 2) - (width * 4);
+-	y_ptr   += y_span*2-width;
+-	u_ptr   += uv_span-(width>>1);
+-	v_ptr   += uv_span-(width>>1);
+-	height = (height<<16)>>16;
+-	height -= 2;
+-    }
+-    if (height == 0)
+-    {
+-	/* Trail row */
+-	height -= width<<16;
+-	height += 1<<16;
+-	while (height < 0)
+-	{
+-	    /* Do a row pair */
+-	    uint32_t uv, y0, y1;
+-
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y1  = uv + READY(*y_ptr++);
+-	    y0  = uv + READY(*y_ptr++);
+-	    FIXUP(y1);
+-	    FIXUP(y0);
+-	    STORE(y1, dst_ptr);
+-	    STORE(y0, dst_ptr);
+-	    height += (2<<16);
+-	}
+-	if ((height>>16) == 0)
+-	{
+-	    /* Trailing pix */
+-	    uint32_t uv, y0;
+-
+-	    uv = READUV(*u_ptr++,*v_ptr++);
+-	    y0 = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr);
+-	}
+-    }
++    if (width <= 0 || height <= 0) return;
++    yuv_to_rgb8888(dst_ptr, y_ptr, u_ptr, v_ptr, width, height, y_span, uv_span, dst_span, 1, 0);
+ }
+ 
+-static void yuv444_2_rgb8888(uint8_t  *dst_ptr,
+-		const uint8_t  *y_ptr,
+-		const uint8_t  *u_ptr,
+-		const uint8_t  *v_ptr,
+-		      int32_t   width,
+-		      int32_t   height,
+-		      int32_t   y_span,
+-		      int32_t   uv_span,
+-		      int32_t   dst_span)
++static void yuv420_2_rgb8888(uint8_t *dst_ptr,
++                           const uint8_t *y_ptr, const uint8_t *u_ptr, const uint8_t *v_ptr,
++                           int32_t width, int32_t height, int32_t y_span,
++                           int32_t uv_span, int32_t dst_span)
+ {
+-    while (height > 0)
+-    {
+-	height -= width<<16;
+-	height += 1<<16;
+-	while (height < 0)
+-	{
+-	    /* Do top row pair */
+-	    uint32_t uv, y0, y1;
+-
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y0  = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr);
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y1  = uv + READY(*y_ptr++);
+-	    FIXUP(y1);
+-	    STORE(y1, dst_ptr);
+-	    height += (2<<16);
+-	}
+-	if ((height>>16) == 0)
+-	{
+-	    /* Trailing top row pix */
+-	    uint32_t uv, y0;
+-
+-	    uv = READUV(*u_ptr++,*v_ptr++);
+-	    y0 = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr);
+-	}
+-	dst_ptr += dst_span-width*4;
+-	y_ptr   += y_span-width;
+-	u_ptr   += uv_span-width;
+-	v_ptr   += uv_span-width;
+-	height = (height<<16)>>16;
+-	height -= 1;
+-	if (height == 0)
+-	    break;
+-	height -= width<<16;
+-	height += 1<<16;
+-	while (height < 0)
+-	{
+-	    /* Do second row pair */
+-	    uint32_t uv, y0, y1;
+-
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y0  = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr);
+-	    uv  = READUV(*u_ptr++,*v_ptr++);
+-	    y1  = uv + READY(*y_ptr++);
+-	    FIXUP(y1);
+-	    STORE(y1, dst_ptr);
+-	    height += (2<<16);
+-	}
+-	if ((height>>16) == 0)
+-	{
+-	    /* Trailing bottom row pix */
+-	    uint32_t uv, y0;
+-
+-	    uv = READUV(*u_ptr++,*v_ptr++);
+-	    y0 = uv + READY(*y_ptr++);
+-	    FIXUP(y0);
+-	    STORE(y0, dst_ptr);
+-	}
+-	dst_ptr += dst_span-width*4;
+-	y_ptr   += y_span-width;
+-	u_ptr   += uv_span-width;
+-	v_ptr   += uv_span-width;
+-	height = (height<<16)>>16;
+-	height -= 1;
+-    }
++    if (width <= 0 || height <= 0) return;
++    yuv_to_rgb8888(dst_ptr, y_ptr, u_ptr, v_ptr, width, height, y_span, uv_span, dst_span, 1, 1);
++}
++
++static void yuv444_2_rgb8888(uint8_t *dst_ptr,
++                           const uint8_t *y_ptr, const uint8_t *u_ptr, const uint8_t *v_ptr,
++                           int32_t width, int32_t height, int32_t y_span,
++                           int32_t uv_span, int32_t dst_span)
++{
++    if (width <= 0 || height <= 0) return;
++    yuv_to_rgb8888(dst_ptr, y_ptr, u_ptr, v_ptr, width, height, y_span, uv_span, dst_span, 0, 0);
+ }
+ 
+ #undef FLAGS

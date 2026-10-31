@@ -229,12 +229,15 @@ void StreamPeer::put_utf8_string(const String &p_string) {
 
 void StreamPeer::put_var(const Variant &p_variant, bool p_full_objects) {
 	int len = 0;
+	Error err = encode_variant(p_variant, nullptr, len, p_full_objects);
+	ERR_FAIL_COND(err != OK);
 	Vector<uint8_t> buf;
-	encode_variant(p_variant, nullptr, len, p_full_objects);
-	buf.resize(len);
+	err = buf.resize(len);
+	ERR_FAIL_COND(err != OK);
+	err = encode_variant(p_variant, buf.ptrw(), len, p_full_objects, 0, buf.size());
+	ERR_FAIL_COND(err != OK);
 	put_32(len);
-	encode_variant(p_variant, buf.ptrw(), len, p_full_objects);
-	put_data(buf.ptr(), buf.size());
+	put_data(buf.ptr(), len);
 }
 
 uint8_t StreamPeer::get_u8() {

@@ -1,0 +1,41 @@
+--- a/thirdparty/misc/yuv2rgb.h
++++ b/thirdparty/misc/yuv2rgb.h
+@@ -841,25 +841,31 @@
+ /* -- End Common -- */
+ 
+ /* Keep row and column counters separate: dimensions are not 16-bit fields. */
+-static void yuv_to_rgb8888(uint8_t *dst_ptr,
++static void yuv_to_rgb8888_cropped(uint8_t *dst_ptr,
+                           const uint8_t *y_ptr, const uint8_t *u_ptr, const uint8_t *v_ptr,
+                           int32_t width, int32_t height, int32_t y_span,
+-                          int32_t uv_span, int32_t dst_span,
+-                          int chroma_shift_x, int chroma_shift_y)
++                          int32_t u_span, int32_t v_span, int32_t dst_span,
++                          int chroma_shift_x, int chroma_shift_y, int origin_x, int origin_y)
+ {
+     for (int32_t row = 0; row < height; ++row)
+     {
+-        const uint8_t *y_row = y_ptr + int64_t(row) * y_span;
+-        const uint8_t *u_row = u_ptr + int64_t(row >> chroma_shift_y) * uv_span;
+-        const uint8_t *v_row = v_ptr + int64_t(row >> chroma_shift_y) * uv_span;
++        const uint8_t *y_row = y_ptr + (int64_t(origin_y) + row) * y_span;
++        const uint8_t *u_row = u_ptr + ((int64_t(origin_y) + row) >> chroma_shift_y) * u_span;
++        const uint8_t *v_row = v_ptr + ((int64_t(origin_y) + row) >> chroma_shift_y) * v_span;
+         uint8_t *dst_row = dst_ptr + int64_t(row) * dst_span;
+         for (int32_t column = 0; column < width; ++column)
+         {
+-            uint32_t pixel = READUV(u_row[column >> chroma_shift_x], v_row[column >> chroma_shift_x]) + READY(y_row[column]);
++            uint32_t pixel = READUV(u_row[(int64_t(origin_x) + column) >> chroma_shift_x], v_row[(int64_t(origin_x) + column) >> chroma_shift_x]) + READY(y_row[int64_t(origin_x) + column]);
+             FIXUP(pixel);
+             STORE(pixel, dst_row);
+         }
+     }
++}
++
++static void yuv_to_rgb8888(uint8_t *dst, const uint8_t *y, const uint8_t *u, const uint8_t *v,
++        int width, int height, int y_span, int uv_span, int dst_span, int shift_x, int shift_y) {
++    yuv_to_rgb8888_cropped(dst, y, u, v, width, height, y_span, uv_span, uv_span,
++            dst_span, shift_x, shift_y, 0, 0);
+ }
+ 
+ static void yuv422_2_rgb8888(uint8_t *dst_ptr,

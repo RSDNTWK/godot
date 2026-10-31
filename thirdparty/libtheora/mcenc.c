@@ -502,14 +502,14 @@ void oc_mcenc_search_frame(oc_enc_ctx *_enc,oc_mv _accum,int _mbi,int _frame,
   candy=best_vec[1];
   embs[_mbi].satd[_frame]=oc_mcenc_ysatd_check_mbcandidate_fullpel(_enc,
    frag_buf_offs,fragis,candx,candy,src,satd_ref,ystride);
-  embs[_mbi].analysis_mv[0][_frame]=OC_MV(candx<<1,candy<<1);
+  embs[_mbi].analysis_mv[0][_frame]=OC_MV(2*candx,2*candy);
   if(_frame==OC_FRAME_PREV&&_enc->sp_level<OC_SP_LEVEL_FAST_ANALYSIS){
     for(bi=0;bi<4;bi++){
       candx=best_block_vec[bi][0];
       candy=best_block_vec[bi][1];
       embs[_mbi].block_satd[bi]=oc_mcenc_ysatd_check_bcandidate_fullpel(_enc,
        frag_buf_offs[fragis[bi]],candx,candy,src,satd_ref,ystride);
-      embs[_mbi].block_mv[bi]=OC_MV(candx<<1,candy<<1);
+      embs[_mbi].block_mv[bi]=OC_MV(2*candx,2*candy);
     }
   }
 }
@@ -583,11 +583,11 @@ static int oc_mcenc_ysad_halfpel_mbrefine(const oc_enc_ctx *_enc,int _mbi,
     dy=OC_SQUARE_DY[site];
     /*The following code SHOULD be equivalent to
         oc_state_get_mv_offsets(&_mcenc->enc.state,&mvoffset0,&mvoffset1,
-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy,ref_ystride,0);
+         (2*_vec[0])+dx,(2*_vec[1])+dy,ref_ystride,0);
       However, it should also be much faster, as it involves no multiplies and
        doesn't have to handle chroma vectors.*/
-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
+    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
+    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
     mvoffset0=mvoffset_base+(dx&xmask)+(offset_y[site]&ymask);
     mvoffset1=mvoffset_base+(dx&~xmask)+(offset_y[site]&~ymask);
     err=oc_sad16_halfpel(_enc,frag_buf_offs,fragis,
@@ -597,8 +597,8 @@ static int oc_mcenc_ysad_halfpel_mbrefine(const oc_enc_ctx *_enc,int _mbi,
       best_site=site;
     }
   }
-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
+  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
+  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
   return _best_err;
 }
 #endif
@@ -638,11 +638,11 @@ static unsigned oc_mcenc_ysatd_halfpel_mbrefine(const oc_enc_ctx *_enc,
     dy=OC_SQUARE_DY[site];
     /*The following code SHOULD be equivalent to
         oc_state_get_mv_offsets(&_mcenc->enc.state,&mvoffset0,&mvoffset1,
-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy,ref_ystride,0);
+         (2*_vec[0])+dx,(2*_vec[1])+dy,ref_ystride,0);
       However, it should also be much faster, as it involves no multiplies and
        doesn't have to handle chroma vectors.*/
-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
+    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
+    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
     mvoffset0=mvoffset_base+(dx&xmask)+(offset_y[site]&ymask);
     mvoffset1=mvoffset_base+(dx&~xmask)+(offset_y[site]&~ymask);
     if(_enc->sp_level<OC_SP_LEVEL_NOSATD){
@@ -658,8 +658,8 @@ static unsigned oc_mcenc_ysatd_halfpel_mbrefine(const oc_enc_ctx *_enc,
       best_site=site;
     }
   }
-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
+  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
+  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
   return _best_err;
 }
 
@@ -697,11 +697,11 @@ static int oc_mcenc_ysad_halfpel_brefine(const oc_enc_ctx *_enc,
     dy=OC_SQUARE_DY[site];
     /*The following code SHOULD be equivalent to
         oc_state_get_mv_offsets(&_mcenc->enc.state,&mvoffset0,&mvoffset1,
-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy,ref_ystride,0);
+         (2*_vec[0])+dx,(2*_vec[1])+dy,ref_ystride,0);
       However, it should also be much faster, as it involves no multiplies and
        doesn't have to handle chroma vectors.*/
-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
+    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
+    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
     mvoffset0=mvoffset_base+(dx&xmask)+(_offset_y[site]&ymask);
     mvoffset1=mvoffset_base+(dx&~xmask)+(_offset_y[site]&~ymask);
     err=oc_enc_frag_sad2_thresh(_enc,_src,
@@ -711,8 +711,8 @@ static int oc_mcenc_ysad_halfpel_brefine(const oc_enc_ctx *_enc,
       best_site=site;
     }
   }
-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
+  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
+  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
   return _best_err;
 }
 #endif
@@ -740,11 +740,11 @@ static unsigned oc_mcenc_ysatd_halfpel_brefine(const oc_enc_ctx *_enc,
     dy=OC_SQUARE_DY[site];
     /*The following code SHOULD be equivalent to
         oc_state_get_mv_offsets(&_enc->state,&mvoffsets,0,
-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy);
+         (2*_vec[0])+dx,(2*_vec[1])+dy);
       However, it should also be much faster, as it involves no multiplies and
        doesn't have to handle chroma vectors.*/
-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
+    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
+    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
     mvoffset0=mvoffset_base+(dx&xmask)+(_offset_y[site]&ymask);
     mvoffset1=mvoffset_base+(dx&~xmask)+(_offset_y[site]&~ymask);
     err=oc_enc_frag_satd2(_enc,&dc,_src,
@@ -755,8 +755,8 @@ static unsigned oc_mcenc_ysatd_halfpel_brefine(const oc_enc_ctx *_enc,
       best_site=site;
     }
   }
-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
+  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
+  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
   return _best_err;
 }
 

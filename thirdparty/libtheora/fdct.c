@@ -133,7 +133,7 @@ void oc_enc_fdct8x8_c(ogg_int16_t _y[64],const ogg_int16_t _x[64]){
   int                i;
   /*Add two extra bits of working precision to improve accuracy; any more and
      we could overflow.*/
-  for(i=0;i<64;i++)w[i]=_x[i]<<2;
+  for(i=0;i<64;i++)w[i]=4*_x[i];
   /*These biases correct for some systematic error that remains in the full
      fDCT->iDCT round trip.*/
   w[0]+=(w[0]!=0)+1;
@@ -327,7 +327,7 @@ static void oc_fdct8_ext(ogg_int16_t _y[8],ogg_int16_t *_x,
       ogg_int32_t v;
       v=0;
       for(api=0;api<na;api++){
-        v+=ext[zpi][api]*(ogg_int32_t)(_x[pi[api]<<3]<<1);
+        v+=ext[zpi][api]*(ogg_int32_t)(2*_x[pi[api]<<3]);
       }
       _x[pi[na+zpi]<<3]=(ogg_int16_t)(v+0x8000>>16)+1>>1;
     }
@@ -385,7 +385,7 @@ void oc_fdct8x8_border(const oc_border_info *_border,
   }
   /*Add two extra bits of working precision to improve accuracy; any more and
      we could overflow.*/
-  for(ci=0;ci<64;ci++)w[ci]=_x[ci]<<2;
+  for(ci=0;ci<64;ci++)w[ci]=4*_x[ci];
   /*These biases correct for some systematic error that remains in the full
      fDCT->iDCT round trip.
     We can safely add them before padding, since if these pixel values are

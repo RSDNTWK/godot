@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "scene_rpc_interface.h"
+#include "multiplayer_packet_buffer.h"
 
 #include "scene_multiplayer.h"
 
@@ -349,8 +350,10 @@ void SceneRPCInterface::_send_rpc(Node *p_node, int p_to, uint16_t p_rpc_id, con
 	int ofs = 0;
 
 #define MAKE_ROOM(m_amount) \
-	if (packet_cache.size() < m_amount) \
-		packet_cache.resize(m_amount);
+	do { \
+		const Error room_error = MultiplayerPacketBuffer::ensure_size(packet_cache, int64_t(m_amount)); \
+		ERR_FAIL_COND(room_error != OK); \
+	} while (false)
 
 	// Encode meta.
 	uint8_t command_type = SceneMultiplayer::NETWORK_COMMAND_REMOTE_CALL;
@@ -411,6 +414,7 @@ void SceneRPCInterface::_send_rpc(Node *p_node, int p_to, uint16_t p_rpc_id, con
 	int len;
 	Error err = MultiplayerAPI::encode_and_compress_variants(p_arg, p_argcount, nullptr, len, &byte_only_or_no_args, multiplayer->is_object_decoding_allowed());
 	ERR_FAIL_COND_MSG(err != OK, "Unable to encode RPC arguments. THIS IS LIKELY A BUG IN THE ENGINE!");
+	ERR_FAIL_COND(ofs < 0 || int64_t(ofs) + 1 + len > INT_MAX);
 	if (byte_only_or_no_args) {
 		MAKE_ROOM(ofs + len);
 	} else {
@@ -419,7 +423,8 @@ void SceneRPCInterface::_send_rpc(Node *p_node, int p_to, uint16_t p_rpc_id, con
 		ofs += 1;
 	}
 	if (len) {
-		MultiplayerAPI::encode_and_compress_variants(p_arg, p_argcount, &packet_cache.write[ofs], len, &byte_only_or_no_args, multiplayer->is_object_decoding_allowed());
+		err = MultiplayerAPI::encode_and_compress_variants(p_arg, p_argcount, &packet_cache.write[ofs], len, &byte_only_or_no_args, multiplayer->is_object_decoding_allowed(), len);
+		ERR_FAIL_COND(err != OK);
 		ofs += len;
 	}
 
@@ -451,7 +456,7 @@ void SceneRPCInterface::_send_rpc(Node *p_node, int p_to, uint16_t p_rpc_id, con
 		// Append path at the end, since we will need it for some packets.
 		CharString pname = String(multiplayer->get_root_path().rel_path_to(p_node->get_path())).utf8();
 		int path_len = encode_cstring(pname.get_data(), nullptr);
-		MAKE_ROOM(ofs + path_len);
+		MAKE_ROOM(int64_t(ofs) + path_len);
 		encode_cstring(pname.get_data(), &(packet_cache.write[ofs]));
 
 		// Not all verified path, so check which needs the longer packet.

@@ -1047,7 +1047,9 @@ Variant VariantUtilityFunctions::str_to_var(const String &p_var) {
 	String errs;
 	int line;
 	Variant ret;
-	(void)VariantParser::parse(&ss, ret, errs, line);
+	if (VariantParser::parse(&ss, ret, errs, line) != OK) {
+		return Variant();
+	}
 
 	return ret;
 }
@@ -1060,15 +1062,21 @@ PackedByteArray VariantUtilityFunctions::var_to_bytes(const Variant &p_var) {
 	}
 
 	PackedByteArray barr;
-	barr.resize(len);
+	ERR_FAIL_COND_V(barr.resize(len) != OK, PackedByteArray());
 	{
 		uint8_t *w = barr.ptrw();
-		err = encode_variant(p_var, w, len, false);
+		err = encode_variant(p_var, w, len, false, 0, barr.size());
 		if (err != OK) {
 			return PackedByteArray();
 		}
 	}
 
+	if (barr.size() != len) {
+		PackedByteArray compact;
+		ERR_FAIL_COND_V(compact.resize(len) != OK, PackedByteArray());
+		if (len) { memcpy(compact.ptrw(), barr.ptr(), len); }
+		return compact;
+	}
 	return barr;
 }
 
@@ -1080,15 +1088,21 @@ PackedByteArray VariantUtilityFunctions::var_to_bytes_with_objects(const Variant
 	}
 
 	PackedByteArray barr;
-	barr.resize(len);
+	ERR_FAIL_COND_V(barr.resize(len) != OK, PackedByteArray());
 	{
 		uint8_t *w = barr.ptrw();
-		err = encode_variant(p_var, w, len, true);
+		err = encode_variant(p_var, w, len, true, 0, barr.size());
 		if (err != OK) {
 			return PackedByteArray();
 		}
 	}
 
+	if (barr.size() != len) {
+		PackedByteArray compact;
+		ERR_FAIL_COND_V(compact.resize(len) != OK, PackedByteArray());
+		if (len) { memcpy(compact.ptrw(), barr.ptr(), len); }
+		return compact;
+	}
 	return barr;
 }
 

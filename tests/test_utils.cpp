@@ -44,7 +44,9 @@ String TestUtils::get_executable_dir() {
 }
 
 String TestUtils::get_temp_path(const String &p_suffix) {
-	const String temp_base = OS::get_singleton()->get_cache_path().path_join("godot_test");
+	// Allow isolated test runs to keep their scratch files inside the workspace.
+	const String override_path = OS::get_singleton()->get_environment("GODOT_TEST_TEMP_DIR");
+	const String temp_base = override_path.is_empty() ? OS::get_singleton()->get_cache_path().path_join("godot_test") : override_path;
 	DirAccess::make_dir_absolute(temp_base); // Ensure the directory exists.
 	return temp_base.path_join(p_suffix);
 }

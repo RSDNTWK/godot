@@ -27,6 +27,7 @@
 #include "mkvparser/mkvparser.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -115,11 +116,15 @@ WebMDemuxer::VIDEO_CODEC WebMDemuxer::getVideoCodec() const
 }
 int WebMDemuxer::getWidth() const
 {
-	return m_videoTrack->GetWidth();
+	if (!m_videoTrack) return 0;
+	const long long value = m_videoTrack->GetWidth();
+	return value > 0 && value <= INT_MAX ? int(value) : 0;
 }
 int WebMDemuxer::getHeight() const
 {
-	return m_videoTrack->GetHeight();
+	if (!m_videoTrack) return 0;
+	const long long value = m_videoTrack->GetHeight();
+	return value > 0 && value <= INT_MAX ? int(value) : 0;
 }
 
 WebMDemuxer::AUDIO_CODEC WebMDemuxer::getAudioCodec() const
@@ -136,7 +141,9 @@ double WebMDemuxer::getSampleRate() const
 }
 int WebMDemuxer::getChannels() const
 {
-	return m_audioTrack->GetChannels();
+	if (!m_audioTrack) return 0;
+	const long long value = m_audioTrack->GetChannels();
+	return value > 0 && value <= INT_MAX ? int(value) : 0;
 }
 int WebMDemuxer::getAudioDepth() const
 {
@@ -162,6 +169,7 @@ bool WebMDemuxer::readFrame(WebMFrame *videoFrame, WebMFrame *audioFrame)
 
 	if (!m_cluster)
 		m_cluster = m_segment->GetFirst();
+	if (!m_cluster || m_cluster->EOS()) { m_eos = true; return false; }
 
 	do
 	{
@@ -220,18 +228,22 @@ bool WebMDemuxer::readFrame(WebMFrame *videoFrame, WebMFrame *audioFrame)
 	const mkvparser::Block::Frame &blockFrame = m_block->GetFrame(m_blockFrameIndex++);
 	if (blockFrame.len > frame->bufferCapacity)
 	{
-		unsigned char *newBuff = (unsigned char *)realloc(frame->buffer, frame->bufferCapacity = blockFrame.len);
+		unsigned char *newBuff = (unsigned char *)realloc(frame->buffer, blockFrame.len);
 		if (newBuff)
+		{
 			frame->buffer = newBuff;
+			frame->bufferCapacity = blockFrame.len;
+		}
 		else // Out of memory
 			return false;
 	}
+	if (blockFrame.len <= 0 || blockFrame.Read(m_reader, frame->buffer)) { m_eos = true; return false; }
 	frame->bufferSize = blockFrame.len;
 
 	frame->time = m_block->GetTime(m_cluster) / 1e9;
 	frame->key  = m_block->IsKey();
 
-	return !blockFrame.Read(m_reader, frame->buffer);
+	return true;
 }
 
 inline bool WebMDemuxer::notSupportedTrackNumber(long videoTrackNumber, long audioTrackNumber) const

@@ -28,9 +28,13 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
+#ifdef B01_ALLOCATION_TESTS
+#include "tls_test_sizes.h"
+#endif
 #include "../packet_peer_mbed_dtls.h"
 #include "tests/test_macros.h"
 
+#include "tests/core/io/allocation_test_helpers.h"
 #include <array>
 #include <cstring>
 
@@ -270,4 +274,40 @@ void server_handshake_and_connected_progression() {
 	CHECK(memcmp(received, response, sizeof(response)) == 0);
 }
 
+
+#ifdef B01_ALLOCATION_TESTS
+void setup_failure_does_not_accept() {
+	CryptoMbedTLS crypto;
+	const Ref<CryptoKey> key = crypto.generate_rsa(2048);
+	const Ref<X509Certificate> certificate = crypto.generate_self_signed_certificate(key, "CN=localhost,O=Godot R4 test,C=GB", "20200101000000", "20371231235959");
+	REQUIRE(certificate.is_valid());
+	const Ref<TLSOptions> options = TLSOptions::server(key, certificate);
+	Ref<CookieContextMbedTLS> cookies;
+	cookies.instantiate();
+	REQUIRE(cookies->setup() == OK);
+	for (int occurrence : { 1, 2 }) {
+		Ref<ScriptedUDP> transport;
+		transport.instantiate();
+		Ref<DTLSProbe> server;
+		server.instantiate();
+		Error error;
+		int failures;
+		ERR_PRINT_OFF;
+		{
+			TestAllocation::Failure fault(godot_test_tls_input_buffer_size(), occurrence);
+			error = server->accept_peer(transport, options, cookies);
+			failures = TestAllocation::failures();
+		}
+		ERR_PRINT_ON;
+		CHECK(failures == 1);
+		CHECK(error != OK);
+		CHECK(server->get_status() == PacketPeerDTLS::STATUS_DISCONNECTED);
+		CHECK(transport->reads == 0);
+		CHECK(transport->outgoing.is_empty());
+		CHECK(server->accept_peer(transport, options, cookies) == OK);
+		CHECK(server->get_status() == PacketPeerDTLS::STATUS_HANDSHAKING);
+		server->disconnect_from_peer();
+	}
+}
+#endif
 } // namespace TestDTLSReceive

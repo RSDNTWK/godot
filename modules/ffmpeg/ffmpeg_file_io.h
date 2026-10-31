@@ -40,9 +40,12 @@ class FFmpegFileIO {
 	AVIOContext *io = nullptr;
 	FFmpegIOWorkBudget *seek_budget = nullptr;
 
-	static int interrupt(void *p_opaque) {
-		FFmpegFileIO *self = static_cast<FFmpegFileIO *>(p_opaque);
-		return self->seek_budget && !self->seek_budget->step();
+	static int reject_external_resource(AVFormatContext *, AVIOContext **r_io, const char *, int, AVDictionary **) {
+		// Supported inputs are self-contained and use the custom primary IO.
+		// A file-protocol path can itself name a network mount, so do not open
+		// secondary resources even when their text looks like a local filename.
+		*r_io = nullptr;
+		return AVERROR_PROTOCOL_NOT_FOUND;
 	}
 
 	static int read(void *p_opaque, uint8_t *p_buffer, int p_size) {
@@ -89,6 +92,33 @@ class FFmpegFileIO {
 	}
 
 public:
+	static bool is_remote_path(const String &p_path) {
+		if (p_path.begins_with("res://") || p_path.begins_with("user://") || p_path.begins_with("uid://")) { return false; }
+		const auto slash = [](char32_t p_char) { return p_char == '/' || p_char == '\\'; };
+		if (p_path.length() >= 2 && slash(p_path[0]) && slash(p_path[1])) { return true; }
+		const int colon = p_path.find(":");
+		if (colon <= 0) { return false; }
+		const auto alpha = [](char32_t p_char) { return (p_char >= 'a' && p_char <= 'z') || (p_char >= 'A' && p_char <= 'Z'); };
+		// Native drive paths are local paths, rather than URI schemes.
+		if (colon == 1 && alpha(p_path[0]) && p_path.length() > 2 && (p_path[2] == '/' || p_path[2] == '\\')) { return false; }
+		if (!alpha(p_path[0])) { return false; }
+		for (int i = 1; i < colon; i++) {
+			const char32_t c = p_path[i];
+			if (!alpha(c) && !(c >= '0' && c <= '9') && c != '+' && c != '-' && c != '.') { return false; }
+		}
+		return true;
+	}
+
+	// The application downloads remote media asynchronously before playback.
+	// Restrict memory inputs too: demuxers may open secondary URLs.
+	static int configure_local_input(AVFormatContext *p_format) {
+		if (!p_format) { return AVERROR(ENOMEM); }
+		av_freep(&p_format->protocol_whitelist);
+		p_format->protocol_whitelist = av_strdup("file");
+		p_format->io_open = reject_external_resource;
+		return p_format->protocol_whitelist ? 0 : AVERROR(ENOMEM);
+	}
+
 	void set_seek_budget(FFmpegIOWorkBudget *p_budget) { seek_budget = p_budget; }
 	// Close the AVFormatContext before releasing its custom IO.
 	void close() {
@@ -101,14 +131,8 @@ public:
 
 	int open(AVFormatContext **r_format, const String &p_path, const AVInputFormat *p_input_format = nullptr) {
 		close();
-		// Keep FFmpeg protocol handling for remote URLs.
-		if (p_path.contains("://") && !p_path.begins_with("res://") && !p_path.begins_with("user://") && !p_path.begins_with("uid://")) {
-			*r_format = avformat_alloc_context();
-			if (!*r_format) {
-				return AVERROR(ENOMEM);
-			}
-			(*r_format)->interrupt_callback = { interrupt, this };
-			return avformat_open_input(r_format, p_path.utf8().get_data(), p_input_format, nullptr);
+		if (is_remote_path(p_path)) {
+			return AVERROR_PROTOCOL_NOT_FOUND;
 		}
 		file = FileAccess::open(p_path, FileAccess::READ);
 		if (file.is_null()) {
@@ -133,6 +157,13 @@ public:
 		if (!*r_format) {
 			close();
 			return AVERROR(ENOMEM);
+		}
+		const int configured = configure_local_input(*r_format);
+		if (configured < 0) {
+			avformat_free_context(*r_format);
+			*r_format = nullptr;
+			close();
+			return configured;
 		}
 		io->seekable = AVIO_SEEKABLE_NORMAL;
 		(*r_format)->pb = io;

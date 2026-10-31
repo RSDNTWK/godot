@@ -104,11 +104,12 @@ Error PacketPeer::put_var(const Variant &p_packet, bool p_full_objects) {
 
 	if (unlikely(encode_buffer.size() < len)) {
 		encode_buffer.resize(0); // Avoid realloc
-		encode_buffer.resize(Math::next_power_of_2((uint32_t)len));
+		err = encode_buffer.resize(Math::next_power_of_2((uint32_t)len));
+		ERR_FAIL_COND_V(err != OK, err);
 	}
 
 	uint8_t *w = encode_buffer.ptrw();
-	err = encode_variant(p_packet, w, len, p_full_objects);
+	err = encode_variant(p_packet, w, len, p_full_objects, 0, MIN(encode_buffer.size(), int64_t(INT_MAX)));
 	ERR_FAIL_COND_V_MSG(err != OK, err, "Error when trying to encode Variant.");
 
 	return put_packet(w, len);

@@ -56,14 +56,16 @@ private:
 	mutable uint64_t pos = 0;
 	mutable bool eofed = false;
 	bool use_magic = true;
+	bool owns_base = false;
+	Error write_error = OK;
 
 	void _close();
 
 	static CryptoCore::RandomGenerator *_fae_static_rng;
 
 public:
-	Error open_and_parse(Ref<FileAccess> p_base, const Vector<uint8_t> &p_key, Mode p_mode, bool p_with_magic = true, const Vector<uint8_t> &p_iv = Vector<uint8_t>());
-	Error open_and_parse_password(Ref<FileAccess> p_base, const String &p_key, Mode p_mode);
+	Error open_and_parse(Ref<FileAccess> p_base, const Vector<uint8_t> &p_key, Mode p_mode, bool p_with_magic = true, const Vector<uint8_t> &p_iv = Vector<uint8_t>(), bool p_owns_base = false);
+	Error open_and_parse_password(Ref<FileAccess> p_base, const String &p_key, Mode p_mode, bool p_owns_base = false);
 
 	Vector<uint8_t> get_iv() const { return iv; }
 

@@ -299,7 +299,7 @@ Error PackedDataContainer::_pack(const Variant &p_data, Vector<uint8_t> &tmpdata
 			error = grow(uint64_t(len));
 			ERR_FAIL_COND_V(error != OK, error);
 			int written = 0;
-			error = encode_variant(p_data, tmpdata.ptrw() + position, written, false);
+			error = encode_variant(p_data, tmpdata.ptrw() + position, written, false, 0, len);
 			ERR_FAIL_COND_V(error != OK, error);
 			ERR_FAIL_COND_V(written != len, ERR_INVALID_DATA);
 			return OK;

@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "scene_replication_interface.h"
+#include "multiplayer_packet_buffer.h"
 
 #include "scene_multiplayer.h"
 
@@ -38,9 +39,7 @@
 #include "core/os/os.h"
 #include "scene/main/node.h"
 
-#define MAKE_ROOM(m_amount) \
-	if (packet_cache.size() < m_amount) \
-		packet_cache.resize(m_amount);
+
 
 #ifdef DEBUG_ENABLED
 _FORCE_INLINE_ void SceneReplicationInterface::_profile_node_data(const String &p_what, ObjectID p_id, int p_size) {
@@ -433,22 +432,26 @@ Error SceneReplicationInterface::_update_spawn_visibility(int p_peer, const Obje
 	}
 	if (to_spawn.size()) {
 		int len = 0;
-		_make_spawn_packet(node, spawner, len);
+		Error err = _make_spawn_packet(node, spawner, len);
+		ERR_FAIL_COND_V(err != OK, err);
 		for (int pid : to_spawn) {
 			ERR_CONTINUE(!peers_info.has(pid));
 			int path_id;
 			multiplayer_cache->send_object_cache(spawner, pid, path_id);
-			_send_raw(packet_cache.ptr(), len, pid, true);
+			err = _send_raw(packet_cache.ptr(), len, pid, true);
+			ERR_CONTINUE(err != OK);
 			peers_info[pid].spawn_nodes.insert(p_oid);
 		}
 	}
 	if (to_despawn.size()) {
 		int len = 0;
-		_make_despawn_packet(node, len);
+		Error err = _make_despawn_packet(node, len);
+		ERR_FAIL_COND_V(err != OK, err);
 		for (int pid : to_despawn) {
 			ERR_CONTINUE(!peers_info.has(pid));
+			err = _send_raw(packet_cache.ptr(), len, pid, true);
+			ERR_CONTINUE(err != OK);
 			peers_info[pid].spawn_nodes.erase(p_oid);
-			_send_raw(packet_cache.ptr(), len, pid, true);
 		}
 	}
 	return OK;
@@ -522,7 +525,9 @@ Error SceneReplicationInterface::_make_spawn_packet(Node *p_node, MultiplayerSpa
 	int path_id = multiplayer_cache->make_object_cache(p_spawner);
 	CharString cname = p_node->get_name().operator String().utf8();
 	int nlen = encode_cstring(cname.get_data(), nullptr);
-	MAKE_ROOM(1 + 1 + 4 + 4 + 4 + 4 * sync_ids.size() + 4 + nlen + (is_custom ? 4 + spawn_arg_size : 0) + state_size);
+	const int64_t required = int64_t(1) + 1 + 4 + 4 + 4 + int64_t(4) * sync_ids.size() + 4 + nlen + (is_custom ? int64_t(4) + spawn_arg_size : 0) + state_size;
+	const Error allocation = MultiplayerPacketBuffer::ensure_size(packet_cache, required);
+	ERR_FAIL_COND_V(allocation != OK, allocation);
 	uint8_t *ptr = packet_cache.ptrw();
 	ptr[0] = (uint8_t)SceneMultiplayer::NETWORK_COMMAND_SPAWN;
 	ptr[1] = scene_id;
@@ -538,13 +543,13 @@ Error SceneReplicationInterface::_make_spawn_packet(Node *p_node, MultiplayerSpa
 	// Write args
 	if (is_custom) {
 		ofs += encode_uint32(spawn_arg_size, &ptr[ofs]);
-		Error err = MultiplayerAPI::encode_and_compress_variant(spawn_arg, &ptr[ofs], spawn_arg_size, false);
+		Error err = MultiplayerAPI::encode_and_compress_variant(spawn_arg, &ptr[ofs], spawn_arg_size, false, spawn_arg_size);
 		ERR_FAIL_COND_V(err, err);
 		ofs += spawn_arg_size;
 	}
 	// Write state.
 	if (state_size) {
-		Error err = MultiplayerAPI::encode_and_compress_variants(state_varp.ptrw(), state_varp.size(), &ptr[ofs], state_size);
+		Error err = MultiplayerAPI::encode_and_compress_variants(state_varp.ptrw(), state_varp.size(), &ptr[ofs], state_size, nullptr, false, state_size);
 		ERR_FAIL_COND_V(err, err);
 		ofs += state_size;
 	}
@@ -556,7 +561,8 @@ Error SceneReplicationInterface::_make_despawn_packet(Node *p_node, int &r_len) 
 	const ObjectID oid = p_node->get_instance_id();
 	const TrackedNode *tnode = tracked_nodes.getptr(oid);
 	ERR_FAIL_NULL_V(tnode, ERR_INVALID_PARAMETER);
-	MAKE_ROOM(5);
+	const Error allocation = MultiplayerPacketBuffer::ensure_size(packet_cache, 5);
+	ERR_FAIL_COND_V(allocation != OK, allocation);
 	uint8_t *ptr = packet_cache.ptrw();
 	ptr[0] = (uint8_t)SceneMultiplayer::NETWORK_COMMAND_DESPAWN;
 	int ofs = 1;
@@ -708,7 +714,8 @@ MultiplayerSynchronizer *SceneReplicationInterface::_find_synchronizer(int p_pee
 }
 
 void SceneReplicationInterface::_send_delta(int p_peer, const HashSet<ObjectID> &p_synchronizers, uint64_t p_usec, const HashMap<ObjectID, uint64_t> &p_last_watch_usecs) {
-	MAKE_ROOM(/* header */ 1 + /* element */ 4 + 8 + 4 + delta_mtu);
+	const Error allocation = MultiplayerPacketBuffer::ensure_size(packet_cache, int64_t(1) + 4 + 8 + 4 + delta_mtu);
+	ERR_FAIL_COND(allocation != OK);
 	uint8_t *ptr = packet_cache.ptrw();
 	ptr[0] = SceneMultiplayer::NETWORK_COMMAND_SYNC | (1 << SceneMultiplayer::CMD_FLAG_0_SHIFT);
 	int ofs = 1;
@@ -747,10 +754,15 @@ void SceneReplicationInterface::_send_delta(int p_peer, const HashSet<ObjectID> 
 			ofs = 1;
 		}
 		if (size) {
+			const int record_offset = ofs;
 			ofs += encode_uint32(sync->get_net_id(), &ptr[ofs]);
 			ofs += encode_uint64(indexes, &ptr[ofs]);
 			ofs += encode_uint32(size, &ptr[ofs]);
-			MultiplayerAPI::encode_and_compress_variants(vptr, varp.size(), &ptr[ofs], size);
+			err = MultiplayerAPI::encode_and_compress_variants(vptr, varp.size(), &ptr[ofs], size, nullptr, false, size);
+			if (err != OK) {
+				ofs = record_offset;
+				continue;
+			}
 			ofs += size;
 		}
 #ifdef DEBUG_ENABLED
@@ -800,7 +812,8 @@ Error SceneReplicationInterface::on_delta_receive(int p_from, const uint8_t *p_b
 }
 
 void SceneReplicationInterface::_send_sync(int p_peer, const HashSet<ObjectID> &p_synchronizers, uint16_t p_sync_net_time, uint64_t p_usec) {
-	MAKE_ROOM(/* header */ 3 + /* element */ 4 + 4 + sync_mtu);
+	const Error allocation = MultiplayerPacketBuffer::ensure_size(packet_cache, int64_t(3) + 4 + 4 + sync_mtu);
+	ERR_FAIL_COND(allocation != OK);
 	uint8_t *ptr = packet_cache.ptrw();
 	ptr[0] = SceneMultiplayer::NETWORK_COMMAND_SYNC;
 	int ofs = 1;
@@ -837,9 +850,14 @@ void SceneReplicationInterface::_send_sync(int p_peer, const HashSet<ObjectID> &
 			ofs = 3;
 		}
 		if (size) {
+			const int record_offset = ofs;
 			ofs += encode_uint32(sync->get_net_id(), &ptr[ofs]);
 			ofs += encode_uint32(size, &ptr[ofs]);
-			MultiplayerAPI::encode_and_compress_variants(varp.ptrw(), varp.size(), &ptr[ofs], size);
+			err = MultiplayerAPI::encode_and_compress_variants(varp.ptrw(), varp.size(), &ptr[ofs], size, nullptr, false, size);
+			if (err != OK) {
+				ofs = record_offset;
+				continue;
+			}
 			ofs += size;
 		}
 #ifdef DEBUG_ENABLED

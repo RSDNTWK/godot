@@ -34,8 +34,9 @@
 #include "core/io/resource_loader.h"
 #include "core/os/thread.h"
 #include "scene/resources/video_stream.h"
-#include "modules/modules_enabled.gen.h"
+
 #include "modules/ffmpeg/video_stream_media.h"
+#include "modules/modules_enabled.gen.h"
 
 #ifndef MODULE_FFMPEG_ENABLED
 #include <theora/theoradec.h>
@@ -49,7 +50,6 @@ class VideoStreamPlaybackTheora : public VideoStreamPlayback {
 	GDCLASS(VideoStreamPlaybackTheora, VideoStreamPlayback);
 
 	Image::Format format = Image::Format::FORMAT_L8;
-	Vector<uint8_t> frame_data;
 	int frames_pending = 0;
 	Ref<FileAccess> file;
 	String file_name;
@@ -69,7 +69,7 @@ class VideoStreamPlaybackTheora : public VideoStreamPlayback {
 	int64_t seek_streams(double p_time, int64_t &video_granulepos, int64_t &audio_granulepos);
 	void find_streams(th_setup_info *&ts);
 	void read_headers(th_setup_info *&ts);
-	void video_write(th_ycbcr_buffer yuv);
+	bool video_write(th_ycbcr_buffer yuv);
 	double get_time() const;
 
 	bool theora_eos = false;
@@ -173,13 +173,13 @@ public:
 		media->set_audio_track(audio_track);
 		return media->instantiate_playback();
 
-		// Legacy Theora/Vorbis playback is retained below for builds without FFmpeg.
-		#ifndef MODULE_FFMPEG_ENABLED
+// Legacy Theora/Vorbis playback is retained below for builds without FFmpeg.
+#ifndef MODULE_FFMPEG_ENABLED
 		Ref<VideoStreamPlaybackTheora> pb = memnew(VideoStreamPlaybackTheora);
 		pb->set_audio_track(audio_track);
 		pb->set_file(file);
 		return pb;
-		#endif
+#endif
 	}
 
 	void set_audio_track(int p_track) override { audio_track = p_track; }

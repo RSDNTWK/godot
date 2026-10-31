@@ -594,6 +594,7 @@ Patches:
 - `0002-disable-astc-block-ext.patch` ([GH-76572](https://github.com/godotengine/godot/pull/76572))
 - `0003-basisu-1.60.patch` ([GH-103968](https://github.com/godotengine/godot/pull/103968))
 - `0004-basis-2.50-compat.patch`: Basis 2.50 texture format enum compatibility.
+- `0005-type-safe-dispatch.patch`: Match base-pointer vtable signatures with typed forwarding functions.
 
 
 ## libogg
@@ -624,6 +625,9 @@ Files extracted from upstream source:
 
 
 ## libtheora
+
+Local encoder arithmetic fixes use defined signed doubling and unsigned
+coefficient masks; see `libtheora/patches/0001-defined-encoder-arithmetic.patch`.
 
 - Upstream: https://www.theora.org
 - Version: 1.2.0 (8e4808736e9c181b971306cc3f05df9e61354004, 2025)
@@ -815,6 +819,11 @@ Patches:
 
 
 ## misc
+
+The `yuv2rgb.h` converter retains its lookup-table color arithmetic with local
+row/column traversal fixes and absolute crop origins with independent chroma
+strides; see `misc/patches/0001-yuv-row-traversal.patch` and
+`misc/patches/0002-yuv-crop-origin.patch`.
 
 Collection of single-file libraries used in Godot components.
 
@@ -1347,6 +1356,9 @@ Patches:
 The parser release delta was merged using 1.0.0.28 as the closest known lineage;
 the original snapshot revision has not been proven. Local parser guards and
 the public reader destructor remain. Godot's decoder/demuxer wrapper is retained.
+The retained adapter also checks metadata narrowing, packet reads and buffer growth,
+keeps decoder close idempotent, bounds Vorbis headers/PCM output, and accepts the
+maximum legal Opus packet duration. See `libsimplewebm/patches/0002-adapter-lifecycle.patch`.
 
 
 ## opus

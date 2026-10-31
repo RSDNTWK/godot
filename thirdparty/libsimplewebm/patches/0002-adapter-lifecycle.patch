@@ -1,0 +1,205 @@
+--- a/OpusVorbisDecoder.cpp
++++ b/OpusVorbisDecoder.cpp
+@@ -28,6 +28,7 @@
+ #include <opus/opus.h>
+ 
+ #include <string.h>
++#include <limits.h>
+ 
+ struct VorbisDecoder
+ {
+@@ -43,18 +44,18 @@
+ 
+ OpusVorbisDecoder::OpusVorbisDecoder(const WebMDemuxer &demuxer) :
+ 	m_vorbis(NULL), m_opus(NULL),
+-	m_numSamples(0)
++	m_numSamples(0), m_channels(0)
+ {
+ 	switch (demuxer.getAudioCodec())
+ 	{
+ 		case WebMDemuxer::AUDIO_VORBIS:
+ 			m_channels = demuxer.getChannels();
+-			if (openVorbis(demuxer))
++			if (m_channels > 0 && openVorbis(demuxer))
+ 				return;
+ 			break;
+ 		case WebMDemuxer::AUDIO_OPUS:
+ 			m_channels = demuxer.getChannels();
+-			if (openOpus(demuxer))
++			if (m_channels > 0 && openOpus(demuxer))
+ 				return;
+ 			break;
+ 		default:
+@@ -89,7 +90,9 @@
+ 		float **pcm;
+ 		while ((samplesCount = vorbis_synthesis_pcmout(&m_vorbis->dspState, &pcm)))
+ 		{
+-			const int toConvert = samplesCount <= maxSamples ? samplesCount : maxSamples;
++			const int remaining = maxSamples - count;
++			if (remaining <= 0) return false;
++			const int toConvert = samplesCount <= remaining ? samplesCount : remaining;
+ 			for (int c = 0; c < m_channels; ++c)
+ 			{
+ 				float *samples = pcm[c];
+@@ -100,7 +103,7 @@
+ 						sample = 32767;
+ 					else if (sample < -32768)
+ 						sample = -32768;
+-					buffer[count + j] = sample;
++					buffer[count * m_channels + j] = sample;
+ 				}
+ 			}
+ 			vorbis_synthesis_read(&m_vorbis->dspState, toConvert);
+@@ -137,11 +140,13 @@
+ 		int samplesCount, count = 0;
+ 		float **pcm;
+ 		while ((samplesCount = vorbis_synthesis_pcmout(&m_vorbis->dspState, &pcm))) {
+-			const int toConvert = samplesCount <= maxSamples ? samplesCount : maxSamples;
++			const int remaining = maxSamples - count;
++			if (remaining <= 0) return false;
++			const int toConvert = samplesCount <= remaining ? samplesCount : remaining;
+ 			for (int c = 0; c < m_channels; ++c) {
+ 				float *samples = pcm[c];
+ 				for (int i = 0, j = c; i < toConvert; ++i, j += m_channels) {
+-					buffer[count + j] = samples[i];
++					buffer[count * m_channels + j] = samples[i];
+ 				}
+ 			}
+ 			vorbis_synthesis_read(&m_vorbis->dspState, toConvert);
+@@ -166,7 +171,7 @@
+ 	size_t extradataSize = 0;
+ 	const unsigned char *extradata = demuxer.getAudioExtradata(extradataSize);
+ 
+-	if (extradataSize < 3 || !extradata || extradata[0] != 2)
++	if (extradataSize < 3 || extradataSize > LONG_MAX || !extradata || extradata[0] != 2)
+ 		return false;
+ 
+ 	size_t headerSize[3] = {0};
+@@ -179,11 +184,13 @@
+ 		{
+ 			if (offset >= extradataSize)
+ 				return false;
++			if (extradata[offset] > extradataSize - headerSize[i]) return false;
+ 			headerSize[i] += extradata[offset];
+ 			if (extradata[offset++] < 0xFF)
+ 				break;
+ 		}
+ 	}
++	if (headerSize[0] > extradataSize - offset || headerSize[1] > extradataSize - offset - headerSize[0]) return false;
+ 	headerSize[2] = extradataSize - (headerSize[0] + headerSize[1] + offset);
+ 
+ 	if (headerSize[0] + headerSize[1] + headerSize[2] + offset != extradataSize)
+@@ -232,17 +239,20 @@
+ 
+ 	memset(&m_vorbis->op, 0, sizeof m_vorbis->op);
+ 
+-	m_numSamples = 4096 / m_channels;
++	m_numSamples = vorbis_info_blocksize(&m_vorbis->info, 1) / 2;
++	if (m_numSamples <= 0) return false;
+ 
+ 	return true;
+ }
+ bool OpusVorbisDecoder::openOpus(const WebMDemuxer &demuxer)
+ {
++	const double rate = demuxer.getSampleRate();
++	if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) return false;
+ 	int opusErr = 0;
+-	m_opus = opus_decoder_create(demuxer.getSampleRate(), m_channels, &opusErr);
+-	if (!opusErr)
+-	{
+-		m_numSamples = demuxer.getSampleRate() * 0.06 + 0.5; //Maximum frame size (for 60 ms frame)
++	m_opus = opus_decoder_create(int(rate), m_channels, &opusErr);
++	if (!opusErr && m_opus)
++	{
++		m_numSamples = rate * 0.12 + 0.5; // Maximum legal Opus packet duration, 120 ms.
+ 		return true;
+ 	}
+ 	return false;
+@@ -258,7 +268,12 @@
+ 			vorbis_dsp_clear(&m_vorbis->dspState);
+ 		vorbis_info_clear(&m_vorbis->info);
+ 		delete m_vorbis;
+-	}
+-	if (m_opus)
++		m_vorbis = NULL;
++	}
++	if (m_opus) {
+ 		opus_decoder_destroy(m_opus);
+-}
++		m_opus = NULL;
++	}
++	m_numSamples = 0;
++	m_channels = 0;
++}
+--- a/WebMDemuxer.cpp
++++ b/WebMDemuxer.cpp
+@@ -27,6 +27,7 @@
+ #include "mkvparser/mkvparser.h"
+ 
+ #include <assert.h>
++#include <limits.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -115,11 +116,15 @@
+ }
+ int WebMDemuxer::getWidth() const
+ {
+-	return m_videoTrack->GetWidth();
++	if (!m_videoTrack) return 0;
++	const long long value = m_videoTrack->GetWidth();
++	return value > 0 && value <= INT_MAX ? int(value) : 0;
+ }
+ int WebMDemuxer::getHeight() const
+ {
+-	return m_videoTrack->GetHeight();
++	if (!m_videoTrack) return 0;
++	const long long value = m_videoTrack->GetHeight();
++	return value > 0 && value <= INT_MAX ? int(value) : 0;
+ }
+ 
+ WebMDemuxer::AUDIO_CODEC WebMDemuxer::getAudioCodec() const
+@@ -136,7 +141,9 @@
+ }
+ int WebMDemuxer::getChannels() const
+ {
+-	return m_audioTrack->GetChannels();
++	if (!m_audioTrack) return 0;
++	const long long value = m_audioTrack->GetChannels();
++	return value > 0 && value <= INT_MAX ? int(value) : 0;
+ }
+ int WebMDemuxer::getAudioDepth() const
+ {
+@@ -162,6 +169,7 @@
+ 
+ 	if (!m_cluster)
+ 		m_cluster = m_segment->GetFirst();
++	if (!m_cluster || m_cluster->EOS()) { m_eos = true; return false; }
+ 
+ 	do
+ 	{
+@@ -220,18 +228,22 @@
+ 	const mkvparser::Block::Frame &blockFrame = m_block->GetFrame(m_blockFrameIndex++);
+ 	if (blockFrame.len > frame->bufferCapacity)
+ 	{
+-		unsigned char *newBuff = (unsigned char *)realloc(frame->buffer, frame->bufferCapacity = blockFrame.len);
++		unsigned char *newBuff = (unsigned char *)realloc(frame->buffer, blockFrame.len);
+ 		if (newBuff)
++		{
+ 			frame->buffer = newBuff;
++			frame->bufferCapacity = blockFrame.len;
++		}
+ 		else // Out of memory
+ 			return false;
+ 	}
++	if (blockFrame.len <= 0 || blockFrame.Read(m_reader, frame->buffer)) { m_eos = true; return false; }
+ 	frame->bufferSize = blockFrame.len;
+ 
+ 	frame->time = m_block->GetTime(m_cluster) / 1e9;
+ 	frame->key  = m_block->IsKey();
+ 
+-	return !blockFrame.Read(m_reader, frame->buffer);
++	return true;
+ }
+ 
+ inline bool WebMDemuxer::notSupportedTrackNumber(long videoTrackNumber, long audioTrackNumber) const

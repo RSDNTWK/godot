@@ -532,13 +532,18 @@ Error EditorExportPlatform::_encrypt_and_store_data(Ref<FileAccess> p_fd, const 
 	}
 
 	// Store file content.
-	ftmp->store_buffer(p_data.ptr(), p_data.size());
+	const bool stored = ftmp->store_buffer(p_data.ptr(), p_data.size());
+	Error write_error = ftmp->get_error();
 
 	if (fae.is_valid()) {
+		fae->close();
+		if (write_error == OK) {
+			write_error = fae->get_error();
+		}
 		ftmp.unref();
 		fae.unref();
 	}
-	return OK;
+	return write_error != OK ? write_error : (stored ? OK : ERR_FILE_CANT_WRITE);
 }
 
 struct PCKExportPackData : EditorExportPlatform::PackData {
@@ -2495,10 +2500,15 @@ bool EditorExportPlatform::_encrypt_and_store_directory(Ref<FileAccess> p_fd, Pa
 	}
 
 	if (fae.is_valid()) {
+		fae->close();
+		const Error write_error = fae->get_error();
 		fhead.unref();
 		fae.unref();
+		if (write_error != OK) {
+			return false;
+		}
 	}
-	return true;
+	return p_fd->get_error() == OK;
 }
 
 Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, Vector<SharedObject> *p_so_files, EditorExportSaveFunction p_save_func, EditorExportRemoveFunction p_remove_func, bool p_embed, int64_t *r_embedded_start, int64_t *r_embedded_size) {
@@ -2623,7 +2633,7 @@ Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, b
 	}
 	f->close();
 
-	return OK;
+	return f->get_error();
 }
 
 Error EditorExportPlatform::save_pack_patch(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, Vector<SharedObject> *p_so_files, bool p_embed, int64_t *r_embedded_start, int64_t *r_embedded_size) {

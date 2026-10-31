@@ -28,6 +28,7 @@
 #include <opus/opus.h>
 
 #include <string.h>
+#include <limits.h>
 
 struct VorbisDecoder
 {
@@ -43,18 +44,18 @@ struct VorbisDecoder
 
 OpusVorbisDecoder::OpusVorbisDecoder(const WebMDemuxer &demuxer) :
 	m_vorbis(NULL), m_opus(NULL),
-	m_numSamples(0)
+	m_numSamples(0), m_channels(0)
 {
 	switch (demuxer.getAudioCodec())
 	{
 		case WebMDemuxer::AUDIO_VORBIS:
 			m_channels = demuxer.getChannels();
-			if (openVorbis(demuxer))
+			if (m_channels > 0 && openVorbis(demuxer))
 				return;
 			break;
 		case WebMDemuxer::AUDIO_OPUS:
 			m_channels = demuxer.getChannels();
-			if (openOpus(demuxer))
+			if (m_channels > 0 && openOpus(demuxer))
 				return;
 			break;
 		default:
@@ -89,7 +90,9 @@ bool OpusVorbisDecoder::getPCMS16(WebMFrame &frame, short *buffer, int &numOutSa
 		float **pcm;
 		while ((samplesCount = vorbis_synthesis_pcmout(&m_vorbis->dspState, &pcm)))
 		{
-			const int toConvert = samplesCount <= maxSamples ? samplesCount : maxSamples;
+			const int remaining = maxSamples - count;
+			if (remaining <= 0) return false;
+			const int toConvert = samplesCount <= remaining ? samplesCount : remaining;
 			for (int c = 0; c < m_channels; ++c)
 			{
 				float *samples = pcm[c];
@@ -100,7 +103,7 @@ bool OpusVorbisDecoder::getPCMS16(WebMFrame &frame, short *buffer, int &numOutSa
 						sample = 32767;
 					else if (sample < -32768)
 						sample = -32768;
-					buffer[count + j] = sample;
+					buffer[count * m_channels + j] = sample;
 				}
 			}
 			vorbis_synthesis_read(&m_vorbis->dspState, toConvert);
@@ -137,11 +140,13 @@ bool OpusVorbisDecoder::getPCMF(WebMFrame &frame, float *buffer, int &numOutSamp
 		int samplesCount, count = 0;
 		float **pcm;
 		while ((samplesCount = vorbis_synthesis_pcmout(&m_vorbis->dspState, &pcm))) {
-			const int toConvert = samplesCount <= maxSamples ? samplesCount : maxSamples;
+			const int remaining = maxSamples - count;
+			if (remaining <= 0) return false;
+			const int toConvert = samplesCount <= remaining ? samplesCount : remaining;
 			for (int c = 0; c < m_channels; ++c) {
 				float *samples = pcm[c];
 				for (int i = 0, j = c; i < toConvert; ++i, j += m_channels) {
-					buffer[count + j] = samples[i];
+					buffer[count * m_channels + j] = samples[i];
 				}
 			}
 			vorbis_synthesis_read(&m_vorbis->dspState, toConvert);
@@ -166,7 +171,7 @@ bool OpusVorbisDecoder::openVorbis(const WebMDemuxer &demuxer)
 	size_t extradataSize = 0;
 	const unsigned char *extradata = demuxer.getAudioExtradata(extradataSize);
 
-	if (extradataSize < 3 || !extradata || extradata[0] != 2)
+	if (extradataSize < 3 || extradataSize > LONG_MAX || !extradata || extradata[0] != 2)
 		return false;
 
 	size_t headerSize[3] = {0};
@@ -179,11 +184,13 @@ bool OpusVorbisDecoder::openVorbis(const WebMDemuxer &demuxer)
 		{
 			if (offset >= extradataSize)
 				return false;
+			if (extradata[offset] > extradataSize - headerSize[i]) return false;
 			headerSize[i] += extradata[offset];
 			if (extradata[offset++] < 0xFF)
 				break;
 		}
 	}
+	if (headerSize[0] > extradataSize - offset || headerSize[1] > extradataSize - offset - headerSize[0]) return false;
 	headerSize[2] = extradataSize - (headerSize[0] + headerSize[1] + offset);
 
 	if (headerSize[0] + headerSize[1] + headerSize[2] + offset != extradataSize)
@@ -232,17 +239,20 @@ bool OpusVorbisDecoder::openVorbis(const WebMDemuxer &demuxer)
 
 	memset(&m_vorbis->op, 0, sizeof m_vorbis->op);
 
-	m_numSamples = 4096 / m_channels;
+	m_numSamples = vorbis_info_blocksize(&m_vorbis->info, 1) / 2;
+	if (m_numSamples <= 0) return false;
 
 	return true;
 }
 bool OpusVorbisDecoder::openOpus(const WebMDemuxer &demuxer)
 {
+	const double rate = demuxer.getSampleRate();
+	if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) return false;
 	int opusErr = 0;
-	m_opus = opus_decoder_create(demuxer.getSampleRate(), m_channels, &opusErr);
-	if (!opusErr)
+	m_opus = opus_decoder_create(int(rate), m_channels, &opusErr);
+	if (!opusErr && m_opus)
 	{
-		m_numSamples = demuxer.getSampleRate() * 0.06 + 0.5; //Maximum frame size (for 60 ms frame)
+		m_numSamples = rate * 0.12 + 0.5; // Maximum legal Opus packet duration, 120 ms.
 		return true;
 	}
 	return false;
@@ -258,7 +268,12 @@ void OpusVorbisDecoder::close()
 			vorbis_dsp_clear(&m_vorbis->dspState);
 		vorbis_info_clear(&m_vorbis->info);
 		delete m_vorbis;
+		m_vorbis = NULL;
 	}
-	if (m_opus)
+	if (m_opus) {
 		opus_decoder_destroy(m_opus);
+		m_opus = NULL;
+	}
+	m_numSamples = 0;
+	m_channels = 0;
 }

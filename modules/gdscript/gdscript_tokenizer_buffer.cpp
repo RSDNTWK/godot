@@ -326,8 +326,11 @@ Vector<uint8_t> GDScriptTokenizerBuffer::parse_code_string(const String &p_code,
 		// Objects cannot be constant, never encode objects.
 		Error err = encode_variant(v, nullptr, len, false);
 		ERR_FAIL_COND_V_MSG(err != OK, Vector<uint8_t>(), "Error when trying to encode Variant.");
-		contents.resize(buf_pos + len);
-		encode_variant(v, &contents.write[buf_pos], len, false);
+		ERR_FAIL_COND_V(buf_pos < 0 || int64_t(buf_pos) + len > INT_MAX, Vector<uint8_t>());
+		err = contents.resize(int64_t(buf_pos) + len);
+		ERR_FAIL_COND_V(err != OK, Vector<uint8_t>());
+		err = encode_variant(v, &contents.write[buf_pos], len, false, 0, len);
+		ERR_FAIL_COND_V(err != OK, Vector<uint8_t>());
 		buf_pos += len;
 	}
 

@@ -1,0 +1,326 @@
+--- a/lib/texture1.c
++++ b/lib/texture1.c
+@@ -1468,28 +1468,142 @@
+  * these functions.
+  */
+ 
++/* -- GODOT begin --
++ * Match the base-pointer vtable signatures without incompatible function calls.
++ */
++
++static void KTX_APIENTRY
++ktxTexture1_DestroyDispatch(ktxTexture* This)
++{
++    ktxTexture1_Destroy((ktxTexture1*)This);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_GetImageOffsetDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, ktx_size_t* pOffset)
++{
++    return ktxTexture1_GetImageOffset((ktxTexture1*)This, level, layer, faceSlice, pOffset);
++}
++
++static ktx_size_t KTX_APIENTRY
++ktxTexture1_GetDataSizeUncompressedDispatch(ktxTexture* This)
++{
++    return ktxTexture1_GetDataSizeUncompressed((ktxTexture1*)This);
++}
++
++static ktx_size_t KTX_APIENTRY
++ktxTexture1_GetImageSizeDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture1_GetImageSize((ktxTexture1*)This, level);
++}
++
++static ktx_size_t KTX_APIENTRY
++ktxTexture1_GetLevelSizeDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture1_GetLevelSize((ktxTexture1*)This, level);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_IterateLevelsDispatch(ktxTexture* This, PFNKTXITERCB iterCb, void* userdata)
++{
++    return ktxTexture1_IterateLevels((ktxTexture1*)This, iterCb, userdata);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_IterateLoadLevelFacesDispatch(ktxTexture* This, PFNKTXITERCB iterCb, void* userdata)
++{
++    return ktxTexture1_IterateLoadLevelFaces((ktxTexture1*)This, iterCb, userdata);
++}
++
++static ktx_bool_t KTX_APIENTRY
++ktxTexture1_NeedsTranscodingDispatch(ktxTexture* This)
++{
++    return ktxTexture1_NeedsTranscoding((ktxTexture1*)This);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_LoadImageDataDispatch(ktxTexture* This, ktx_uint8_t* pBuffer, ktx_size_t bufSize)
++{
++    return ktxTexture1_LoadImageData((ktxTexture1*)This, pBuffer, bufSize);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_SetImageFromMemoryDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, const ktx_uint8_t* src, ktx_size_t srcSize)
++{
++    return ktxTexture1_SetImageFromMemory((ktxTexture1*)This, level, layer, faceSlice, src, srcSize);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_SetImageFromStdioStreamDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, FILE* src, ktx_size_t srcSize)
++{
++    return ktxTexture1_SetImageFromStdioStream((ktxTexture1*)This, level, layer, faceSlice, src, srcSize);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_WriteToStdioStreamDispatch(ktxTexture* This, FILE* dststr)
++{
++    return ktxTexture1_WriteToStdioStream((ktxTexture1*)This, dststr);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_WriteToNamedFileDispatch(ktxTexture* This, const char* const dstname)
++{
++    return ktxTexture1_WriteToNamedFile((ktxTexture1*)This, dstname);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_WriteToMemoryDispatch(ktxTexture* This, ktx_uint8_t** bytes, ktx_size_t* size)
++{
++    return ktxTexture1_WriteToMemory((ktxTexture1*)This, bytes, size);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture1_WriteToStreamDispatch(ktxTexture* This, ktxStream* dststr)
++{
++    return ktxTexture1_WriteToStream((ktxTexture1*)This, dststr);
++}
++
++static ktx_size_t
++ktxTexture1_calcDataSizeLevelsDispatch(ktxTexture* This, ktx_uint32_t levels)
++{
++    return ktxTexture1_calcDataSizeLevels((ktxTexture1*)This, levels);
++}
++
++static ktx_size_t
++ktxTexture1_calcFaceLodSizeDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture1_calcFaceLodSize((ktxTexture1*)This, level);
++}
++
++static ktx_size_t
++ktxTexture1_calcLevelOffsetDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture1_calcLevelOffset((ktxTexture1*)This, level);
++}
++
++/* -- GODOT end -- */
++
+ struct ktxTexture_vtblInt ktxTexture1_vtblInt = {
+-    (PFNCALCDATASIZELEVELS)ktxTexture1_calcDataSizeLevels,
+-    (PFNCALCFACELODSIZE)ktxTexture1_calcFaceLodSize,
+-    (PFNCALCLEVELOFFSET)ktxTexture1_calcLevelOffset
++    ktxTexture1_calcDataSizeLevelsDispatch,
++    ktxTexture1_calcFaceLodSizeDispatch,
++    ktxTexture1_calcLevelOffsetDispatch
+ };
+ 
+ struct ktxTexture_vtbl ktxTexture1_vtbl = {
+-    (PFNKTEXDESTROY)ktxTexture1_Destroy,
+-    (PFNKTEXGETIMAGEOFFSET)ktxTexture1_GetImageOffset,
+-    (PFNKTEXGETDATASIZEUNCOMPRESSED)ktxTexture1_GetDataSizeUncompressed,
+-    (PFNKTEXGETIMAGESIZE)ktxTexture1_GetImageSize,
+-    (PFNKTEXGETLEVELSIZE)ktxTexture1_GetLevelSize,
+-    (PFNKTEXITERATELEVELS)ktxTexture1_IterateLevels,
+-    (PFNKTEXITERATELOADLEVELFACES)ktxTexture1_IterateLoadLevelFaces,
+-    (PFNKTEXNEEDSTRANSCODING)ktxTexture1_NeedsTranscoding,
+-    (PFNKTEXLOADIMAGEDATA)ktxTexture1_LoadImageData,
+-    (PFNKTEXSETIMAGEFROMMEMORY)ktxTexture1_SetImageFromMemory,
+-    (PFNKTEXSETIMAGEFROMSTDIOSTREAM)ktxTexture1_SetImageFromStdioStream,
+-    (PFNKTEXWRITETOSTDIOSTREAM)ktxTexture1_WriteToStdioStream,
+-    (PFNKTEXWRITETONAMEDFILE)ktxTexture1_WriteToNamedFile,
+-    (PFNKTEXWRITETOMEMORY)ktxTexture1_WriteToMemory,
+-    (PFNKTEXWRITETOSTREAM)ktxTexture1_WriteToStream,
++    ktxTexture1_DestroyDispatch,
++    ktxTexture1_GetImageOffsetDispatch,
++    ktxTexture1_GetDataSizeUncompressedDispatch,
++    ktxTexture1_GetImageSizeDispatch,
++    ktxTexture1_GetLevelSizeDispatch,
++    ktxTexture1_IterateLevelsDispatch,
++    ktxTexture1_IterateLoadLevelFacesDispatch,
++    ktxTexture1_NeedsTranscodingDispatch,
++    ktxTexture1_LoadImageDataDispatch,
++    ktxTexture1_SetImageFromMemoryDispatch,
++    ktxTexture1_SetImageFromStdioStreamDispatch,
++    ktxTexture1_WriteToStdioStreamDispatch,
++    ktxTexture1_WriteToNamedFileDispatch,
++    ktxTexture1_WriteToMemoryDispatch,
++    ktxTexture1_WriteToStreamDispatch,
+ };
+ 
+ /** @} */
+--- a/lib/texture2.c
++++ b/lib/texture2.c
+@@ -3015,28 +3015,142 @@
+  * the virtual functions.
+  */
+ 
++/* -- GODOT begin --
++ * Match the base-pointer vtable signatures without incompatible function calls.
++ */
++
++static void KTX_APIENTRY
++ktxTexture2_DestroyDispatch(ktxTexture* This)
++{
++    ktxTexture2_Destroy((ktxTexture2*)This);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_GetImageOffsetDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, ktx_size_t* pOffset)
++{
++    return ktxTexture2_GetImageOffset((ktxTexture2*)This, level, layer, faceSlice, pOffset);
++}
++
++static ktx_size_t KTX_APIENTRY
++ktxTexture2_GetDataSizeUncompressedDispatch(ktxTexture* This)
++{
++    return ktxTexture2_GetDataSizeUncompressed((ktxTexture2*)This);
++}
++
++static ktx_size_t KTX_APIENTRY
++ktxTexture2_GetImageSizeDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture2_GetImageSize((ktxTexture2*)This, level);
++}
++
++static ktx_size_t KTX_APIENTRY
++ktxTexture2_GetLevelSizeDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture2_GetLevelSize((ktxTexture2*)This, level);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_IterateLevelsDispatch(ktxTexture* This, PFNKTXITERCB iterCb, void* userdata)
++{
++    return ktxTexture2_IterateLevels((ktxTexture2*)This, iterCb, userdata);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_IterateLoadLevelFacesDispatch(ktxTexture* This, PFNKTXITERCB iterCb, void* userdata)
++{
++    return ktxTexture2_IterateLoadLevelFaces((ktxTexture2*)This, iterCb, userdata);
++}
++
++static ktx_bool_t KTX_APIENTRY
++ktxTexture2_NeedsTranscodingDispatch(ktxTexture* This)
++{
++    return ktxTexture2_NeedsTranscoding((ktxTexture2*)This);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_LoadImageDataDispatch(ktxTexture* This, ktx_uint8_t* pBuffer, ktx_size_t bufSize)
++{
++    return ktxTexture2_LoadImageData((ktxTexture2*)This, pBuffer, bufSize);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_SetImageFromMemoryDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, const ktx_uint8_t* src, ktx_size_t srcSize)
++{
++    return ktxTexture2_SetImageFromMemory((ktxTexture2*)This, level, layer, faceSlice, src, srcSize);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_SetImageFromStdioStreamDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, FILE* src, ktx_size_t srcSize)
++{
++    return ktxTexture2_SetImageFromStdioStream((ktxTexture2*)This, level, layer, faceSlice, src, srcSize);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_WriteToStdioStreamDispatch(ktxTexture* This, FILE* dststr)
++{
++    return ktxTexture2_WriteToStdioStream((ktxTexture2*)This, dststr);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_WriteToNamedFileDispatch(ktxTexture* This, const char* const dstname)
++{
++    return ktxTexture2_WriteToNamedFile((ktxTexture2*)This, dstname);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_WriteToMemoryDispatch(ktxTexture* This, ktx_uint8_t** bytes, ktx_size_t* size)
++{
++    return ktxTexture2_WriteToMemory((ktxTexture2*)This, bytes, size);
++}
++
++static KTX_error_code KTX_APIENTRY
++ktxTexture2_WriteToStreamDispatch(ktxTexture* This, ktxStream* dststr)
++{
++    return ktxTexture2_WriteToStream((ktxTexture2*)This, dststr);
++}
++
++static ktx_size_t
++ktxTexture2_calcDataSizeLevelsDispatch(ktxTexture* This, ktx_uint32_t levels)
++{
++    return ktxTexture2_calcDataSizeLevels((ktxTexture2*)This, levels);
++}
++
++static ktx_size_t
++ktxTexture2_calcFaceLodSizeDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture2_calcFaceLodSize((ktxTexture2*)This, level);
++}
++
++static ktx_size_t
++ktxTexture2_calcLevelOffsetDispatch(ktxTexture* This, ktx_uint32_t level)
++{
++    return ktxTexture2_calcLevelOffset((ktxTexture2*)This, level);
++}
++
++/* -- GODOT end -- */
++
+ struct ktxTexture_vtblInt ktxTexture2_vtblInt = {
+-    (PFNCALCDATASIZELEVELS)ktxTexture2_calcDataSizeLevels,
+-    (PFNCALCFACELODSIZE)ktxTexture2_calcFaceLodSize,
+-    (PFNCALCLEVELOFFSET)ktxTexture2_calcLevelOffset
++    ktxTexture2_calcDataSizeLevelsDispatch,
++    ktxTexture2_calcFaceLodSizeDispatch,
++    ktxTexture2_calcLevelOffsetDispatch
+ };
+ 
+ struct ktxTexture_vtbl ktxTexture2_vtbl = {
+-    (PFNKTEXDESTROY)ktxTexture2_Destroy,
+-    (PFNKTEXGETIMAGEOFFSET)ktxTexture2_GetImageOffset,
+-    (PFNKTEXGETDATASIZEUNCOMPRESSED)ktxTexture2_GetDataSizeUncompressed,
+-    (PFNKTEXGETIMAGESIZE)ktxTexture2_GetImageSize,
+-    (PFNKTEXGETLEVELSIZE)ktxTexture2_GetLevelSize,
+-    (PFNKTEXITERATELEVELS)ktxTexture2_IterateLevels,
+-    (PFNKTEXITERATELOADLEVELFACES)ktxTexture2_IterateLoadLevelFaces,
+-    (PFNKTEXNEEDSTRANSCODING)ktxTexture2_NeedsTranscoding,
+-    (PFNKTEXLOADIMAGEDATA)ktxTexture2_LoadImageData,
+-    (PFNKTEXSETIMAGEFROMMEMORY)ktxTexture2_SetImageFromMemory,
+-    (PFNKTEXSETIMAGEFROMSTDIOSTREAM)ktxTexture2_SetImageFromStdioStream,
+-    (PFNKTEXWRITETOSTDIOSTREAM)ktxTexture2_WriteToStdioStream,
+-    (PFNKTEXWRITETONAMEDFILE)ktxTexture2_WriteToNamedFile,
+-    (PFNKTEXWRITETOMEMORY)ktxTexture2_WriteToMemory,
+-    (PFNKTEXWRITETOSTREAM)ktxTexture2_WriteToStream,
++    ktxTexture2_DestroyDispatch,
++    ktxTexture2_GetImageOffsetDispatch,
++    ktxTexture2_GetDataSizeUncompressedDispatch,
++    ktxTexture2_GetImageSizeDispatch,
++    ktxTexture2_GetLevelSizeDispatch,
++    ktxTexture2_IterateLevelsDispatch,
++    ktxTexture2_IterateLoadLevelFacesDispatch,
++    ktxTexture2_NeedsTranscodingDispatch,
++    ktxTexture2_LoadImageDataDispatch,
++    ktxTexture2_SetImageFromMemoryDispatch,
++    ktxTexture2_SetImageFromStdioStreamDispatch,
++    ktxTexture2_WriteToStdioStreamDispatch,
++    ktxTexture2_WriteToNamedFileDispatch,
++    ktxTexture2_WriteToMemoryDispatch,
++    ktxTexture2_WriteToStreamDispatch,
+ };
+ 
+ /** @} */

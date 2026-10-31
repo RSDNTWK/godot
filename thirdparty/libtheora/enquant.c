@@ -230,7 +230,7 @@ int oc_enc_quantize_c(ogg_int16_t _qdct[64],const ogg_int16_t _dct[64],
   for(zzi=0;zzi<64;zzi++){
     val=_dct[zzi];
     d=_dequant[zzi];
-    val=val<<1;
+    val=2*val;
     if(abs(val)>=d){
       s=OC_SIGNMASK(val);
       /*The bias added here rounds ties away from zero, since token

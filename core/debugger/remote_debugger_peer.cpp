@@ -114,8 +114,9 @@ void RemoteDebuggerPeerTCP::_write_out() {
 			int size = 0;
 			Error err = encode_variant(var, nullptr, size);
 			ERR_CONTINUE(err != OK || size > out_buf.size() - 4); // 4 bytes separator.
+			err = encode_variant(var, buf + 4, size, false, 0, MIN(out_buf.size() - 4, int64_t(INT_MAX)));
+			ERR_CONTINUE(err != OK);
 			encode_uint32(size, buf);
-			encode_variant(var, buf + 4, size);
 			out_left = size + 4;
 			out_pos = 0;
 		}

@@ -269,6 +269,9 @@ void FileAccessWindows::_close() {
 		}
 
 		if (rename_error) {
+			if (last_error == OK || last_error == ERR_FILE_EOF) {
+				last_error = ERR_FILE_CANT_WRITE;
+			}
 			if (close_fail_notify) {
 				close_fail_notify(save_path);
 			}

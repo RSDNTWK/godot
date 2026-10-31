@@ -33,6 +33,7 @@ env_mbed_tls.add_source_files(module_obj, "*.cpp")
 
 if env["tests"]:
     env_mbed_tls.add_source_files(module_obj, "./tests/*.cpp")
+    env_mbed_tls.add_source_files(module_obj, "./tests/*.c")
 
 env.modules_sources += module_obj
 

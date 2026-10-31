@@ -63,7 +63,7 @@ Ref<MultiplayerAPI> MultiplayerAPI::create_default_interface() {
 #define ENCODE_16 1 << 6
 #define ENCODE_32 2 << 6
 #define ENCODE_64 3 << 6
-Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint8_t *r_buffer, int &r_len, bool p_allow_object_decoding) {
+Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint8_t *r_buffer, int &r_len, bool p_allow_object_decoding, int p_capacity) {
 	// Unreachable because `VARIANT_MAX` == 38 and `ENCODE_VARIANT_MASK` == 77
 	CRASH_COND(p_variant.get_type() > VARIANT_META_TYPE_MASK);
 
@@ -73,6 +73,7 @@ Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint
 
 	switch (p_variant.get_type()) {
 		case Variant::BOOL: {
+			ERR_FAIL_COND_V(p_capacity < 1, ERR_OUT_OF_MEMORY);
 			if (buf) {
 				// We don't use encode_mode for booleans, so we can use it to store the value.
 				buf[0] = (p_variant.operator bool()) ? (1 << 7) : 0;
@@ -81,6 +82,7 @@ Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint
 			r_len += 1;
 		} break;
 		case Variant::INT: {
+			ERR_FAIL_COND_V(p_capacity < 1, ERR_OUT_OF_MEMORY);
 			if (buf) {
 				// Reserve the first byte for the meta.
 				buf += 1;
@@ -90,6 +92,7 @@ Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint
 			if (val <= (int64_t)INT8_MAX && val >= (int64_t)INT8_MIN) {
 				// Use 8 bit
 				encode_mode = ENCODE_8;
+				ERR_FAIL_COND_V(p_capacity < 2, ERR_OUT_OF_MEMORY);
 				if (buf) {
 					buf[0] = val;
 				}
@@ -97,6 +100,7 @@ Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint
 			} else if (val <= (int64_t)INT16_MAX && val >= (int64_t)INT16_MIN) {
 				// Use 16 bit
 				encode_mode = ENCODE_16;
+				ERR_FAIL_COND_V(p_capacity < 3, ERR_OUT_OF_MEMORY);
 				if (buf) {
 					encode_uint16(val, buf);
 				}
@@ -104,6 +108,7 @@ Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint
 			} else if (val <= (int64_t)INT32_MAX && val >= (int64_t)INT32_MIN) {
 				// Use 32 bit
 				encode_mode = ENCODE_32;
+				ERR_FAIL_COND_V(p_capacity < 5, ERR_OUT_OF_MEMORY);
 				if (buf) {
 					encode_uint32(val, buf);
 				}
@@ -111,6 +116,7 @@ Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint
 			} else {
 				// Use 64 bit
 				encode_mode = ENCODE_64;
+				ERR_FAIL_COND_V(p_capacity < 9, ERR_OUT_OF_MEMORY);
 				if (buf) {
 					encode_uint64(val, buf);
 				}
@@ -124,7 +130,7 @@ Error MultiplayerAPI::encode_and_compress_variant(const Variant &p_variant, uint
 		} break;
 		default:
 			// Any other case is not yet compressed.
-			Error err = encode_variant(p_variant, r_buffer, r_len, p_allow_object_decoding);
+			Error err = encode_variant(p_variant, r_buffer, r_len, p_allow_object_decoding, 0, p_capacity);
 			if (err != OK) {
 				return err;
 			}
@@ -206,7 +212,7 @@ Error MultiplayerAPI::decode_and_decompress_variant(Variant &r_variant, const ui
 	return OK;
 }
 
-Error MultiplayerAPI::encode_and_compress_variants(const Variant **p_variants, int p_count, uint8_t *p_buffer, int &r_len, bool *r_raw, bool p_allow_object_decoding) {
+Error MultiplayerAPI::encode_and_compress_variants(const Variant **p_variants, int p_count, uint8_t *p_buffer, int &r_len, bool *r_raw, bool p_allow_object_decoding, int p_capacity) {
 	r_len = 0;
 	int size = 0;
 
@@ -224,12 +230,14 @@ Error MultiplayerAPI::encode_and_compress_variants(const Variant **p_variants, i
 		if (v.get_type() == Variant::PACKED_BYTE_ARRAY) {
 			*r_raw = true;
 			const PackedByteArray pba = v;
+			ERR_FAIL_COND_V(pba.size() > INT_MAX || pba.size() > p_capacity, ERR_OUT_OF_MEMORY);
 			if (p_buffer) {
 				memcpy(p_buffer, pba.ptr(), pba.size());
 			}
 			r_len += pba.size();
 		} else {
-			encode_and_compress_variant(v, p_buffer, size, p_allow_object_decoding);
+			const Error err = encode_and_compress_variant(v, p_buffer, size, p_allow_object_decoding, p_capacity);
+			ERR_FAIL_COND_V(err != OK, err);
 			r_len += size;
 		}
 		return OK;
@@ -238,7 +246,8 @@ Error MultiplayerAPI::encode_and_compress_variants(const Variant **p_variants, i
 	// Regular encoding.
 	for (int i = 0; i < p_count; i++) {
 		const Variant &v = *(p_variants[i]);
-		encode_and_compress_variant(v, p_buffer ? p_buffer + r_len : nullptr, size, p_allow_object_decoding);
+		const Error err = encode_and_compress_variant(v, p_buffer ? p_buffer + r_len : nullptr, size, p_allow_object_decoding, p_capacity - r_len);
+		ERR_FAIL_COND_V(err != OK, err);
 		r_len += size;
 	}
 	return OK;

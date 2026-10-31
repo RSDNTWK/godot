@@ -54,9 +54,9 @@ public:
 	static void set_default_interface(const StringName &p_interface);
 	static StringName get_default_interface();
 
-	static Error encode_and_compress_variant(const Variant &p_variant, uint8_t *p_buffer, int &r_len, bool p_allow_object_decoding);
+	static Error encode_and_compress_variant(const Variant &p_variant, uint8_t *p_buffer, int &r_len, bool p_allow_object_decoding, int p_capacity = INT_MAX);
 	static Error decode_and_decompress_variant(Variant &r_variant, const uint8_t *p_buffer, int p_len, int *r_len, bool p_allow_object_decoding);
-	static Error encode_and_compress_variants(const Variant **p_variants, int p_count, uint8_t *p_buffer, int &r_len, bool *r_raw = nullptr, bool p_allow_object_decoding = false);
+	static Error encode_and_compress_variants(const Variant **p_variants, int p_count, uint8_t *p_buffer, int &r_len, bool *r_raw = nullptr, bool p_allow_object_decoding = false, int p_capacity = INT_MAX);
 	static Error decode_and_decompress_variants(Vector<Variant> &r_variants, const uint8_t *p_buffer, int p_len, int &r_len, bool p_raw = false, bool p_allow_object_decoding = false);
 
 	virtual Error poll() = 0;

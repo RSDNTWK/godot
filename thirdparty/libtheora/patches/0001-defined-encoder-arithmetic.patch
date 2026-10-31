@@ -1,0 +1,230 @@
+--- a/thirdparty/libtheora/analyze.c
++++ b/thirdparty/libtheora/analyze.c
+@@ -1211,13 +1211,13 @@
+       s=src+frag_offs-1;
+       for(i=0;i<8;i++){
+         for(j=0;j<8;j++){
+-          e1+=abs((s[j+2]-s[j]<<1)+(s-ystride)[j+2]-(s-ystride)[j]
++          e1+=abs((2*(s[j+2]-s[j]))+(s-ystride)[j+2]-(s-ystride)[j]
+            +(s+ystride)[j+2]-(s+ystride)[j]);
+-          e2+=abs(((s+ystride)[j+1]-(s-ystride)[j+1]<<1)
++          e2+=abs((2*((s+ystride)[j+1]-(s-ystride)[j+1]))
+            +(s+ystride)[j]-(s-ystride)[j]+(s+ystride)[j+2]-(s-ystride)[j+2]);
+-          e3+=abs(((s+ystride)[j+2]-(s-ystride)[j]<<1)
++          e3+=abs((2*((s+ystride)[j+2]-(s-ystride)[j]))
+            +(s+ystride)[j+1]-s[j]+s[j+2]-(s-ystride)[j+1]);
+-          e4+=abs(((s+ystride)[j]-(s-ystride)[j+2]<<1)
++          e4+=abs((2*((s+ystride)[j]-(s-ystride)[j+2]))
+            +(s+ystride)[j+1]-s[j+2]+s[j]-(s-ystride)[j+1]);
+         }
+         s+=ystride;
+--- a/thirdparty/libtheora/tokenize.c
++++ b/thirdparty/libtheora/tokenize.c
+@@ -459,9 +459,9 @@
+  const ogg_uint16_t *_dequant,const ogg_int16_t *_dct,
+  int _zzi,oc_token_checkpoint **_stack,int _lambda,int _acmin){
+   oc_token_checkpoint *stack;
+-  ogg_int64_t          zflags;
+-  ogg_int64_t          nzflags;
+-  ogg_int64_t          best_flags;
++  ogg_uint64_t         zflags;
++  ogg_uint64_t         nzflags;
++  ogg_uint64_t         best_flags;
+   ogg_uint32_t         d2_accum[64];
+   oc_quant_token       tokens[64][2];
+   ogg_uint16_t        *eob_run;
+@@ -639,7 +639,7 @@
+       tokens[zzi][0].cost=best_cost;
+       tokens[zzi][0].bits=best_bits;
+       tokens[zzi][0].qc=best_qc;
+-      zflags|=(ogg_int64_t)1<<zzi;
++      zflags|=(ogg_uint64_t)1<<zzi;
+       if(qc_m){
+         dq=_dequant[zzi];
+         if(zzi<_acmin)_lambda=0;
+@@ -656,9 +656,9 @@
+         tokens[zzi][1].cost=d2+_lambda*bits+tokens[zzj][tj].cost;
+         tokens[zzi][1].bits=bits+tokens[zzj][tj].bits;
+         tokens[zzi][1].qc=1+s^s;
+-        nzflags|=(ogg_int64_t)1<<zzi;
++        nzflags|=(ogg_uint64_t)1<<zzi;
+         best_flags|=
+-         (ogg_int64_t)(tokens[zzi][1].cost<tokens[zzi][0].cost)<<zzi;
++         (ogg_uint64_t)(tokens[zzi][1].cost<tokens[zzi][0].cost)<<zzi;
+       }
+     }
+     else{
+@@ -694,8 +694,8 @@
+       tokens[zzi][1].cost=best_cost+tokens[zzj][tj].cost;
+       tokens[zzi][1].bits=best_bits+tokens[zzj][tj].bits;
+       tokens[zzi][1].qc=qc;
+-      nzflags|=(ogg_int64_t)1<<zzi;
+-      best_flags|=(ogg_int64_t)1<<zzi;
++      nzflags|=(ogg_uint64_t)1<<zzi;
++      best_flags|=(ogg_uint64_t)1<<zzi;
+     }
+     zzj=zzi;
+   }
+--- a/thirdparty/libtheora/enquant.c
++++ b/thirdparty/libtheora/enquant.c
+@@ -230,7 +230,7 @@
+   for(zzi=0;zzi<64;zzi++){
+     val=_dct[zzi];
+     d=_dequant[zzi];
+-    val=val<<1;
++    val=2*val;
+     if(abs(val)>=d){
+       s=OC_SIGNMASK(val);
+       /*The bias added here rounds ties away from zero, since token
+--- a/thirdparty/libtheora/mcenc.c
++++ b/thirdparty/libtheora/mcenc.c
+@@ -502,14 +502,14 @@
+   candy=best_vec[1];
+   embs[_mbi].satd[_frame]=oc_mcenc_ysatd_check_mbcandidate_fullpel(_enc,
+    frag_buf_offs,fragis,candx,candy,src,satd_ref,ystride);
+-  embs[_mbi].analysis_mv[0][_frame]=OC_MV(candx<<1,candy<<1);
++  embs[_mbi].analysis_mv[0][_frame]=OC_MV(2*candx,2*candy);
+   if(_frame==OC_FRAME_PREV&&_enc->sp_level<OC_SP_LEVEL_FAST_ANALYSIS){
+     for(bi=0;bi<4;bi++){
+       candx=best_block_vec[bi][0];
+       candy=best_block_vec[bi][1];
+       embs[_mbi].block_satd[bi]=oc_mcenc_ysatd_check_bcandidate_fullpel(_enc,
+        frag_buf_offs[fragis[bi]],candx,candy,src,satd_ref,ystride);
+-      embs[_mbi].block_mv[bi]=OC_MV(candx<<1,candy<<1);
++      embs[_mbi].block_mv[bi]=OC_MV(2*candx,2*candy);
+     }
+   }
+ }
+@@ -583,11 +583,11 @@
+     dy=OC_SQUARE_DY[site];
+     /*The following code SHOULD be equivalent to
+         oc_state_get_mv_offsets(&_mcenc->enc.state,&mvoffset0,&mvoffset1,
+-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy,ref_ystride,0);
++         (2*_vec[0])+dx,(2*_vec[1])+dy,ref_ystride,0);
+       However, it should also be much faster, as it involves no multiplies and
+        doesn't have to handle chroma vectors.*/
+-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
+-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
++    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
++    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
+     mvoffset0=mvoffset_base+(dx&xmask)+(offset_y[site]&ymask);
+     mvoffset1=mvoffset_base+(dx&~xmask)+(offset_y[site]&~ymask);
+     err=oc_sad16_halfpel(_enc,frag_buf_offs,fragis,
+@@ -597,8 +597,8 @@
+       best_site=site;
+     }
+   }
+-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
+-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
++  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
++  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
+   return _best_err;
+ }
+ #endif
+@@ -638,11 +638,11 @@
+     dy=OC_SQUARE_DY[site];
+     /*The following code SHOULD be equivalent to
+         oc_state_get_mv_offsets(&_mcenc->enc.state,&mvoffset0,&mvoffset1,
+-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy,ref_ystride,0);
++         (2*_vec[0])+dx,(2*_vec[1])+dy,ref_ystride,0);
+       However, it should also be much faster, as it involves no multiplies and
+        doesn't have to handle chroma vectors.*/
+-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
+-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
++    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
++    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
+     mvoffset0=mvoffset_base+(dx&xmask)+(offset_y[site]&ymask);
+     mvoffset1=mvoffset_base+(dx&~xmask)+(offset_y[site]&~ymask);
+     if(_enc->sp_level<OC_SP_LEVEL_NOSATD){
+@@ -658,8 +658,8 @@
+       best_site=site;
+     }
+   }
+-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
+-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
++  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
++  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
+   return _best_err;
+ }
+ 
+@@ -697,11 +697,11 @@
+     dy=OC_SQUARE_DY[site];
+     /*The following code SHOULD be equivalent to
+         oc_state_get_mv_offsets(&_mcenc->enc.state,&mvoffset0,&mvoffset1,
+-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy,ref_ystride,0);
++         (2*_vec[0])+dx,(2*_vec[1])+dy,ref_ystride,0);
+       However, it should also be much faster, as it involves no multiplies and
+        doesn't have to handle chroma vectors.*/
+-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
+-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
++    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
++    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
+     mvoffset0=mvoffset_base+(dx&xmask)+(_offset_y[site]&ymask);
+     mvoffset1=mvoffset_base+(dx&~xmask)+(_offset_y[site]&~ymask);
+     err=oc_enc_frag_sad2_thresh(_enc,_src,
+@@ -711,8 +711,8 @@
+       best_site=site;
+     }
+   }
+-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
+-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
++  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
++  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
+   return _best_err;
+ }
+ #endif
+@@ -740,11 +740,11 @@
+     dy=OC_SQUARE_DY[site];
+     /*The following code SHOULD be equivalent to
+         oc_state_get_mv_offsets(&_enc->state,&mvoffsets,0,
+-         (_vec[0]<<1)+dx,(_vec[1]<<1)+dy);
++         (2*_vec[0])+dx,(2*_vec[1])+dy);
+       However, it should also be much faster, as it involves no multiplies and
+        doesn't have to handle chroma vectors.*/
+-    xmask=OC_SIGNMASK(((_vec[0]<<1)+dx)^dx);
+-    ymask=OC_SIGNMASK(((_vec[1]<<1)+dy)^dy);
++    xmask=OC_SIGNMASK(((2*_vec[0])+dx)^dx);
++    ymask=OC_SIGNMASK(((2*_vec[1])+dy)^dy);
+     mvoffset0=mvoffset_base+(dx&xmask)+(_offset_y[site]&ymask);
+     mvoffset1=mvoffset_base+(dx&~xmask)+(_offset_y[site]&~ymask);
+     err=oc_enc_frag_satd2(_enc,&dc,_src,
+@@ -755,8 +755,8 @@
+       best_site=site;
+     }
+   }
+-  _vec[0]=(_vec[0]<<1)+OC_SQUARE_DX[best_site];
+-  _vec[1]=(_vec[1]<<1)+OC_SQUARE_DY[best_site];
++  _vec[0]=(2*_vec[0])+OC_SQUARE_DX[best_site];
++  _vec[1]=(2*_vec[1])+OC_SQUARE_DY[best_site];
+   return _best_err;
+ }
+ 
+--- a/thirdparty/libtheora/fdct.c
++++ b/thirdparty/libtheora/fdct.c
+@@ -133,7 +133,7 @@
+   int                i;
+   /*Add two extra bits of working precision to improve accuracy; any more and
+      we could overflow.*/
+-  for(i=0;i<64;i++)w[i]=_x[i]<<2;
++  for(i=0;i<64;i++)w[i]=4*_x[i];
+   /*These biases correct for some systematic error that remains in the full
+      fDCT->iDCT round trip.*/
+   w[0]+=(w[0]!=0)+1;
+@@ -327,7 +327,7 @@
+       ogg_int32_t v;
+       v=0;
+       for(api=0;api<na;api++){
+-        v+=ext[zpi][api]*(ogg_int32_t)(_x[pi[api]<<3]<<1);
++        v+=ext[zpi][api]*(ogg_int32_t)(2*_x[pi[api]<<3]);
+       }
+       _x[pi[na+zpi]<<3]=(ogg_int16_t)(v+0x8000>>16)+1>>1;
+     }
+@@ -385,7 +385,7 @@
+   }
+   /*Add two extra bits of working precision to improve accuracy; any more and
+      we could overflow.*/
+-  for(ci=0;ci<64;ci++)w[ci]=_x[ci]<<2;
++  for(ci=0;ci<64;ci++)w[ci]=4*_x[ci];
+   /*These biases correct for some systematic error that remains in the full
+      fDCT->iDCT round trip.
+     We can safely add them before padding, since if these pixel values are

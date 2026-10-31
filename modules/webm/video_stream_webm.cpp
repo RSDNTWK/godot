@@ -29,19 +29,25 @@
 /**************************************************************************/
 
 #include "video_stream_webm.h"
+
 #include "modules/modules_enabled.gen.h"
 
+#ifdef MODULE_FFMPEG_ENABLED
 #include "modules/ffmpeg/video_stream_media.h"
+#endif
 
-#include "core/object/class_db.h"
-
-#include "core/io/file_access.h"
-#include "core/os/os.h"
 #include "core/config/project_settings.h"
+#include "core/io/file_access.h"
+#include "core/object/class_db.h"
+#include "core/os/os.h"
 #include "servers/audio/audio_server.h"
 
 #ifndef MODULE_FFMPEG_ENABLED
 #include "thirdparty/misc/yuv2rgb.h"
+
+#include "core/io/image_loader_safety.h"
+
+#include <climits>
 
 // libsimplewebm
 #include <OpusVorbisDecoder.hpp>
@@ -55,11 +61,7 @@
 
 class MkvReader : public mkvparser::IMkvReader {
 public:
-	MkvReader(const String &p_file) {
-		file = FileAccess::open(p_file, FileAccess::READ);
-
-		ERR_FAIL_COND_MSG(!file.is_valid(), "Failed loading resource: '" + p_file + "'.");
-	}
+	MkvReader(const Ref<FileAccess> &p_file) : file(p_file) {}
 	~MkvReader() {
 		if (file.is_valid()) {
 			file.unref();
@@ -67,20 +69,24 @@ public:
 	}
 
 	virtual int Read(long long pos, long len, unsigned char *buf) {
-		if (file.is_valid()) {
-			if (file->get_position() != (uint64_t)pos) {
-				file->seek(pos);
-			}
-			if (file->get_buffer(buf, len) == (uint64_t)len) {
-				return 0;
-			}
+		if (file.is_null() || pos < 0 || len < 0 || uint64_t(pos) > file->get_length() || uint64_t(len) > file->get_length() - uint64_t(pos)) {
+			return -1;
 		}
-		return -1;
+		file->seek(pos);
+		if (file->get_position() != uint64_t(pos)) {
+			return -1;
+		}
+		const uint64_t read = file->get_buffer(buf, len);
+		const Error error = file->get_error();
+		return read == uint64_t(len) && (error == OK || error == ERR_FILE_EOF) ? 0 : -1;
 	}
 
 	virtual int Length(long long *total, long long *available) {
 		if (file.is_valid()) {
 			const uint64_t len = file->get_length();
+			if (len > uint64_t(LLONG_MAX)) {
+				return -1;
+			}
 			if (total) {
 				*total = len;
 			}
@@ -124,64 +130,78 @@ VideoStreamPlaybackWebm::~VideoStreamPlaybackWebm() {
 }
 
 bool VideoStreamPlaybackWebm::open_file(const String &p_file) {
+	delete_pointers();
 	file_name = p_file;
-	webm = memnew(WebMDemuxer(new MkvReader(file_name), 0, audio_track));
-	if (webm->isOpen()) {
-		video = memnew(VPXDecoder(*webm, OS::get_singleton()->get_processor_count()));
-		if (video->isOpen()) {
+	auto fail = [&]() { delete_pointers(); return false; };
+	Ref<FileAccess> source = FileAccess::open(file_name, FileAccess::READ);
+	if (source.is_null() || source->get_length() > uint64_t(LLONG_MAX)) {
+		return false;
+	}
+	webm = memnew(WebMDemuxer(new MkvReader(source), 0, audio_track));
+	if (!webm->isOpen() || webm->getVideoCodec() == WebMDemuxer::NO_VIDEO) {
+		return fail();
+	}
+	const int width = webm->getWidth();
+	const int height = webm->getHeight();
+	int64_t bytes = 0;
+	if (ImageLoaderSafety::image_bytes(width, height, 4, bytes) != OK || frame_data.resize(bytes) != OK) {
+		return fail();
+	}
+	frame_data.fill(0);
+	video = memnew(VPXDecoder(*webm, OS::get_singleton()->get_processor_count()));
+	if (!video->isOpen()) {
+		return fail();
+	}
+
+	if (webm->getAudioCodec() != WebMDemuxer::NO_AUDIO) {
+		const int channels = webm->getChannels();
+		const double rate = webm->getSampleRate();
+		if ((channels == 1 || channels == 2 || channels == 4 || channels == 6 || channels == 8) && Math::is_finite(rate) && rate > 0 && rate <= INT_MAX && rate == int(rate)) {
 			audio = memnew(OpusVorbisDecoder(*webm));
 			if (audio->isOpen()) {
+				const int frames = audio->getBufferSamples();
+				if (frames <= 0 || uint64_t(frames) > SIZE_MAX / sizeof(float) / channels || pcm_data.resize(int64_t(frames) * channels) != OK) {
+					return fail();
+				}
+				pcm = pcm_data.ptrw();
 				audio_frame = memnew(WebMFrame);
-				pcm = (float *)memalloc(sizeof(float) * audio->getBufferSamples() * webm->getChannels());
 			} else {
 				memdelete(audio);
 				audio = nullptr;
 			}
-
-			frame_data.resize((webm->getWidth() * webm->getHeight()) << 2);
-			Ref<Image> initial_image;
-
-			initial_image.instantiate(webm->getWidth(), webm->getHeight(), false, Image::FORMAT_RGBA8, frame_data);
-			texture->set_image(initial_image);
-
-			return true;
 		}
-		memdelete(video);
-		video = nullptr;
 	}
-	memdelete(webm);
-	webm = nullptr;
-	return false;
+	const int channels = audio ? webm->getChannels() : 0;
+	const int mix_rate = audio ? int(webm->getSampleRate()) : 0;
+	if (output_channels >= 0 && (channels != output_channels || mix_rate != output_mix_rate)) {
+		ERR_PRINT("Native WebM audio format changed during restart. Recreate the playback instance to change channel count or sample rate.");
+		return fail();
+	}
+	Ref<Image> initial_image = Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, frame_data);
+	if (initial_image.is_null() || initial_image->is_empty()) {
+		return fail();
+	}
+	texture->set_image(initial_image);
+	output_channels = channels;
+	output_mix_rate = mix_rate;
+	return true;
 }
 
 void VideoStreamPlaybackWebm::stop() {
 	if (playing) {
-		delete_pointers();
-
-		pcm = nullptr;
-
-		audio_frame = nullptr;
-		video_frames = nullptr;
-
-		video = nullptr;
-		audio = nullptr;
-
-		open_file(file_name); //Should not fail here...
-
-		video_frames_capacity = video_frames_pos = 0;
-		num_decoded_samples = 0;
-		samples_offset = -1;
-		video_frame_delay = video_pos = 0.0;
+		// Rewind only to a successfully reopened decoder; failure remains stopped.
+		open_file(file_name);
 	}
-	time = 0.0;
 	playing = false;
+	time = video_pos = 0.0;
 }
 void VideoStreamPlaybackWebm::play() {
 	stop();
-
+	if (!video && !open_file(file_name)) {
+		return;
+	}
 	delay_compensation = ProjectSettings::get_singleton()->get("audio/video_delay_compensation_ms");
 	delay_compensation /= 1000.0;
-
 	playing = true;
 }
 
@@ -238,10 +258,17 @@ void VideoStreamPlaybackWebm::update(double p_delta) {
 
 	bool audio_buffer_full = false;
 
+	if (samples_offset > -1 && !mix_callback) {
+		samples_offset = -1;
+	}
 	if (samples_offset > -1) {
 		//Mix remaining samples
 		const int to_read = num_decoded_samples - samples_offset;
 		const int mixed = mix_callback(mix_udata, pcm + samples_offset * webm->getChannels(), to_read);
+		if (mixed < 0 || mixed > to_read) {
+			playing = false;
+			return;
+		}
 		if (mixed != to_read) {
 			samples_offset += mixed;
 			audio_buffer_full = true;
@@ -256,6 +283,10 @@ void VideoStreamPlaybackWebm::update(double p_delta) {
 		if (hasAudio && !audio_buffer_full && audio_frame->isValid() &&
 				audio->getPCMF(*audio_frame, pcm, num_decoded_samples) && num_decoded_samples > 0) {
 			const int mixed = mix_callback(mix_udata, pcm, num_decoded_samples);
+			if (mixed < 0 || mixed > num_decoded_samples) {
+				playing = false;
+				return;
+			}
 
 			if (mixed != num_decoded_samples) {
 				samples_offset = mixed;
@@ -265,9 +296,19 @@ void VideoStreamPlaybackWebm::update(double p_delta) {
 
 		WebMFrame *video_frame;
 		if (video_frames_pos >= video_frames_capacity) {
-			WebMFrame **video_frames_new = (WebMFrame **)memrealloc(video_frames, ++video_frames_capacity * sizeof(void *));
-			ERR_FAIL_COND(!video_frames_new); //Out of memory
-			(video_frames = video_frames_new)[video_frames_capacity - 1] = memnew(WebMFrame);
+			if (video_frames_capacity == INT_MAX || uint64_t(video_frames_capacity) + 1 > SIZE_MAX / sizeof(WebMFrame *)) {
+				playing = false;
+				return;
+			}
+			const int capacity = video_frames_capacity + 1;
+			WebMFrame **grown = (WebMFrame **)memrealloc(video_frames, size_t(capacity) * sizeof(WebMFrame *));
+			if (!grown) {
+				playing = false;
+				return;
+			}
+			video_frames = grown;
+			video_frames[video_frames_capacity] = memnew(WebMFrame);
+			video_frames_capacity = capacity;
 		}
 		video_frame = video_frames[video_frames_pos];
 
@@ -292,7 +333,12 @@ void VideoStreamPlaybackWebm::update(double p_delta) {
 			if (should_process(*video_frame)) {
 				if ((err = video->getImage(image)) != VPXDecoder::NO_FRAME) {
 					if (err == VPXDecoder::NO_ERROR && image.w == webm->getWidth() && image.h == webm->getHeight()) {
-						uint8_t *w = frame_data.ptrw();
+						Vector<uint8_t> decoded;
+						if (decoded.resize(frame_data.size()) != OK) {
+							playing = false;
+							return;
+						}
+						uint8_t *w = decoded.ptrw();
 						bool converted = false;
 
 						if (image.chromaShiftW == 0 && image.chromaShiftH == 0 && image.cs == VPX_CS_SRGB) {
@@ -330,9 +376,12 @@ void VideoStreamPlaybackWebm::update(double p_delta) {
 						}
 
 						if (converted) {
-							Ref<Image> img;
-
-							img.instantiate(image.w, image.h, false, Image::FORMAT_RGBA8, frame_data);
+							Ref<Image> img = Image::create_from_data(image.w, image.h, false, Image::FORMAT_RGBA8, decoded);
+							if (img.is_null() || img->is_empty()) {
+								playing = false;
+								return;
+							}
+							frame_data = std::move(decoded);
 							texture->update(img); // Zero-copy send to rendering server
 							video_frame_done = true;
 						}
@@ -389,9 +438,8 @@ bool VideoStreamPlaybackWebm::should_process(WebMFrame &video_frame) {
 }
 
 void VideoStreamPlaybackWebm::delete_pointers() {
-	if (pcm) {
-		memfree(pcm);
-	}
+	pcm = nullptr;
+	pcm_data.clear();
 
 	if (audio_frame) {
 		memdelete(audio_frame);
@@ -413,6 +461,17 @@ void VideoStreamPlaybackWebm::delete_pointers() {
 	if (webm) {
 		memdelete(webm);
 	}
+	webm = nullptr;
+	video = nullptr;
+	audio = nullptr;
+	audio_frame = nullptr;
+	video_frames = nullptr;
+	video_frames_pos = video_frames_capacity = 0;
+	num_decoded_samples = 0;
+	samples_offset = -1;
+	playing = false;
+	time = video_frame_delay = video_pos = 0.0;
+	frame_data.clear();
 }
 #endif
 
@@ -422,11 +481,21 @@ VideoStreamWebm::VideoStreamWebm() :
 		audio_track(0) {}
 
 Ref<VideoStreamPlayback> VideoStreamWebm::instantiate_playback() {
+#ifdef MODULE_FFMPEG_ENABLED
 	Ref<VideoStreamMedia> media;
 	media.instantiate();
 	media->set_file(file);
 	media->set_audio_track(audio_track);
 	return media->instantiate_playback();
+#else
+	Ref<VideoStreamPlaybackWebm> playback;
+	playback.instantiate();
+	playback->set_audio_track(audio_track);
+	if (!playback->open_file(file)) {
+		return Ref<VideoStreamPlayback>();
+	}
+	return playback;
+#endif
 }
 
 void VideoStreamWebm::_bind_methods() {}

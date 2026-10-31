@@ -32,10 +32,11 @@
 #define VIDEO_STREAM_WEBM_H
 
 #include "core/io/resource_loader.h"
-#include "modules/modules_enabled.gen.h"
 #include "scene/resources/image_texture.h"
 #include "scene/resources/texture.h"
 #include "scene/resources/video_stream.h"
+
+#include "modules/modules_enabled.gen.h"
 
 class ImageTexture;
 
@@ -50,6 +51,9 @@ class VideoStreamPlaybackWebm : public VideoStreamPlayback {
 
 	String file_name;
 	int audio_track;
+	// The player configures its resampler once for each playback instance.
+	int output_channels = -1;
+	int output_mix_rate = 0;
 
 	WebMDemuxer *webm;
 	VPXDecoder *video;
@@ -69,6 +73,7 @@ class VideoStreamPlaybackWebm : public VideoStreamPlayback {
 	Vector<uint8_t> frame_data;
 	Ref<ImageTexture> texture;
 
+	Vector<float> pcm_data;
 	float *pcm;
 
 public:
@@ -127,8 +132,8 @@ public:
 };
 
 class ResourceFormatLoaderWebm : public ResourceFormatLoader {
+	GDSOFTCLASS(ResourceFormatLoaderWebm, ResourceFormatLoader);
 
-GDSOFTCLASS(ResourceFormatLoaderWebm, ResourceFormatLoader);
 public:
 	virtual Ref<Resource> load(const String &p_path, const String &p_original_path = "", Error *r_error = nullptr, bool p_use_sub_threads = false, float *r_progress = nullptr, CacheMode p_cache_mode = CACHE_MODE_REUSE) override;
 	virtual void get_recognized_extensions(List<String> *p_extensions) const;

@@ -197,12 +197,19 @@ Error PCKPacker::_add_file(const String &p_target_path, const String &p_source_p
 		ftmp = fae;
 	}
 
-	ftmp->store_buffer(p_data);
+	const bool stored = ftmp->store_buffer(p_data);
+	Error write_error = ftmp->get_error();
 
 	if (fae.is_valid()) {
+		fae->close();
+		if (write_error == OK) {
+			write_error = fae->get_error();
+		}
 		ftmp.unref();
 		fae.unref();
 	}
+	ERR_FAIL_COND_V(write_error != OK, write_error);
+	ERR_FAIL_COND_V(!stored, ERR_FILE_CANT_WRITE);
 	pf.stored_size = file->get_position() - pf.ofs;
 
 	int pad = _get_pad(alignment, file->get_position());
@@ -279,12 +286,25 @@ Error PCKPacker::flush(bool p_verbose) {
 	}
 
 	if (fae.is_valid()) {
+		fae->close();
+		const Error write_error = fae->get_error();
 		fhead.unref();
 		fae.unref();
+		if (write_error != OK) {
+			file->close();
+			file.unref();
+			return write_error;
+		}
 	}
 
+	file->flush();
+	Error write_error = file->get_error();
+	file->close();
+	if (write_error == OK) {
+		write_error = file->get_error();
+	}
 	file.unref();
-	return OK;
+	return write_error;
 }
 
 PCKPacker::~PCKPacker() {

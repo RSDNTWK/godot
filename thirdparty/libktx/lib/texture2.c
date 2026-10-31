@@ -3015,28 +3015,142 @@ ktxTexture2_WriteToStream(ktxTexture2* This,
  * the virtual functions.
  */
 
+/* -- GODOT begin --
+ * Match the base-pointer vtable signatures without incompatible function calls.
+ */
+
+static void KTX_APIENTRY
+ktxTexture2_DestroyDispatch(ktxTexture* This)
+{
+    ktxTexture2_Destroy((ktxTexture2*)This);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_GetImageOffsetDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, ktx_size_t* pOffset)
+{
+    return ktxTexture2_GetImageOffset((ktxTexture2*)This, level, layer, faceSlice, pOffset);
+}
+
+static ktx_size_t KTX_APIENTRY
+ktxTexture2_GetDataSizeUncompressedDispatch(ktxTexture* This)
+{
+    return ktxTexture2_GetDataSizeUncompressed((ktxTexture2*)This);
+}
+
+static ktx_size_t KTX_APIENTRY
+ktxTexture2_GetImageSizeDispatch(ktxTexture* This, ktx_uint32_t level)
+{
+    return ktxTexture2_GetImageSize((ktxTexture2*)This, level);
+}
+
+static ktx_size_t KTX_APIENTRY
+ktxTexture2_GetLevelSizeDispatch(ktxTexture* This, ktx_uint32_t level)
+{
+    return ktxTexture2_GetLevelSize((ktxTexture2*)This, level);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_IterateLevelsDispatch(ktxTexture* This, PFNKTXITERCB iterCb, void* userdata)
+{
+    return ktxTexture2_IterateLevels((ktxTexture2*)This, iterCb, userdata);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_IterateLoadLevelFacesDispatch(ktxTexture* This, PFNKTXITERCB iterCb, void* userdata)
+{
+    return ktxTexture2_IterateLoadLevelFaces((ktxTexture2*)This, iterCb, userdata);
+}
+
+static ktx_bool_t KTX_APIENTRY
+ktxTexture2_NeedsTranscodingDispatch(ktxTexture* This)
+{
+    return ktxTexture2_NeedsTranscoding((ktxTexture2*)This);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_LoadImageDataDispatch(ktxTexture* This, ktx_uint8_t* pBuffer, ktx_size_t bufSize)
+{
+    return ktxTexture2_LoadImageData((ktxTexture2*)This, pBuffer, bufSize);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_SetImageFromMemoryDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, const ktx_uint8_t* src, ktx_size_t srcSize)
+{
+    return ktxTexture2_SetImageFromMemory((ktxTexture2*)This, level, layer, faceSlice, src, srcSize);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_SetImageFromStdioStreamDispatch(ktxTexture* This, ktx_uint32_t level, ktx_uint32_t layer, ktx_uint32_t faceSlice, FILE* src, ktx_size_t srcSize)
+{
+    return ktxTexture2_SetImageFromStdioStream((ktxTexture2*)This, level, layer, faceSlice, src, srcSize);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_WriteToStdioStreamDispatch(ktxTexture* This, FILE* dststr)
+{
+    return ktxTexture2_WriteToStdioStream((ktxTexture2*)This, dststr);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_WriteToNamedFileDispatch(ktxTexture* This, const char* const dstname)
+{
+    return ktxTexture2_WriteToNamedFile((ktxTexture2*)This, dstname);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_WriteToMemoryDispatch(ktxTexture* This, ktx_uint8_t** bytes, ktx_size_t* size)
+{
+    return ktxTexture2_WriteToMemory((ktxTexture2*)This, bytes, size);
+}
+
+static KTX_error_code KTX_APIENTRY
+ktxTexture2_WriteToStreamDispatch(ktxTexture* This, ktxStream* dststr)
+{
+    return ktxTexture2_WriteToStream((ktxTexture2*)This, dststr);
+}
+
+static ktx_size_t
+ktxTexture2_calcDataSizeLevelsDispatch(ktxTexture* This, ktx_uint32_t levels)
+{
+    return ktxTexture2_calcDataSizeLevels((ktxTexture2*)This, levels);
+}
+
+static ktx_size_t
+ktxTexture2_calcFaceLodSizeDispatch(ktxTexture* This, ktx_uint32_t level)
+{
+    return ktxTexture2_calcFaceLodSize((ktxTexture2*)This, level);
+}
+
+static ktx_size_t
+ktxTexture2_calcLevelOffsetDispatch(ktxTexture* This, ktx_uint32_t level)
+{
+    return ktxTexture2_calcLevelOffset((ktxTexture2*)This, level);
+}
+
+/* -- GODOT end -- */
+
 struct ktxTexture_vtblInt ktxTexture2_vtblInt = {
-    (PFNCALCDATASIZELEVELS)ktxTexture2_calcDataSizeLevels,
-    (PFNCALCFACELODSIZE)ktxTexture2_calcFaceLodSize,
-    (PFNCALCLEVELOFFSET)ktxTexture2_calcLevelOffset
+    ktxTexture2_calcDataSizeLevelsDispatch,
+    ktxTexture2_calcFaceLodSizeDispatch,
+    ktxTexture2_calcLevelOffsetDispatch
 };
 
 struct ktxTexture_vtbl ktxTexture2_vtbl = {
-    (PFNKTEXDESTROY)ktxTexture2_Destroy,
-    (PFNKTEXGETIMAGEOFFSET)ktxTexture2_GetImageOffset,
-    (PFNKTEXGETDATASIZEUNCOMPRESSED)ktxTexture2_GetDataSizeUncompressed,
-    (PFNKTEXGETIMAGESIZE)ktxTexture2_GetImageSize,
-    (PFNKTEXGETLEVELSIZE)ktxTexture2_GetLevelSize,
-    (PFNKTEXITERATELEVELS)ktxTexture2_IterateLevels,
-    (PFNKTEXITERATELOADLEVELFACES)ktxTexture2_IterateLoadLevelFaces,
-    (PFNKTEXNEEDSTRANSCODING)ktxTexture2_NeedsTranscoding,
-    (PFNKTEXLOADIMAGEDATA)ktxTexture2_LoadImageData,
-    (PFNKTEXSETIMAGEFROMMEMORY)ktxTexture2_SetImageFromMemory,
-    (PFNKTEXSETIMAGEFROMSTDIOSTREAM)ktxTexture2_SetImageFromStdioStream,
-    (PFNKTEXWRITETOSTDIOSTREAM)ktxTexture2_WriteToStdioStream,
-    (PFNKTEXWRITETONAMEDFILE)ktxTexture2_WriteToNamedFile,
-    (PFNKTEXWRITETOMEMORY)ktxTexture2_WriteToMemory,
-    (PFNKTEXWRITETOSTREAM)ktxTexture2_WriteToStream,
+    ktxTexture2_DestroyDispatch,
+    ktxTexture2_GetImageOffsetDispatch,
+    ktxTexture2_GetDataSizeUncompressedDispatch,
+    ktxTexture2_GetImageSizeDispatch,
+    ktxTexture2_GetLevelSizeDispatch,
+    ktxTexture2_IterateLevelsDispatch,
+    ktxTexture2_IterateLoadLevelFacesDispatch,
+    ktxTexture2_NeedsTranscodingDispatch,
+    ktxTexture2_LoadImageDataDispatch,
+    ktxTexture2_SetImageFromMemoryDispatch,
+    ktxTexture2_SetImageFromStdioStreamDispatch,
+    ktxTexture2_WriteToStdioStreamDispatch,
+    ktxTexture2_WriteToNamedFileDispatch,
+    ktxTexture2_WriteToMemoryDispatch,
+    ktxTexture2_WriteToStreamDispatch,
 };
 
 /** @} */

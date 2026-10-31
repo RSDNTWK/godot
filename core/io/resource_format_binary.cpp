@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access_compressed.h"
+#include "core/io/marshalls.h"
 #include "core/io/missing_resource.h"
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
@@ -101,20 +102,67 @@ enum {
 	FORMAT_VERSION_NO_NODEPATH_PROPERTY = 3,
 };
 
+static Error binary_available(const Ref<FileAccess> &p_file, uint64_t p_size) {
+	const uint64_t position = p_file->get_position();
+	const uint64_t length = p_file->get_length();
+	return position <= length && p_size <= length - position ? OK : ERR_FILE_CORRUPT;
+}
+
+static Error binary_read_exact(const Ref<FileAccess> &p_file, uint8_t *p_buffer, uint64_t p_size) {
+	if (p_size == 0) {
+		return OK;
+	}
+	const uint64_t count = p_file->get_buffer(p_buffer, p_size);
+	const Error error = p_file->get_error();
+	if (error != OK && error != ERR_FILE_EOF) {
+		return error;
+	}
+	return count == p_size ? OK : ERR_FILE_CORRUPT;
+}
+
+static Error binary_read_u32(const Ref<FileAccess> &p_file, uint32_t &r_value) {
+	uint8_t bytes[4];
+	const Error error = binary_read_exact(p_file, bytes, sizeof(bytes));
+	ERR_FAIL_COND_V(error != OK, error);
+	r_value = decode_uint32(bytes);
+	if (p_file->is_big_endian()) {
+		r_value = BSWAP32(r_value);
+	}
+	return OK;
+}
+
+static Error binary_read_string(const Ref<FileAccess> &p_file, Vector<char> &r_buffer, uint32_t p_length, String &r_string) {
+	ERR_FAIL_COND_V(p_length > INT_MAX || binary_available(p_file, p_length) != OK, ERR_FILE_CORRUPT);
+	if (p_length == 0) {
+		r_string = String();
+		return OK;
+	}
+	if (p_length > uint64_t(r_buffer.size())) {
+		const Error allocation = r_buffer.resize(p_length);
+		ERR_FAIL_COND_V(allocation != OK, allocation);
+	}
+	const Error error = binary_read_exact(p_file, reinterpret_cast<uint8_t *>(r_buffer.ptrw()), p_length);
+	ERR_FAIL_COND_V(error != OK, error);
+	r_string = String::utf8(r_buffer.ptr(), p_length);
+	return OK;
+}
+
 void ResourceLoaderBinary::_advance_padding(uint32_t p_len) {
 	uint32_t extra = 4 - (p_len % 4);
 	if (extra < 4) {
-		for (uint32_t i = 0; i < extra; i++) {
-			f->get_8(); //pad to 32
-		}
+		uint8_t padding[3];
+		error = binary_read_exact(f, padding, extra);
 	}
 }
 
-static Error read_reals(real_t *dst, Ref<FileAccess> &f, size_t count) {
+static Error read_reals(real_t *dst, Ref<FileAccess> &f, uint64_t count) {
+	const uint64_t scalar_size = f->real_is_double ? sizeof(double) : sizeof(float);
+	ERR_FAIL_COND_V(count > UINT64_MAX / scalar_size || binary_available(f, count * scalar_size) != OK, ERR_FILE_CORRUPT);
+	const uint64_t start = f->get_position();
 	if (f->real_is_double) {
 		if constexpr (sizeof(real_t) == 8) {
 			// Ideal case with double-precision
-			f->get_buffer((uint8_t *)dst, count * sizeof(double));
+			return binary_read_exact(f, (uint8_t *)dst, count * sizeof(double));
 		} else if constexpr (sizeof(real_t) == 4) {
 			// May be slower, but this is for compatibility. Eventually the data should be converted.
 			for (size_t i = 0; i < count; ++i) {
@@ -126,7 +174,7 @@ static Error read_reals(real_t *dst, Ref<FileAccess> &f, size_t count) {
 	} else {
 		if constexpr (sizeof(real_t) == 4) {
 			// Ideal case with float-precision
-			f->get_buffer((uint8_t *)dst, count * sizeof(float));
+			return binary_read_exact(f, (uint8_t *)dst, count * sizeof(float));
 		} else if constexpr (sizeof(real_t) == 8) {
 			for (size_t i = 0; i < count; ++i) {
 				dst[i] = f->get_float();
@@ -135,28 +183,43 @@ static Error read_reals(real_t *dst, Ref<FileAccess> &f, size_t count) {
 			ERR_FAIL_V_MSG(ERR_UNAVAILABLE, "real_t size is neither 4 nor 8!");
 		}
 	}
-	return OK;
+	const Error error = f->get_error();
+	ERR_FAIL_COND_V(error != OK && error != ERR_FILE_EOF, error);
+	return f->get_position() == start + count * scalar_size ? OK : ERR_FILE_CORRUPT;
 }
 
 StringName ResourceLoaderBinary::_get_string() {
-	uint32_t id = f->get_32();
+	if (error != OK) {
+		return StringName();
+	}
+	uint32_t id = 0;
+	error = binary_read_u32(f, id);
+	if (error != OK) {
+		return StringName();
+	}
 	if (id & 0x80000000) {
 		uint32_t len = id & 0x7FFFFFFF;
-		if ((int)len > str_buf.size()) {
-			str_buf.resize(len);
-		}
-		if (len == 0) {
-			return StringName();
-		}
-		f->get_buffer((uint8_t *)&str_buf[0], len);
-		return String::utf8(&str_buf[0], len);
+		String value;
+		error = binary_read_string(f, str_buf, len, value);
+		return error == OK ? StringName(value) : StringName();
+	}
+	if (id >= uint64_t(string_map.size())) {
+		error = ERR_FILE_CORRUPT;
+		return StringName();
 	}
 
 	return string_map[id];
 }
 
-Error ResourceLoaderBinary::parse_variant(Variant &r_v) {
-	uint32_t prop_type = f->get_32();
+Error ResourceLoaderBinary::parse_variant(Variant &r_v, int p_depth) {
+	ERR_FAIL_COND_V(p_depth > Variant::MAX_RECURSION_DEPTH, ERR_FILE_CORRUPT);
+	if (error != OK) {
+		return error;
+	}
+	ERR_FAIL_COND_V(binary_available(f, 4) != OK, ERR_FILE_CORRUPT);
+	uint32_t prop_type = 0;
+	const Error type_error = binary_read_u32(f, prop_type);
+	ERR_FAIL_COND_V(type_error != OK, type_error);
 	print_bl("find property of type: " + itos(prop_type));
 
 	switch (prop_type) {
@@ -405,6 +468,9 @@ Error ResourceLoaderBinary::parse_variant(Variant &r_v) {
 
 					String exttype = get_unicode_string();
 					String path = get_unicode_string();
+					if (error != OK) {
+						return error;
+					}
 
 					if (!path.contains("://") && path.is_relative_path()) {
 						// path is relative to file being loaded, so convert to a resource path
@@ -463,28 +529,34 @@ Error ResourceLoaderBinary::parse_variant(Variant &r_v) {
 		} break;
 
 		case VARIANT_DICTIONARY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
 			Dictionary d; //last bit means shared
 			len &= 0x7FFFFFFF;
 			for (uint32_t i = 0; i < len; i++) {
 				Variant key;
-				Error err = parse_variant(key);
+				Error err = parse_variant(key, p_depth + 1);
 				ERR_FAIL_COND_V_MSG(err, ERR_FILE_CORRUPT, "Error when trying to parse Variant.");
 				Variant value;
-				err = parse_variant(value);
+				err = parse_variant(value, p_depth + 1);
 				ERR_FAIL_COND_V_MSG(err, ERR_FILE_CORRUPT, "Error when trying to parse Variant.");
 				d[key] = value;
 			}
 			r_v = d;
 		} break;
 		case VARIANT_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
 			Array a; //last bit means shared
 			len &= 0x7FFFFFFF;
-			a.resize(len);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * 4) != OK, ERR_FILE_CORRUPT);
+			const Error allocation = a.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			for (uint32_t i = 0; i < len; i++) {
 				Variant val;
-				Error err = parse_variant(val);
+				Error err = parse_variant(val, p_depth + 1);
 				ERR_FAIL_COND_V_MSG(err, ERR_FILE_CORRUPT, "Error when trying to parse Variant.");
 				a[i] = val;
 			}
@@ -492,115 +564,164 @@ Error ResourceLoaderBinary::parse_variant(Variant &r_v) {
 
 		} break;
 		case VARIANT_PACKED_BYTE_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (1)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<uint8_t> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			uint8_t *w = array.ptrw();
-			f->get_buffer(w, len);
+			const Error read_error = binary_read_exact(f, w, uint64_t(len));
+			ERR_FAIL_COND_V(read_error != OK, read_error);
 			_advance_padding(len);
 
 			r_v = array;
 
 		} break;
 		case VARIANT_PACKED_INT32_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (4)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<int32_t> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			int32_t *w = array.ptrw();
-			f->get_buffer((uint8_t *)w, len * sizeof(int32_t));
+			const Error read_error = binary_read_exact(f, (uint8_t *)w, uint64_t(len) * sizeof(int32_t));
+			ERR_FAIL_COND_V(read_error != OK, read_error);
 
 			r_v = array;
 		} break;
 		case VARIANT_PACKED_INT64_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (8)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<int64_t> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			int64_t *w = array.ptrw();
-			f->get_buffer((uint8_t *)w, len * sizeof(int64_t));
+			const Error read_error = binary_read_exact(f, (uint8_t *)w, uint64_t(len) * sizeof(int64_t));
+			ERR_FAIL_COND_V(read_error != OK, read_error);
 
 			r_v = array;
 		} break;
 		case VARIANT_PACKED_FLOAT32_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (4)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<float> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			float *w = array.ptrw();
-			f->get_buffer((uint8_t *)w, len * sizeof(float));
+			const Error read_error = binary_read_exact(f, (uint8_t *)w, uint64_t(len) * sizeof(float));
+			ERR_FAIL_COND_V(read_error != OK, read_error);
 
 			r_v = array;
 		} break;
 		case VARIANT_PACKED_FLOAT64_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (8)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<double> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			double *w = array.ptrw();
-			f->get_buffer((uint8_t *)w, len * sizeof(double));
+			const Error read_error = binary_read_exact(f, (uint8_t *)w, uint64_t(len) * sizeof(double));
+			ERR_FAIL_COND_V(read_error != OK, read_error);
 
 			r_v = array;
 		} break;
 		case VARIANT_PACKED_STRING_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (4)) != OK, ERR_FILE_CORRUPT);
 			Vector<String> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			String *w = array.ptrw();
 			for (uint32_t i = 0; i < len; i++) {
 				w[i] = get_unicode_string();
+				if (error != OK) {
+					return error;
+				}
 			}
 
 			r_v = array;
 
 		} break;
 		case VARIANT_PACKED_VECTOR2_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (uint64_t(f->real_is_double ? 8 : 4) * 2)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<Vector2> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			Vector2 *w = array.ptrw();
 			static_assert(sizeof(Vector2) == 2 * sizeof(real_t));
-			const Error err = read_reals(reinterpret_cast<real_t *>(w), f, len * 2);
+			const Error err = read_reals(reinterpret_cast<real_t *>(w), f, uint64_t(len) * 2);
 			ERR_FAIL_COND_V(err != OK, err);
 
 			r_v = array;
 
 		} break;
 		case VARIANT_PACKED_VECTOR3_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (uint64_t(f->real_is_double ? 8 : 4) * 3)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<Vector3> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			Vector3 *w = array.ptrw();
 			static_assert(sizeof(Vector3) == 3 * sizeof(real_t));
-			const Error err = read_reals(reinterpret_cast<real_t *>(w), f, len * 3);
+			const Error err = read_reals(reinterpret_cast<real_t *>(w), f, uint64_t(len) * 3);
 			ERR_FAIL_COND_V(err != OK, err);
 
 			r_v = array;
 
 		} break;
 		case VARIANT_PACKED_COLOR_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (16)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<Color> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			Color *w = array.ptrw();
 			// Colors always use `float` even with double-precision support enabled
 			static_assert(sizeof(Color) == 4 * sizeof(float));
-			f->get_buffer((uint8_t *)w, len * sizeof(float) * 4);
+			const Error read_error = binary_read_exact(f, (uint8_t *)w, uint64_t(len) * sizeof(float) * 4);
+			ERR_FAIL_COND_V(read_error != OK, read_error);
 
 			r_v = array;
 		} break;
 		case VARIANT_PACKED_VECTOR4_ARRAY: {
-			uint32_t len = f->get_32();
+			uint32_t len = 0;
+			const Error length_error = binary_read_u32(f, len);
+			ERR_FAIL_COND_V(length_error != OK, length_error);
+			ERR_FAIL_COND_V(binary_available(f, uint64_t(len) * (uint64_t(f->real_is_double ? 8 : 4) * 4)) != OK, ERR_FILE_CORRUPT);
 
 			Vector<Vector4> array;
-			array.resize(len);
+			const Error allocation = array.resize(len);
+			ERR_FAIL_COND_V(allocation != OK, allocation);
 			Vector4 *w = array.ptrw();
 			static_assert(sizeof(Vector4) == 4 * sizeof(real_t));
-			const Error err = read_reals(reinterpret_cast<real_t *>(w), f, len * 4);
+			const Error err = read_reals(reinterpret_cast<real_t *>(w), f, uint64_t(len) * 4);
 			ERR_FAIL_COND_V(err != OK, err);
 
 			r_v = array;
@@ -611,7 +732,7 @@ Error ResourceLoaderBinary::parse_variant(Variant &r_v) {
 		} break;
 	}
 
-	return OK; //never reach anyway
+	return error;
 }
 
 Ref<Resource> ResourceLoaderBinary::get_resource() {
@@ -685,6 +806,9 @@ Error ResourceLoaderBinary::load() {
 		f->seek(offset);
 
 		String t = get_unicode_string();
+		if (error != OK) {
+			return error;
+		}
 
 		Ref<Resource> res;
 		Resource *r = nullptr;
@@ -757,6 +881,9 @@ Error ResourceLoaderBinary::load() {
 
 		for (int j = 0; j < pc; j++) {
 			StringName name = _get_string();
+			if (error != OK) {
+				return error;
+			}
 
 			if (name == StringName()) {
 				error = ERR_FILE_CORRUPT;
@@ -853,24 +980,33 @@ static void save_ustring(Ref<FileAccess> f, const String &p_string) {
 	f->store_buffer((const uint8_t *)utf8.get_data(), utf8.length() + 1);
 }
 
-static String get_ustring(Ref<FileAccess> f) {
-	int len = f->get_32();
+static String get_ustring(Ref<FileAccess> f, Error &r_error) {
+	if (r_error != OK) {
+		return String();
+	}
+	uint32_t len = 0;
+	r_error = binary_read_u32(f, len);
+	if (r_error != OK) {
+		return String();
+	}
 	Vector<char> str_buf;
-	str_buf.resize(len);
-	f->get_buffer((uint8_t *)&str_buf[0], len);
-	return String::utf8(&str_buf[0], len);
+	String value;
+	r_error = binary_read_string(f, str_buf, len, value);
+	return value;
 }
 
 String ResourceLoaderBinary::get_unicode_string() {
-	int len = f->get_32();
-	if (len > str_buf.size()) {
-		str_buf.resize(len);
-	}
-	if (len == 0) {
+	if (error != OK) {
 		return String();
 	}
-	f->get_buffer((uint8_t *)&str_buf[0], len);
-	return String::utf8(&str_buf[0], len);
+	uint32_t len = 0;
+	error = binary_read_u32(f, len);
+	if (error != OK) {
+		return String();
+	}
+	String value;
+	error = binary_read_string(f, str_buf, len, value);
+	return value;
 }
 
 void ResourceLoaderBinary::get_classes_used(Ref<FileAccess> p_f, HashSet<StringName> *p_classes) {
@@ -882,6 +1018,9 @@ void ResourceLoaderBinary::get_classes_used(Ref<FileAccess> p_f, HashSet<StringN
 	for (const IntResource &res : internal_resources) {
 		p_f->seek(res.offset);
 		String t = get_unicode_string();
+		if (error != OK) {
+			return;
+		}
 		if (!p_f->get_error() && t != String() && ClassDB::class_exists(t)) {
 			p_classes->insert(t);
 		}
@@ -966,6 +1105,9 @@ void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p
 	}
 
 	type = get_unicode_string();
+	if (error != OK) {
+		return;
+	}
 
 	print_bl("type: " + type);
 
@@ -988,6 +1130,9 @@ void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p
 
 	if (flags & ResourceFormatSaverBinaryInstance::FORMAT_FLAG_HAS_SCRIPT_CLASS) {
 		script_class = get_unicode_string();
+		if (error != OK) {
+			return;
+		}
 	}
 
 	for (int i = 0; i < ResourceFormatSaverBinaryInstance::RESERVED_FIELDS; i++) {
@@ -998,10 +1143,24 @@ void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p
 		return;
 	}
 
-	uint32_t string_table_size = f->get_32();
-	string_map.resize(string_table_size);
+	uint32_t string_table_size = 0;
+	error = binary_read_u32(f, string_table_size);
+	if (error != OK) {
+		return;
+	}
+	if (binary_available(f, uint64_t(string_table_size) * 4) != OK) {
+		error = ERR_FILE_CORRUPT;
+		return;
+	}
+	error = string_map.resize(string_table_size);
+	if (error != OK) {
+		return;
+	}
 	for (uint32_t i = 0; i < string_table_size; i++) {
 		StringName s = get_unicode_string();
+		if (error != OK) {
+			return;
+		}
 		string_map.write[i] = s;
 	}
 
@@ -1011,7 +1170,13 @@ void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p
 	for (uint32_t i = 0; i < ext_resources_size; i++) {
 		ExtResource er;
 		er.type = get_unicode_string();
+		if (error != OK) {
+			return;
+		}
 		er.path = get_unicode_string();
+		if (error != OK) {
+			return;
+		}
 		if (using_uids) {
 			er.uid = ResourceUID::ID(f->get_64());
 			if (!p_keep_uuid_paths && er.uid != ResourceUID::INVALID_ID) {
@@ -1031,7 +1196,10 @@ void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p
 			}
 		}
 
-		external_resources.push_back(er);
+		if (external_resources.push_back(er)) {
+			error = ERR_OUT_OF_MEMORY;
+			return;
+		}
 	}
 
 	print_bl("ext resources: " + itos(ext_resources_size));
@@ -1040,8 +1208,14 @@ void ResourceLoaderBinary::open(Ref<FileAccess> p_f, bool p_no_resources, bool p
 	for (uint32_t i = 0; i < int_resources_size; i++) {
 		IntResource ir;
 		ir.path = get_unicode_string();
+		if (error != OK) {
+			return;
+		}
 		ir.offset = f->get_64();
-		internal_resources.push_back(ir);
+		if (internal_resources.push_back(ir)) {
+			error = ERR_OUT_OF_MEMORY;
+			return;
+		}
 	}
 
 	print_bl("int resources: " + itos(int_resources_size));
@@ -1239,6 +1413,7 @@ void ResourceFormatLoaderBinary::get_dependencies(const String &p_path, List<Str
 }
 
 Error ResourceFormatLoaderBinary::rename_dependencies(const String &p_path, const HashMap<String, String> &p_map) {
+	Error string_error = OK;
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_CANT_OPEN, vformat("Cannot open file '%s'.", p_path));
 
@@ -1332,7 +1507,8 @@ Error ResourceFormatLoaderBinary::rename_dependencies(const String &p_path, cons
 	fw->store_32(ver_minor);
 	fw->store_32(ver_format);
 
-	save_ustring(fw, get_ustring(f)); //type
+	save_ustring(fw, get_ustring(f, string_error)); //type
+	ERR_FAIL_COND_V(string_error != OK, string_error);
 
 	uint64_t md_ofs = f->get_position();
 	uint64_t importmd_ofs = f->get_64();
@@ -1345,7 +1521,8 @@ Error ResourceFormatLoaderBinary::rename_dependencies(const String &p_path, cons
 	fw->store_32(flags);
 	fw->store_64(uid_data);
 	if (flags & ResourceFormatSaverBinaryInstance::FORMAT_FLAG_HAS_SCRIPT_CLASS) {
-		save_ustring(fw, get_ustring(f));
+		save_ustring(fw, get_ustring(f, string_error));
+		ERR_FAIL_COND_V(string_error != OK, string_error);
 	}
 
 	for (int i = 0; i < ResourceFormatSaverBinaryInstance::RESERVED_FIELDS; i++) {
@@ -1359,7 +1536,8 @@ Error ResourceFormatLoaderBinary::rename_dependencies(const String &p_path, cons
 	fw->store_32(string_table_size);
 
 	for (uint32_t i = 0; i < string_table_size; i++) {
-		String s = get_ustring(f);
+		String s = get_ustring(f, string_error);
+		ERR_FAIL_COND_V(string_error != OK, string_error);
 		save_ustring(fw, s);
 	}
 
@@ -1367,8 +1545,10 @@ Error ResourceFormatLoaderBinary::rename_dependencies(const String &p_path, cons
 	uint32_t ext_resources_size = f->get_32();
 	fw->store_32(ext_resources_size);
 	for (uint32_t i = 0; i < ext_resources_size; i++) {
-		String type = get_ustring(f);
-		String path = get_ustring(f);
+		String type = get_ustring(f, string_error);
+		ERR_FAIL_COND_V(string_error != OK, string_error);
+		String path = get_ustring(f, string_error);
+		ERR_FAIL_COND_V(string_error != OK, string_error);
 
 		if (using_uids) {
 			ResourceUID::ID uid = f->get_64();
@@ -1414,7 +1594,8 @@ Error ResourceFormatLoaderBinary::rename_dependencies(const String &p_path, cons
 	fw->store_32(int_resources_size);
 
 	for (uint32_t i = 0; i < int_resources_size; i++) {
-		String path = get_ustring(f);
+		String path = get_ustring(f, string_error);
+		ERR_FAIL_COND_V(string_error != OK, string_error);
 		uint64_t offset = f->get_64();
 		save_ustring(fw, path);
 		fw->store_64(offset + size_diff);
@@ -1557,7 +1738,8 @@ void ResourceFormatSaverBinaryInstance::_pad_buffer(Ref<FileAccess> f, int p_byt
 	}
 }
 
-void ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const Variant &p_property, HashMap<Ref<Resource>, int> &resource_map, HashMap<Ref<Resource>, int> &external_resources, HashMap<StringName, int> &string_map, const PropertyInfo &p_hint) {
+Error ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const Variant &p_property, HashMap<Ref<Resource>, int> &resource_map, HashMap<Ref<Resource>, int> &external_resources, HashMap<StringName, int> &string_map, const PropertyInfo &p_hint, int p_depth) {
+	ERR_FAIL_COND_V(p_depth > Variant::MAX_RECURSION_DEPTH, ERR_INVALID_DATA);
 	switch (p_property.get_type()) {
 		case Variant::NIL: {
 			f->store_32(VARIANT_NIL);
@@ -1809,7 +1991,7 @@ void ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const V
 			Ref<Resource> res = p_property;
 			if (res.is_null() || res->get_meta(SNAME("_skip_save_"), false)) {
 				f->store_32(OBJECT_EMPTY);
-				return; // Don't save it.
+				return OK; // Don't save it.
 			}
 
 			if (!res->is_built_in()) {
@@ -1818,7 +2000,7 @@ void ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const V
 			} else {
 				if (!resource_map.has(res)) {
 					f->store_32(OBJECT_EMPTY);
-					ERR_FAIL_MSG("Resource was not pre cached for the resource section, most likely due to circular reference.");
+					ERR_FAIL_V_MSG(ERR_INVALID_DATA, "Resource was not pre cached for the resource section, most likely due to circular reference.");
 				}
 
 				f->store_32(OBJECT_INTERNAL_RESOURCE);
@@ -1842,8 +2024,14 @@ void ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const V
 			f->store_32(uint32_t(d.size()));
 
 			for (const KeyValue<Variant, Variant> &kv : d) {
-				write_variant(f, kv.key, resource_map, external_resources, string_map);
-				write_variant(f, kv.value, resource_map, external_resources, string_map);
+				{
+					const Error err = write_variant(f, kv.key, resource_map, external_resources, string_map, PropertyInfo(), p_depth + 1);
+					ERR_FAIL_COND_V(err != OK, err);
+				}
+				{
+					const Error err = write_variant(f, kv.value, resource_map, external_resources, string_map, PropertyInfo(), p_depth + 1);
+					ERR_FAIL_COND_V(err != OK, err);
+				}
 			}
 
 		} break;
@@ -1852,7 +2040,10 @@ void ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const V
 			Array a = p_property;
 			f->store_32(uint32_t(a.size()));
 			for (const Variant &var : a) {
-				write_variant(f, var, resource_map, external_resources, string_map);
+				{
+					const Error err = write_variant(f, var, resource_map, external_resources, string_map, PropertyInfo(), p_depth + 1);
+					ERR_FAIL_COND_V(err != OK, err);
+				}
 			}
 
 		} break;
@@ -1975,32 +2166,34 @@ void ResourceFormatSaverBinaryInstance::write_variant(Ref<FileAccess> f, const V
 
 		} break;
 		default: {
-			ERR_FAIL_MSG("Invalid variant.");
+			ERR_FAIL_V_MSG(ERR_INVALID_DATA, "Invalid variant.");
 		}
 	}
+	return f->get_error();
 }
 
-void ResourceFormatSaverBinaryInstance::_find_resources(const Variant &p_variant, bool p_main) {
+Error ResourceFormatSaverBinaryInstance::_find_resources(const Variant &p_variant, bool p_main, int p_depth) {
+	ERR_FAIL_COND_V(p_depth > Variant::MAX_RECURSION_DEPTH, ERR_INVALID_DATA);
 	switch (p_variant.get_type()) {
 		case Variant::OBJECT: {
 			Ref<Resource> res = p_variant;
 
 			if (res.is_null() || external_resources.has(res) || res->get_meta(SNAME("_skip_save_"), false)) {
-				return;
+				return OK;
 			}
 
 			if (!p_main && (!bundle_resources) && !res->is_built_in()) {
 				if (res->get_path() == path) {
 					ERR_PRINT(vformat("Circular reference to resource being saved found: '%s' will be null next time it's loaded.", local_path));
-					return;
+					return OK;
 				}
 				int idx = external_resources.size();
 				external_resources[res] = idx;
-				return;
+				return OK;
 			}
 
 			if (resource_set.has(res)) {
-				return;
+				return OK;
 			}
 
 			resource_set.insert(res);
@@ -2023,10 +2216,16 @@ void ResourceFormatSaverBinaryInstance::_find_resources(const Variant &p_variant
 							resource_set.insert(sres);
 							saved_resources.push_back(sres);
 						} else {
-							_find_resources(value);
+							{
+								const Error err = _find_resources(value, false, p_depth + 1);
+								ERR_FAIL_COND_V(err != OK, err);
+							}
 						}
 					} else {
-						_find_resources(value);
+						{
+							const Error err = _find_resources(value, false, p_depth + 1);
+							ERR_FAIL_COND_V(err != OK, err);
+						}
 					}
 				}
 			}
@@ -2037,20 +2236,38 @@ void ResourceFormatSaverBinaryInstance::_find_resources(const Variant &p_variant
 
 		case Variant::ARRAY: {
 			Array varray = p_variant;
-			_find_resources(varray.get_typed_script());
+			{
+				const Error err = _find_resources(varray.get_typed_script(), false, p_depth + 1);
+				ERR_FAIL_COND_V(err != OK, err);
+			}
 			for (const Variant &v : varray) {
-				_find_resources(v);
+				{
+					const Error err = _find_resources(v, false, p_depth + 1);
+					ERR_FAIL_COND_V(err != OK, err);
+				}
 			}
 
 		} break;
 
 		case Variant::DICTIONARY: {
 			Dictionary d = p_variant;
-			_find_resources(d.get_typed_key_script());
-			_find_resources(d.get_typed_value_script());
+			{
+				const Error err = _find_resources(d.get_typed_key_script(), false, p_depth + 1);
+				ERR_FAIL_COND_V(err != OK, err);
+			}
+			{
+				const Error err = _find_resources(d.get_typed_value_script(), false, p_depth + 1);
+				ERR_FAIL_COND_V(err != OK, err);
+			}
 			for (const KeyValue<Variant, Variant> &kv : d) {
-				_find_resources(kv.key);
-				_find_resources(kv.value);
+				{
+					const Error err = _find_resources(kv.key, false, p_depth + 1);
+					ERR_FAIL_COND_V(err != OK, err);
+				}
+				{
+					const Error err = _find_resources(kv.value, false, p_depth + 1);
+					ERR_FAIL_COND_V(err != OK, err);
+				}
 			}
 		} break;
 		case Variant::NODE_PATH: {
@@ -2067,6 +2284,7 @@ void ResourceFormatSaverBinaryInstance::_find_resources(const Variant &p_variant
 		default: {
 		}
 	}
+	return OK;
 }
 
 void ResourceFormatSaverBinaryInstance::save_unicode_string(Ref<FileAccess> p_f, const String &p_string, bool p_bit_on_len) {
@@ -2103,18 +2321,6 @@ Error ResourceFormatSaverBinaryInstance::save(const String &p_path, const Ref<Re
 	Resource::seed_scene_unique_id(p_path.hash());
 
 	Error err;
-	Ref<FileAccess> f;
-	if (p_flags & ResourceSaver::FLAG_COMPRESS) {
-		Ref<FileAccessCompressed> fac;
-		fac.instantiate();
-		fac->configure("RSCC");
-		f = fac;
-		err = fac->open_internal(p_path, FileAccess::WRITE);
-	} else {
-		f = FileAccess::open(p_path, FileAccess::WRITE, &err);
-	}
-
-	ERR_FAIL_COND_V_MSG(err != OK, err, vformat("Cannot create file '%s'.", p_path));
 
 	relative_paths = p_flags & ResourceSaver::FLAG_RELATIVE_PATHS;
 	skip_editor = p_flags & ResourceSaver::FLAG_OMIT_EDITOR_PROPERTIES;
@@ -2129,7 +2335,21 @@ Error ResourceFormatSaverBinaryInstance::save(const String &p_path, const Ref<Re
 	local_path = p_path.get_base_dir();
 	path = ProjectSettings::get_singleton()->localize_path(p_path);
 
-	_find_resources(p_resource, true);
+	err = _find_resources(p_resource, true);
+	ERR_FAIL_COND_V(err != OK, err);
+
+	Ref<FileAccess> f;
+	if (p_flags & ResourceSaver::FLAG_COMPRESS) {
+		Ref<FileAccessCompressed> fac;
+		fac.instantiate();
+		fac->configure("RSCC");
+		f = fac;
+		err = fac->open_internal(p_path, FileAccess::WRITE);
+	} else {
+		f = FileAccess::open(p_path, FileAccess::WRITE, &err);
+	}
+
+	ERR_FAIL_COND_V_MSG(err != OK, err, vformat("Cannot create file '%s'.", p_path));
 
 	if (!(p_flags & ResourceSaver::FLAG_COMPRESS)) {
 		//save header compressed
@@ -2324,7 +2544,8 @@ Error ResourceFormatSaverBinaryInstance::save(const String &p_path, const Ref<Re
 
 		for (const Property &p : rd.properties) {
 			f->store_32(uint32_t(p.name_idx));
-			write_variant(f, p.value, resource_map, external_resources, string_map, p.pi);
+			err = write_variant(f, p.value, resource_map, external_resources, string_map, p.pi);
+			ERR_FAIL_COND_V(err != OK, err);
 		}
 	}
 
@@ -2345,6 +2566,7 @@ Error ResourceFormatSaverBinaryInstance::save(const String &p_path, const Ref<Re
 }
 
 Error ResourceFormatSaverBinaryInstance::set_uid(const String &p_path, ResourceUID::ID p_uid) {
+	Error string_error = OK;
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_CANT_OPEN, vformat("Cannot open file '%s'.", p_path));
 
@@ -2419,7 +2641,8 @@ Error ResourceFormatSaverBinaryInstance::set_uid(const String &p_path, ResourceU
 	fw->store_32(ver_minor);
 	fw->store_32(ver_format);
 
-	save_ustring(fw, get_ustring(f)); //type
+	save_ustring(fw, get_ustring(f, string_error)); //type
+	ERR_FAIL_COND_V(string_error != OK, string_error);
 
 	fw->store_64(f->get_64()); //metadata offset
 
@@ -2431,7 +2654,8 @@ Error ResourceFormatSaverBinaryInstance::set_uid(const String &p_path, ResourceU
 	fw->store_64(uint64_t(p_uid));
 
 	if (flags & ResourceFormatSaverBinaryInstance::FORMAT_FLAG_HAS_SCRIPT_CLASS) {
-		save_ustring(fw, get_ustring(f));
+		save_ustring(fw, get_ustring(f, string_error));
+		ERR_FAIL_COND_V(string_error != OK, string_error);
 	}
 
 	//rest of file
