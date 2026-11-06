@@ -668,27 +668,18 @@ Patches:
 See `linuxbsd_headers/README.md`.
 
 
-## lzma2604
+## lzma2605
 
 - Upstream: https://www.7-zip.org/sdk.html
-- Version: 26.04 (2026-10-05)
+- Version: 26.05 (2026-10-21)
 - License: Public Domain
 
 Files extracted from upstream source:
 
-- From the SDK root to `thirdparty/lzma2604/`:
-  - Keep only `C/` and `DOC/`
-  - Except top-level folders `Asm/`, `CPP/`, `CS/`, `Java/`
-- From `C/` to `thirdparty/lzma2604/C/`:
-  - `7zAlloc.c`, `7zAlloc.h`, `7zStream.c`, `7zTypes.h`, `7zWindows.h`,
-    `Compiler.h`, `CpuArch.c`, `CpuArch.h`, `LzFind.c`, `LzFind.h`,
-    `LzFindMt.c`, `LzFindMt.h`, `LzFindOpt.c`, `LzHash.h`,
-    `Lzma2Dec.c`, `Lzma2Dec.h`, `Lzma2Enc.c`, `Lzma2Enc.h`,
-    `LzmaDec.c`, `LzmaDec.h`, `LzmaEnc.c`, `LzmaEnc.h`, `MtCoder.c`,
-    `MtCoder.h`, `MtDec.c`, `MtDec.h`, `Precomp.h`, `Threads.c`,
-    `Threads.h`
-- From `DOC/` to `thirdparty/lzma2604/DOC/`:
-  - `lzma-sdk.txt`
+- `C/` to `thirdparty/lzma2605/C/`, including utility sources.
+- `DOC/` to `thirdparty/lzma2605/DOC/`.
+
+Only the LZMA2 source list in `core/SCsub` is compiled into Godot.
 
 
 ## manifold
