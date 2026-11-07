@@ -40,6 +40,7 @@ String set_query_value(const String &p_url, const String &p_name, const String &
 bool https_url(const String &p_url);
 Dictionary object_after(const String &p_text, const String &p_marker, int p_from = 0, int *r_end = nullptr);
 Dictionary configuration(const String &p_webpage);
+String visitor_data(const Dictionary &p_config, const Dictionary &p_response = Dictionary());
 String player_url(const String &p_webpage, const Dictionary &p_config);
 Array formats(const Dictionary &p_player);
 Dictionary select_format(const Array &p_formats, bool p_audio_only, int p_max_height = 1080);

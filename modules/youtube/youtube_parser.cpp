@@ -32,6 +32,7 @@
 
 #include "core/io/json.h"
 #include "core/math/math_funcs.h"
+#include "core/string/char_utils.h"
 
 namespace {
 bool valid_id(const String &p_id) {
@@ -151,7 +152,7 @@ Dictionary YouTubeParser::object_after(const String &p_text, const String &p_mar
 		return Dictionary();
 	}
 	int start = marker + p_marker.length();
-	while (start < p_text.length() && (p_text[start] == ' ' || p_text[start] == '\n' || p_text[start] == '\r' || p_text[start] == '\t')) {
+	while (start < p_text.length() && is_whitespace(p_text[start])) {
 		start++;
 	}
 	if (start == p_text.length() || p_text[start] != '{') {
@@ -189,7 +190,7 @@ Dictionary YouTubeParser::object_after(const String &p_text, const String &p_mar
 
 Dictionary YouTubeParser::configuration(const String &p_webpage) {
 	Dictionary result;
-	const String marker = "ytcfg.set(";
+	const String marker = "ytcfg.set";
 	int offset = 0;
 	for (int i = 0; i < 64; i++) {
 		int start = p_webpage.find(marker, offset);
@@ -199,14 +200,49 @@ Dictionary YouTubeParser::configuration(const String &p_webpage) {
 		// The bootstrap also uses set(name, value). A non-object call must not
 		// hide the actual JSON configuration records that follow it.
 		offset = start + marker.length();
+		while (offset < p_webpage.length() && is_whitespace(p_webpage[offset])) {
+			offset++;
+		}
+		if (offset >= p_webpage.length() || p_webpage[offset] != '(') {
+			continue;
+		}
 		int end = -1;
-		Dictionary part = object_after(p_webpage, marker, start, &end);
+		Dictionary part = object_after(p_webpage, "(", offset, &end);
+		offset++;
 		if (end >= 0) {
 			offset = end;
 		}
 		result.merge(part, true);
 	}
 	return result;
+}
+
+String YouTubeParser::visitor_data(const Dictionary &p_config, const Dictionary &p_response) {
+	// Match upstream source order: watch configuration wins over response data.
+	for (const Dictionary &source : { p_config, p_response }) {
+		Variant value = source.get("VISITOR_DATA", Variant());
+		if (value.get_type() == Variant::STRING && !String(value).is_empty()) {
+			return value;
+		}
+		value = source.get("INNERTUBE_CONTEXT", Variant());
+		if (value.get_type() == Variant::DICTIONARY) {
+			value = Dictionary(value).get("client", Variant());
+			if (value.get_type() == Variant::DICTIONARY) {
+				value = Dictionary(value).get("visitorData", Variant());
+				if (value.get_type() == Variant::STRING && !String(value).is_empty()) {
+					return value;
+				}
+			}
+		}
+		value = source.get("responseContext", Variant());
+		if (value.get_type() == Variant::DICTIONARY) {
+			value = Dictionary(value).get("visitorData", Variant());
+			if (value.get_type() == Variant::STRING && !String(value).is_empty()) {
+				return value;
+			}
+		}
+	}
+	return String();
 }
 
 String YouTubeParser::player_url(const String &p_webpage, const Dictionary &p_config) {

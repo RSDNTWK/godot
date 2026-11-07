@@ -308,6 +308,12 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 			'locateFile': function (path) {
 				if (!path.startsWith('godot.')) {
 					return path;
+				} else if (path.endsWith('.media.worker.js')) {
+					return `${loadPath}.media.worker.js`;
+				} else if (path.endsWith('.media.decoder.js')) {
+					return `${loadPath}.media.decoder.js`;
+				} else if (path.endsWith('.media.hls.js')) {
+					return `${loadPath}.media.hls.js`;
 				} else if (path.endsWith('.audio.worklet.js')) {
 					return `${loadPath}.audio.worklet.js`;
 				} else if (path.endsWith('.audio.position.worklet.js')) {

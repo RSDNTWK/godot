@@ -123,12 +123,7 @@ Dictionary player_client(int p_index, const Dictionary &p_config) {
 		client["userAgent"] = WEB_AGENT;
 	}
 	client["hl"] = "en";
-	String visitor = p_config.get("VISITOR_DATA", String());
-	if (visitor.is_empty()) {
-		Dictionary context = p_config.get("INNERTUBE_CONTEXT", Dictionary());
-		Dictionary web_client = context.get("client", Dictionary());
-		visitor = web_client.get("visitorData", String());
-	}
+	String visitor = YouTubeParser::visitor_data(p_config);
 	if (!visitor.is_empty()) {
 		client["visitorData"] = visitor;
 	}
@@ -145,6 +140,9 @@ Error YouTubeExtractor::resolve(const String &p_url, bool p_audio_only, Dictiona
 	audio_only = p_audio_only;
 	hls_manifest_requests = 0;
 	deadline = OS::get_singleton()->get_ticks_usec() + 90000000;
+	if (absolute_deadline) {
+		deadline = MIN(deadline, absolute_deadline);
+	}
 	Error error = _resolve();
 	r_result = result;
 	return error;
@@ -162,7 +160,7 @@ Error YouTubeExtractor::_http(const String &p_url, const String &p_agent, String
 	headers["User-Agent"] = p_agent;
 	headers["Referer"] = "https://www.youtube.com/";
 	headers["Origin"] = "https://www.youtube.com";
-	MediaHTTP http(&cancelled);
+	MediaHTTP http(&cancelled, nullptr, deadline);
 	Error error = http.open(p_url, headers, 0, p_post);
 	if (error != OK) {
 		result["message"] = vformat("YouTube HTTPS request failed (HTTP %d, error %d).", http.get_response_status(), int(error));
@@ -203,7 +201,7 @@ Error YouTubeExtractor::_hls_manifest(const String &p_url, const String &p_agent
 	Dictionary headers;
 	headers["User-Agent"] = p_agent;
 	headers["Referer"] = "https://www.youtube.com/";
-	MediaHTTP http(&cancelled);
+	MediaHTTP http(&cancelled, nullptr, deadline);
 	Error error = http.open(p_url, headers);
 	if (error != OK) {
 		return error;
@@ -413,6 +411,11 @@ Error YouTubeExtractor::_resolve() {
 		return error;
 	}
 	Dictionary config = YouTubeParser::configuration(webpage);
+	Dictionary initial = YouTubeParser::object_after(webpage, "ytInitialPlayerResponse =");
+	String visitor = YouTubeParser::visitor_data(config, initial);
+	if (!visitor.is_empty()) {
+		config["VISITOR_DATA"] = visitor;
+	}
 	String player_url = YouTubeParser::player_url(webpage, config);
 	String player_js;
 	if (!player_url.is_empty()) {
@@ -456,11 +459,17 @@ Error YouTubeExtractor::_resolve() {
 		headers["X-Goog-Visitor-Id"] = client.get("visitorData", String());
 		error = _http(endpoint, agent, response, JSON::stringify(query), headers);
 		if (error == OK) {
-			error = _prepare(parse_object(response), player_js, agent);
+			Dictionary player = parse_object(response);
+			// A response may supply the visitor identity omitted from the page.
+			// Carry it into later client requests without replacing a page identity.
+			visitor = YouTubeParser::visitor_data(config, player);
+			if (!visitor.is_empty()) {
+				config["VISITOR_DATA"] = visitor;
+			}
+			error = _prepare(player, player_js, agent);
 			if (error == OK) {
 				if (String(result.get("title", String())).is_empty()) {
-					Dictionary page = YouTubeParser::object_after(webpage, "ytInitialPlayerResponse =");
-					Dictionary details = page.get("videoDetails", Dictionary());
+					Dictionary details = initial.get("videoDetails", Dictionary());
 					if (String(details.get("videoId", String())) == requested_id) {
 						result["title"] = details.get("title", String());
 					}
@@ -473,7 +482,6 @@ Error YouTubeExtractor::_resolve() {
 	if (_interrupted()) {
 		return cancelled.is_set() ? ERR_SKIP : ERR_TIMEOUT;
 	}
-	Dictionary initial = YouTubeParser::object_after(webpage, "ytInitialPlayerResponse =");
 	if (!initial.is_empty()) {
 		error = _prepare(initial, player_js, WEB_AGENT);
 		if (error == OK) {

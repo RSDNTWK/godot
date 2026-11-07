@@ -336,6 +336,12 @@ Copyright: 2009, Florian Loitsch
  2018-2023, The simdjson authors
 License: Expat and Apache-2.0
 
+Files: thirdparty/hlsjs/*
+Comment: HLS.js
+Copyright: 2017, Dailymotion
+ 2013-2015, Brightcove
+License: Apache-2.0
+
 Files: thirdparty/harfbuzz/*
 Comment: HarfBuzz text shaping library
 Copyright: 2010-2022, Google, Inc.

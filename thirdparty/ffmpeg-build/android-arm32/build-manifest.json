@@ -149,5 +149,13 @@
     "avformat": "915e98cc9e3d4fdcdaa6103f6704efe9382c1a3a8af0ff3813262b85ebe6c83c",
     "avcodec": "64e9febb20eed7d67a917a18ffc459d582cbff2f3bbc6d58dee3fd28ae1832fe",
     "swresample": "cac162384ea07348cba9d7f77a24d1ea2643b50c538e007c99d338f9d12abf76"
+  },
+  "hls_declared_epochs": {
+    "patch": "modules/ffmpeg/patches/hls-declared-epochs.patch",
+    "patch_sha256": "302ae91cbba12503b062e5632c755245004682331894ac8fdbc15f0540728a82",
+    "library_sha256": "b1f5a35489d0c08ef69cf32e75c3be3867e6b5b35ad23603305666765e5d51b2",
+    "default": "off in FFmpeg; enabled by native engine playback and finite PCM demuxing; PCM adds no clock padding",
+    "updated_utc": "2026-11-07T10:58:26.879681+00:00",
+    "patch_chain_verification": "build/release-20261107/verification/pcm-hls-discontinuity/patch-chain-verification.json"
   }
 }

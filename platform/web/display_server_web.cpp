@@ -41,6 +41,7 @@
 #include "core/os/os.h"
 #include "servers/display/native_menu.h"
 #include "servers/rendering/dummy/rasterizer_dummy.h"
+#include "modules/modules_enabled.gen.h"
 
 #ifdef PROXY_TO_PTHREAD_ENABLED
 #include "core/object/callable_mp.h"
@@ -1137,6 +1138,12 @@ DisplayServerWeb::DisplayServerWeb(const String &p_rendering_driver, DisplayServ
 		EmscriptenWebGLContextAttributes attributes;
 		emscripten_webgl_init_context_attributes(&attributes);
 		attributes.alpha = OS::get_singleton()->is_layered_allowed();
+#ifdef MODULE_FFMPEG_ENABLED
+		// DOM-only media (cross-origin video/iframes) is composed beneath the
+		// canvas. Ordinary opaque rendering remains opaque; a media Control may
+		// explicitly erase its own rectangle without covering later UI draws.
+		attributes.alpha = true;
+#endif
 		attributes.antialias = false;
 		attributes.majorVersion = 2;
 		attributes.explicitSwapControl = true;

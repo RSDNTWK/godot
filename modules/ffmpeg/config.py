@@ -27,6 +27,8 @@ def get_doc_classes():
     return [
         "VideoStreamMedia",
         "AudioStreamMedia",
+        "AudioStreamPCMDecoder",
+        "MediaStreamPlayer",
     ]
 
 

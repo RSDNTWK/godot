@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="AudioStreamPCMDecoder" inherits="RefCounted" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Opt-in bounded worker decoding of finite audio into a sample-indexed WAV.
+	</brief_description>
+	<description>
+		Prepares finite media into stereo 16-bit PCM in memory for playlists that need [AudioStreamWAV] sample loops. It does not change ordinary streaming. Native builds support local media, validated HTTPS media and original YouTube URLs. Web supports local files and finite direct HTTPS responses permitted by CORS; YouTube remains an iframe source and cannot be decoded to PCM by this Web API.
+		Call [method decode] on the main thread while a [SceneTree] is running. Decoding, resampling, network opening and resolution happen on a worker. [signal completed] runs on the main thread. Keep loop JSON values as fractional seconds and convert only for playback using [code]roundi(loop_seconds * wav.mix_rate)[/code]. For example, 32.123 seconds at 48000 Hz is 1541904 samples. Set [member AudioStreamWAV.loop_begin], [member AudioStreamWAV.loop_end] and [member AudioStreamWAV.loop_mode] on the returned resource after checking the points fit its [code]frame_count[/code].
+		Only actual decoded frames are retained, including decoder/resampler drain. Buffering silence from a realtime mixer never enters this path. Duration is computed from the final decoded frame count rather than trusting container duration. Invalid, cancelled, timed-out and over-limit requests never return a partial WAV.
+		The PCM byte limit bounds output payload, not the process's entire memory. Decoder/packet buffers and temporary allocation while growing the PCM array are additional. The WAV shares the final PCM array using copy-on-write storage; a caller must also budget PCM retained by other tracks or copied for editing. Live inputs cannot be prepared as finite loops; keep their streaming/DVR path.
+		A running request retains itself until its pool task is collected, so dropping the caller's reference after [method cancel] does not leave a dangling worker. Cancellation returns immediately and suppresses completion that has not already been emitted. Start a new decoder instance for a replacement track, or wait until [method is_decoding] is false before reusing this instance. Reentrant requests from a completion handler are supported. Scene-tree shutdown cancels requests; worker-pool shutdown handles remaining task cleanup without a blocking join from the decoder's destructor.
+		Available on threaded native Windows, Linux/BSD and Android builds with the media-stream module, and both threaded and non-threaded Web builds with FFmpeg. Web decoding runs in a separate dedicated worker and requires no native MediaHTTP module or shared memory. It transiently buffers at most 64 MiB of encoded input, accepts only finite Content-Length responses without redirects, denies secondary decoder requests, and terminates its worker on cancellation or deadline. Each worker's WASM heap has a 512 MiB ceiling; at most four workers may be active. These caps are additional to the requested PCM payload limit and do not describe total browser memory. Only Accept and Accept-Language request headers are accepted on Web. Browser CORS, TLS, networking and restricted-header rules apply; native DNS/IP pinning is not available on Web. No persistent encoded or decoded media cache is created.
+		Use a browser playback fallback when CORS prevents decoding but the source still permits media embedding. Decoding failure must not be treated as proof that browser playback is unavailable. Live and adaptive manifests require streaming. YouTube service restrictions still apply, and successful local or direct-media decoding does not qualify original YouTube URLs. This API does not migrate any project's existing Web callers.
+	</description>
+	<tutorials />
+	<methods>
+		<method name="get_capabilities" qualifiers="static">
+			<return type="Dictionary" />
+			<param index="0" name="source" type="String" default="&quot;&quot;" />
+			<description>Reports backend support and preparation limits. These describe an available operation, not a guarantee that a particular codec, server or CORS policy will allow it. Check the actual decode result. Web reports its encoded-input cap, worker heap cap, finite-response and CORS requirements separately from native destination validation.</description>
+		</method>
+		<method name="cancel">
+			<return type="void" />
+			<description>Interrupts the current request without waiting for decoding. Its completion signal is suppressed. Call on the main thread.</description>
+		</method>
+		<method name="decode">
+			<return type="int" enum="Error" />
+			<param index="0" name="source" type="String" />
+			<param index="1" name="mix_rate" type="int" default="0" />
+			<param index="2" name="max_pcm_bytes" type="int" default="134217728" />
+			<param index="3" name="timeout_msec" type="int" default="60000" />
+			<param index="4" name="http_headers" type="Dictionary" default="{}" />
+			<description>Starts a worker request. A zero mix rate snapshots the current AudioServer mix rate; explicit rates must be between 8000 and 192000 Hz. PCM payload is limited to between 4 bytes and 128 MiB, rounded down to whole stereo 16-bit frames. Timeout must be between 1 and 60000 ms and covers resolution, transport, decoding and result collection. Returns [constant OK] when started, [constant ERR_BUSY] while the previous request is still being collected, or an argument/setup error. The source must use HTTPS for network transport; there is no silent HTTP-to-HTTPS rewriting. Native and browser validation guarantees differ as described above.</description>
+		</method>
+		<method name="get_request_id" qualifiers="const">
+			<return type="int" />
+			<description>Returns this instance's monotonically increasing request ID. Associate it and the decoder instance with the application's own queue-entry ID.</description>
+		</method>
+		<method name="is_decoding" qualifiers="const">
+			<return type="bool" />
+			<description>Returns whether the worker task still awaits completion/collection, including cancellation cleanup.</description>
+		</method>
+	</methods>
+	<signals>
+		<signal name="completed">
+			<param index="0" name="error" type="int" />
+			<param index="1" name="result" type="Dictionary" />
+			<description>On success returns [code]stream[/code] ([AudioStreamWAV]), [code]duration[/code], [code]frame_count[/code], [code]mix_rate[/code], [code]pcm_bytes[/code] and advisory [code]metadata[/code]. Results include [code]source[/code], [code]request_id[/code], [code]decoder_instance_id[/code] and [code]worker_thread[/code]. Errors can include [code]message[/code] and never include a partial stream. Match results to the exact queued entry and preserve authoritative project titles.</description>
+		</signal>
+	</signals>
+</class>

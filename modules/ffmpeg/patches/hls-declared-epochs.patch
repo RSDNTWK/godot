@@ -1,0 +1,329 @@
+Godot ToI: opt-in UTC timeline for declared fMP4 HLS epochs
+
+Apply after hls-custom-https-io.patch to FFmpeg n9.0.2.
+Single-track unencrypted H264/AAC only; unsupported layouts/codecs, missing
+UTC anchors, invalid dates and large UTC gaps remain errors. The EOF barrier
+keeps packet read-ahead/probe buffers in their original epoch. Reopening reads
+the new MAP and forwards codec extradata. All opens retain parent io_open,
+interrupt callbacks and the existing nested-file restrictions. Default off.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -39,6 +39,7 @@
+ #include "libavutil/opt.h"
+ #include "libavutil/dict.h"
+ #include "libavutil/time.h"
++#include "libavutil/parseutils.h"
+ #include "avformat.h"
+ #include "demux.h"
+ #include "internal.h"
+@@ -75,6 +76,8 @@
+ };
+ 
+ struct segment {
++    int discontinuity;
++    int64_t program_date_time; /* AV_TIME_BASE, or AV_NOPTS_VALUE */
+     int64_t duration;
+     int64_t url_offset;
+     int64_t size;
+@@ -186,6 +189,19 @@
+      * index of the first timed-ID3 stream seen; -1 if none. */
+     AVDictionary *timed_id3_metadata;
+     int timed_id3_stream_index;
++
++    /* Opt-in Godot timeline for single-track, dated fMP4 playlists. The IO
++     * boundary is an EOF barrier: never label old buffered packets using the
++     * next segment's epoch. Only hls_read_packet advances the demux epoch. */
++    int toi_epoch_candidate;
++    int toi_boundary_pending;
++    int toi_new_extradata;
++    int toi_reported_timeline;
++    int64_t toi_last_end_date;
++    int64_t toi_boundary_seq;
++    int64_t toi_epoch_date;
++    int64_t toi_epoch_pts;
++    int toi_epoch_pts_known;
+ };
+ 
+ /*
+@@ -244,6 +260,7 @@
+     int http_multiple;
+     int http_seekable;
+     int seg_max_retry;
++    int toi_pdt_timeline;
+     AVIOContext *playlist_pb;
+     HLSCryptoContext  crypto_ctx;
+ } HLSContext;
+@@ -824,6 +841,8 @@
+ {
+     int ret = 0, is_segment = 0, is_variant = 0;
+     int64_t duration = 0;
++    int discontinuity = 0;
++    int64_t program_date_time = AV_NOPTS_VALUE;
+     enum KeyType key_type = KEY_NONE;
+     uint8_t iv[16] = "";
+     int has_iv = 0;
+@@ -952,6 +971,21 @@
+                 seq_no &= INT64_MAX/2;
+             }
+             pls->start_seq_no = seq_no;
++        } else if (!strcmp(line, "#EXT-X-DISCONTINUITY")) {
++            discontinuity = 1;
++            /* A new epoch needs its own explicit UTC anchor. */
++            program_date_time = AV_NOPTS_VALUE;
++        } else if (av_strstart(line, "#EXT-X-PROGRAM-DATE-TIME:", &ptr)) {
++            int64_t date;
++            /* Restrict the opt-in timeline to a representable civil UTC range.
++             * Invalid dates never become guessed packet timestamp offsets. */
++            const char *time = strchr(ptr, 'T');
++            if (time && (strchr(time, 'Z') || strchr(time, '+') || strchr(time, '-')) &&
++                av_parse_time(&date, ptr, 0) >= 0 &&
++                date >= INT64_C(946684800000000) && date < INT64_C(7258118400000000))
++                program_date_time = date;
++            else
++                program_date_time = AV_NOPTS_VALUE;
+         } else if (av_strstart(line, "#EXT-X-PLAYLIST-TYPE:", &ptr)) {
+             ret = ensure_playlist(c, &pls, url);
+             if (ret < 0)
+@@ -1112,6 +1146,15 @@
+                                     " set to default value to 1ms.\n", seg->url);
+                     duration = 0.001 * AV_TIME_BASE;
+                 }
++                seg->discontinuity = discontinuity;
++                seg->program_date_time = program_date_time;
++                discontinuity = 0;
++                if (program_date_time != AV_NOPTS_VALUE) {
++                    if (duration <= INT64_MAX - program_date_time)
++                        program_date_time += duration;
++                    else
++                        program_date_time = AV_NOPTS_VALUE;
++                }
+                 seg->duration = duration;
+                 seg->key_type = key_type;
+                 dynarray_add(&pls->segments, &pls->n_segments, seg);
+@@ -1773,6 +1816,21 @@
+         return ret;
+ 
+     seg = current_segment(v);
++
++    if (c->toi_pdt_timeline && seg && seg->init_section &&
++        seg->key_type == KEY_NONE && seg->program_date_time != AV_NOPTS_VALUE &&
++        !v->toi_epoch_candidate) {
++        v->toi_epoch_candidate = 1;
++        v->toi_epoch_date = seg->program_date_time;
++        v->toi_boundary_seq = v->cur_seq_no;
++    }
++    if (v->toi_epoch_candidate > 0 && seg && seg->discontinuity &&
++        v->cur_seq_no != v->toi_boundary_seq) {
++        /* Drain every old-epoch packet from the subdemuxer before reopening
++         * with the new MAP. In particular, do not concatenate two MOOVs. */
++        v->toi_boundary_pending = 1;
++        return AVERROR_EOF;
++    }
+ 
+     if (!v->input || v->input_read_done) {
+         /* load/update Media Initialization Section, if any */
+@@ -2694,6 +2752,146 @@
+     return 0;
+ }
+ 
++/* Reopen only the supported single-track fMP4 case. Broader layout/codec
++ * changes remain explicit errors instead of reusing incompatible decoders. */
++static int toi_reopen_epoch(struct playlist *pls, int seeking)
++{
++    HLSContext *c = pls->parent->priv_data;
++    struct segment *seg = current_segment(pls);
++    const AVInputFormat *fmt = pls->ctx->iformat;
++    AVCodecParameters *old = NULL;
++    AVStream *st;
++    AVRational tb;
++    AVDictionary *opts = NULL;
++    int ret;
++
++    if (!seg || !seg->init_section || seg->key_type != KEY_NONE ||
++        seg->program_date_time == AV_NOPTS_VALUE || pls->ctx->nb_streams != 1 ||
++        !strstr(fmt->name, "mov"))
++        return AVERROR(ENOSYS);
++    if (!seeking && pls->toi_last_end_date &&
++        llabs(seg->program_date_time - pls->toi_last_end_date) > INT64_C(30000000))
++        return AVERROR(ENOSYS);
++    st = pls->ctx->streams[0];
++    if (st->codecpar->codec_id != AV_CODEC_ID_H264 && st->codecpar->codec_id != AV_CODEC_ID_AAC)
++        return AVERROR(ENOSYS);
++    tb = st->time_base;
++    old = avcodec_parameters_alloc();
++    if (!old)
++        return AVERROR(ENOMEM);
++    ret = avcodec_parameters_copy(old, st->codecpar);
++    if (ret < 0)
++        goto end;
++
++    pls->ctx->pb = NULL;
++    avformat_close_input(&pls->ctx);
++    /* The old demuxer reached our EOF barrier, so no old bytes remain. */
++    pls->pb.pub.eof_reached = 0;
++    pls->pb.pub.error = 0;
++    pls->pb.pub.buf_ptr = pls->pb.pub.buf_end = pls->pb.pub.buffer;
++    pls->pb.pub.pos = 0;
++    ff_format_io_close(pls->parent, &pls->input);
++    ff_format_io_close(pls->parent, &pls->input_next);
++    pls->input_read_done = pls->input_next_requested = pls->input_reuse = 0;
++    pls->cur_init_section = NULL;
++    pls->init_sec_data_len = pls->init_sec_buf_read_offset = 0;
++    pls->toi_boundary_pending = 0;
++    pls->toi_boundary_seq = pls->cur_seq_no;
++    pls->toi_epoch_date = seg->program_date_time;
++    pls->toi_epoch_pts_known = 0;
++    pls->toi_new_extradata = 1;
++    pls->toi_last_end_date = 0;
++
++    pls->ctx = avformat_alloc_context();
++    if (!pls->ctx) {
++        ret = AVERROR(ENOMEM);
++        goto end;
++    }
++    pls->ctx->pb = &pls->pb.pub;
++    pls->ctx->io_open = nested_io_open;
++    pls->ctx->interrupt_callback = pls->parent->interrupt_callback;
++    pls->ctx->probesize = pls->parent->probesize;
++    pls->ctx->max_analyze_duration = pls->parent->max_analyze_duration;
++    ret = ff_copy_whiteblacklists(pls->ctx, pls->parent);
++    if (ret < 0)
++        goto end;
++    av_dict_copy(&opts, c->seg_format_opts, 0);
++    ret = avformat_open_input(&pls->ctx, seg->url, fmt, &opts);
++    if (ret < 0)
++        goto end;
++    if (pls->ctx->nb_streams != 1) {
++        ret = AVERROR(ENOSYS);
++        goto end;
++    }
++    st = pls->ctx->streams[0];
++    if (av_cmp_q(tb, st->time_base) || old->codec_id != st->codecpar->codec_id ||
++        old->codec_type != st->codecpar->codec_type ||
++        old->width != st->codecpar->width || old->height != st->codecpar->height ||
++        old->sample_rate != st->codecpar->sample_rate ||
++        av_channel_layout_compare(&old->ch_layout, &st->codecpar->ch_layout))
++        ret = AVERROR(ENOSYS);
++end:
++    av_dict_free(&opts);
++    avcodec_parameters_free(&old);
++    return ret;
++}
++
++static int toi_normalize_epoch_packet(struct playlist *pls)
++{
++    AVStream *st;
++    AVPacket *pkt = pls->pkt;
++    int64_t offset, date;
++    uint8_t *extra;
++    if (pls->toi_epoch_candidate <= 0)
++        return 0;
++    if (pls->ctx->nb_streams != 1 || !strstr(pls->ctx->iformat->name, "mov")) {
++        pls->toi_epoch_candidate = -1;
++        return 0;
++    }
++    st = pls->ctx->streams[0];
++    if (st->codecpar->codec_id != AV_CODEC_ID_H264 && st->codecpar->codec_id != AV_CODEC_ID_AAC) {
++        pls->toi_epoch_candidate = -1;
++        return 0;
++    }
++    if (pkt->pts == AV_NOPTS_VALUE || pkt->dts == AV_NOPTS_VALUE ||
++        st->time_base.num <= 0 || st->time_base.den <= 0)
++        return AVERROR_INVALIDDATA;
++    if (!pls->toi_epoch_pts_known) {
++        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && !(pkt->flags & AV_PKT_FLAG_KEY))
++            return AVERROR(ENOSYS);
++        pls->toi_epoch_pts = pkt->pts;
++        pls->toi_epoch_pts_known = 1;
++    }
++    date = av_rescale_q(pls->toi_epoch_date, AV_TIME_BASE_Q, st->time_base);
++    /* Explicit limits keep subtractions/additions representable, including
++     * hostile packet timestamps. No guesses for missing or unannounced resets. */
++    if (date <= 0 || date > INT64_MAX / 4 ||
++        pls->toi_epoch_pts < -INT64_MAX / 4 || pls->toi_epoch_pts > INT64_MAX / 4 ||
++        pkt->pts < -INT64_MAX / 4 || pkt->pts > INT64_MAX / 4 ||
++        pkt->dts < -INT64_MAX / 4 || pkt->dts > INT64_MAX / 4 ||
++        pkt->duration < 0 || pkt->duration > INT64_MAX / 4)
++        return AVERROR_INVALIDDATA;
++    offset = date - pls->toi_epoch_pts;
++    pkt->pts += offset;
++    pkt->dts += offset;
++    if (pls->toi_new_extradata && st->codecpar->extradata_size > 0) {
++        extra = av_packet_new_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, st->codecpar->extradata_size);
++        if (!extra)
++            return AVERROR(ENOMEM);
++        memcpy(extra, st->codecpar->extradata, st->codecpar->extradata_size);
++    }
++    pls->toi_new_extradata = 0;
++    pls->toi_last_end_date = FFMAX(pls->toi_last_end_date,
++        av_rescale_q(pkt->pts + FFMAX(pkt->duration, 0), st->time_base, AV_TIME_BASE_Q));
++    if (pls->n_main_streams && !pls->toi_reported_timeline) {
++        pls->toi_reported_timeline = 1;
++        /* Observed once during probing, then immutable for decoder threads. */
++        av_dict_set(&pls->main_streams[0]->metadata, "toi_hls_pdt_timeline", "1", 0);
++        pls->main_streams[0]->pts_wrap_bits = 64;
++    }
++    return 0;
++}
++
+ static int hls_read_packet(AVFormatContext *s, AVPacket *pkt)
+ {
+     HLSContext *c = s->priv_data;
+@@ -2716,10 +2914,19 @@
+                 else
+                     ret = av_read_frame(pls->ctx, pls->pkt);
+                 if (ret < 0) {
++                    if (ret == AVERROR_EOF && pls->toi_boundary_pending) {
++                        ret = toi_reopen_epoch(pls, 0);
++                        if (ret < 0)
++                            return ret;
++                        continue;
++                    }
+                     if (!avio_feof(&pls->pb.pub) && ret != AVERROR_EOF)
+                         return ret;
+                     break;
+                 } else {
++                    ret = toi_normalize_epoch_packet(pls);
++                    if (ret < 0)
++                        return ret;
+                     /* stream_index check prevents matching picture attachments etc. */
+                     if (pls->is_id3_timestamped && pls->pkt->stream_index == 0) {
+                         /* audio elementary streams are id3 timestamped */
+@@ -2773,8 +2980,11 @@
+                     }
+ 
+                     tb = get_timebase(pls);
+-                    ts_diff = av_rescale_rnd(pls->pkt->dts, AV_TIME_BASE,
+-                                            tb.den, AV_ROUND_DOWN) -
++                    /* Match first_timestamp's rounding: rounding a keyframe
++                     * down by one microsecond can discard the only keyframe
++                     * in the selected segment, making an otherwise valid seek
++                     * drain to EOF. Also preserve a non-unit time-base numerator. */
++                    ts_diff = av_rescale_q(pls->pkt->dts, tb, AV_TIME_BASE_Q) -
+                             pls->seek_timestamp;
+                     if (ts_diff >= 0 && (pls->seek_flags  & AVSEEK_FLAG_ANY ||
+                                         pls->pkt->flags & AV_PKT_FLAG_KEY)) {
+@@ -2988,6 +3198,13 @@
+         }
+ 
+         pls->last_seq_no = pls->cur_seq_no;
++        if (pls->toi_epoch_candidate > 0) {
++            /* A seek can land after the boundary tag, including a backwards
++             * seek into an older epoch. Read its MAP and anchor afresh. */
++            int ret = toi_reopen_epoch(pls, 1);
++            if (ret < 0)
++                return ret;
++        }
+     }
+ 
+     c->cur_timestamp = seek_timestamp;
+@@ -3069,6 +3286,8 @@
+         OFFSET(http_seekable), AV_OPT_TYPE_BOOL, { .i64 = -1}, -1, 1, FLAGS},
+     {"seg_format_options", "Set options for segment demuxer",
+         OFFSET(seg_format_opts), AV_OPT_TYPE_DICT, {.str = NULL}, 0, 0, FLAGS},
++    {"toi_pdt_timeline", "Use declared UTC epochs for single-track H264/AAC fMP4 HLS",
++        OFFSET(toi_pdt_timeline), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS},
+     {"seg_max_retry", "Maximum number of times to reload a segment on error.",
+      OFFSET(seg_max_retry), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, FLAGS},
+     {NULL}

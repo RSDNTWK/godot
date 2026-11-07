@@ -341,7 +341,9 @@ int AudioStreamPlaybackWAV::_mix_internal(AudioFrame *p_buffer, int p_frames) {
 		limit = (increment < 0) ? begin_limit : end_limit;
 
 		/* compute what is shorter, the todo or the limit? */
-		aux = (limit - offset) / increment + 1;
+		// Forward loops use an exclusive end. Including that frame also skips
+		// loop_begin when the next iteration wraps the overshooting offset.
+		aux = (limit - offset) / increment + (increment > 0 && loop_format == AudioStreamWAV::LOOP_FORWARD ? 0 : 1);
 		target = (aux < todo) ? aux : todo; /* mix target is the shorter buffer */
 
 		/* check just in case */

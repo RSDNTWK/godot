@@ -42,6 +42,7 @@ class YouTubeExtractor {
 	int max_height = 1080;
 	Dictionary result;
 	uint64_t deadline = 0;
+	uint64_t absolute_deadline = 0;
 	int hls_manifest_requests = 0;
 	bool _interrupted() const;
 	Error _http(const String &p_url, const String &p_agent, String &r_body, const String &p_post = String(), const Dictionary &p_headers = Dictionary());
@@ -50,6 +51,6 @@ class YouTubeExtractor {
 	Error _resolve();
 
 public:
-	explicit YouTubeExtractor(const SafeFlag &p_cancelled) : cancelled(p_cancelled) {}
+	explicit YouTubeExtractor(const SafeFlag &p_cancelled, uint64_t p_absolute_deadline = 0) : cancelled(p_cancelled), absolute_deadline(p_absolute_deadline) {}
 	Error resolve(const String &p_url, bool p_audio_only, Dictionary &r_result, int p_max_height = 1080);
 };

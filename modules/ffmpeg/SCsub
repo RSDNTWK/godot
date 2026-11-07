@@ -10,6 +10,21 @@ Import("env_modules")
 # private playback implementation. Keep this module boundary separate from
 # the legacy WebM/libvpx module during the migration.
 env_ffmpeg = env_modules.Clone()
+
+if env['platform'] == 'web' and env['ffmpeg_dir']:
+    import sys
+    sys.path.insert(0, Dir('web').abspath)
+    from build_worker import build_pcm_worker
+    worker_sdk = os.path.join(env['ffmpeg_dir'], 'nothreads')
+    env['FFMPEG_WEB_WORKER_SDK'] = worker_sdk
+    worker_inputs = [File('web/pcm_decoder.cpp'), File('web/build_worker.py')]
+    worker_inputs += [env.File(os.path.join(worker_sdk, 'lib', 'lib' + lib + '.a')) for lib in ['avformat', 'avcodec', 'swresample', 'avutil']]
+    worker_dav1d = os.path.join(worker_sdk, 'deps', 'lib', 'libdav1d.a')
+    if os.path.isfile(worker_dav1d):
+        worker_inputs.append(env.File(worker_dav1d))
+    env['FFMPEG_WEB_PCM_WORKER'] = env.Command('#bin/godot.media.decoder.js', worker_inputs, env.Action(build_pcm_worker, 'Building dedicated Web PCM decoder'))
+    env.AddJSLibraries(['#modules/ffmpeg/web/library_godot_media.js'])
+    env.AddJSLibraries(['#modules/ffmpeg/web/library_godot_media_player.js'])
 env_ffmpeg.Prepend(CPPPATH=["#thirdparty/libogg/"])
 if env["tests"]:
     # Keep test seams private to this module; the rest of the engine does not

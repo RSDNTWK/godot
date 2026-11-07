@@ -83,5 +83,13 @@
   "required_runtime_files": [
     "bin/libvpl.dll"
   ],
-  "ffmpeg": "9.0.2"
+  "ffmpeg": "9.0.2",
+  "hls_declared_epochs": {
+    "patch": "modules/ffmpeg/patches/hls-declared-epochs.patch",
+    "patch_sha256": "302ae91cbba12503b062e5632c755245004682331894ac8fdbc15f0540728a82",
+    "library_sha256": "017fdf6f72c75ada69279bf1f2112d5394719e519d3edf11a8f97156847e2a94",
+    "default": "off in FFmpeg; enabled by native engine playback and finite PCM demuxing; PCM adds no clock padding",
+    "updated_utc": "2026-11-07T10:58:26.868475+00:00",
+    "patch_chain_verification": "build/release-20261107/verification/pcm-hls-discontinuity/patch-chain-verification.json"
+  }
 }

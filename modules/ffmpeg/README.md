@@ -129,7 +129,21 @@ SDK uses upstream FFmpeg `n9.0.2`, commit
 hardware-decoder options and add `--enable-demuxer=hls --enable-demuxer=mpegts`
 for unencrypted HTTPS HLS, including live inputs. Apply
 `patches/hls-custom-https-io.patch` so HLS recognizes HTTPS provided by custom
-AVIO when no FFmpeg TLS backend is built. HLS also selects the AAC,
+AVIO when no FFmpeg TLS backend is built. Then apply
+`patches/hls-declared-epochs.patch`. Native real-time playback and finite PCM preparation opt into its
+`toi_pdt_timeline` demuxer option. This maps unencrypted single-track H.264/AAC
+fMP4 playlists with program-date timestamps onto a shared UTC clock. A declared
+discontinuity drains the old demuxer before reopening with the next MAP; codec
+extradata follows the new packets. Track layout, dimensions, time base and audio
+rate/layout must remain compatible. Advertised UTC anchors and durations must
+accurately describe the source. Missing/invalid UTC anchors, changes to other
+codecs/layouts and UTC gaps over 30 seconds remain unsupported. Undeclared source
+resets retain the explicit stop/error guard. Real-time audio trims overlapping
+samples or pads bounded declared timeline gaps. Finite PCM preparation retains
+all decoder samples across the same demuxer transitions, without clock trimming
+or padding. Web transport is unchanged.
+
+HLS also selects the AAC,
 AC-3/E-AC-3 demuxers and AC-3 parser in FFmpeg. No FFmpeg TLS backend is required:
 Godot owns the validated network connections. Keep GPL/nonfree disabled.
 
@@ -260,3 +274,50 @@ URL may be queued twice. Metadata is advisory: playlist names and user-entered
 evidence titles remain authoritative. Queued items can keep a temporary title
 until playback opens; this API does not provide pre-submission queue lookup or
 share caches between separately created resolver/playback instances.
+
+## Unified media controller and Web preparation
+
+`MediaStreamPlayer` is an opt-in Control with the same commands/events on
+native and Web targets. It wraps the existing native resources or browser
+media/YouTube iframe backends. It does not migrate existing project callers.
+Every event includes the controller's `playback_instance_id` and opening
+`generation`; seek completions also include `seek_request_id`. Applications
+retain their own queue/evidence identities, authoritative titles and clocks.
+
+`open(url, {"prepare_pcm": true})` is for bounded finite audio playlists.
+Other sources stream normally. Precise PCM loops and approximate seek loops
+are distinct capabilities. Capability and seekable-range changes are events.
+An expired loop is disabled once, retains its requested boundaries, and leaves
+playback running. Source changes suppress retired callbacks.
+
+On both Web variants, `AudioStreamPCMDecoder` runs FFmpeg in a dedicated
+non-threaded WASM worker, independent of MediaHTTP and SharedArrayBuffer.
+The output cap is 128 MiB; transient encoded input is capped at 64 MiB.
+Each worker's WASM heap is capped at 512 MiB, with at most four active workers.
+These are component limits, not a promise about total browser memory. Remote
+preparation requires a finite Content-Length, CORS and direct HTTPS without
+redirects. The decoder denies secondary requests and never returns partial
+WAVs on failure, timeout or cancellation.
+
+Web playback retains browser-permitted HTTP/HTTPS links rather than rewriting
+them. Its networking, redirects and mixed-content rules belong to the browser;
+it does not claim native destination/DNS pinning. CORS-denied media may still
+play through an ordinary media element. Direct browser media buffers are
+browser-managed; HLS.js 1.7.4 has explicit buffer targets, not a hard cap on
+all browser-owned memory. Browser media/iframe gain is independent of Godot
+audio buses/effects. The capability dictionary reports these distinctions.
+
+CORS-readable video can render as a Godot texture. DOM-only video/iframes are
+composed beneath the canvas with later Godot controls above them. The current
+DOM adapter is qualified for axis-aligned main-viewport controls; arbitrary
+transforms, SubViewports and DOM fullscreen composition are not qualified.
+YouTube uses the iframe API on Web, with seek-based finite loops and no
+invented DVR ranges, extracted URLs or PCM access. Native extraction is
+unchanged. Keep existing project fallbacks until the actual required layouts
+and source capabilities are qualified.
+
+The standard Web exporter bundles `.media.worker.js`, `.media.decoder.js`
+and `.media.hls.js`. Deploy all three alongside the ordinary engine assets.
+The standalone decoder always uses `ffmpeg_dir/nothreads`, even when the main
+engine uses the threaded SDK. HLS.js is pinned under `thirdparty/hlsjs` with its
+upstream license and SHA256 provenance.

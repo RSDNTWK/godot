@@ -45,6 +45,9 @@ def create_template_zip(env, js, wasm, side):
         zip_dir.File(binary_name + ".audio.worklet.js"),
         zip_dir.File(binary_name + ".audio.position.worklet.js"),
     ]
+    if env.get('FFMPEG_WEB_PCM_WORKER'):
+        in_files += [env['FFMPEG_WEB_PCM_WORKER'][0], '#modules/ffmpeg/web/pcm.worker.js', '#thirdparty/hlsjs/hls.min.js']
+        out_files += [zip_dir.File(binary_name + '.media.decoder.js'), zip_dir.File(binary_name + '.media.worker.js'), zip_dir.File(binary_name + '.media.hls.js')]
     # Dynamic linking (extensions) specific.
     if env["dlink_enabled"]:
         in_files.append(side)  # Side wasm (contains the actual Godot code).

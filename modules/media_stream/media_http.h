@@ -52,6 +52,7 @@ class MediaHTTP {
 	bool resumable = false;
 	String entity_validator;
 	uint64_t deadline = 0;
+	uint64_t absolute_deadline = 0;
 	int response_status = 0;
 	bool interrupted() const;
 	Error connect(const String &p_host);
@@ -59,7 +60,7 @@ class MediaHTTP {
 	Error resume();
 
 public:
-	explicit MediaHTTP(const SafeFlag *p_cancel = nullptr, const SafeFlag *p_secondary_cancel = nullptr) : cancel(p_cancel), secondary_cancel(p_secondary_cancel) {}
+	explicit MediaHTTP(const SafeFlag *p_cancel = nullptr, const SafeFlag *p_secondary_cancel = nullptr, uint64_t p_absolute_deadline = 0) : cancel(p_cancel), secondary_cancel(p_secondary_cancel), absolute_deadline(p_absolute_deadline) {}
 	static bool public_address(const IPAddress &p_address);
 	static bool valid_url(const String &p_url);
 	static String resolve_url(const String &p_base, const String &p_target);

@@ -32,6 +32,8 @@
 
 #include "ffmpeg_dvr.h"
 
+#include "core/os/os.h"
+
 #include "modules/media_stream/media_http.h"
 
 extern "C" {
@@ -43,6 +45,7 @@ class FFmpegRemoteIO {
 	MediaHTTP http;
 	const SafeFlag *cancel;
 	const SafeFlag *stop;
+	uint64_t absolute_deadline = 0;
 	Dictionary headers;
 	AVIOContext *io = nullptr;
 	Ref<FFmpegDVRWindow> dvr;
@@ -105,7 +108,7 @@ class FFmpegRemoteIO {
 	}
 	static int interrupt(void *p_self) {
 		FFmpegRemoteIO *self = static_cast<FFmpegRemoteIO *>(p_self);
-		return (self->cancel && self->cancel->is_set()) || (self->stop && self->stop->is_set());
+		return (self->cancel && self->cancel->is_set()) || (self->stop && self->stop->is_set()) || (self->absolute_deadline && OS::get_singleton()->get_ticks_usec() >= self->absolute_deadline);
 	}
 	static int open_secondary(AVFormatContext *p_format, AVIOContext **r_io, const char *p_url, int p_flags, AVDictionary **) {
 		FFmpegRemoteIO *parent = static_cast<FFmpegRemoteIO *>(p_format->opaque);
@@ -113,7 +116,7 @@ class FFmpegRemoteIO {
 		if (!parent || (p_flags & AVIO_FLAG_WRITE)) {
 			return AVERROR(EACCES);
 		}
-		FFmpegRemoteIO *child = memnew(FFmpegRemoteIO(parent->cancel, parent->headers, parent->stop));
+		FFmpegRemoteIO *child = memnew(FFmpegRemoteIO(parent->cancel, parent->headers, parent->stop, parent->absolute_deadline));
 		String url = MediaHTTP::resolve_url(parent->http.get_url(), String::utf8(p_url));
 		if (parent->dvr.is_valid() && (url == parent->manifest_url || url == parent->http.get_url())) {
 			child->dvr = parent->dvr;
@@ -136,7 +139,7 @@ class FFmpegRemoteIO {
 	}
 
 public:
-	FFmpegRemoteIO(const SafeFlag *p_cancel, const Dictionary &p_headers, const SafeFlag *p_stop = nullptr) : http(p_cancel, p_stop), cancel(p_cancel), stop(p_stop), headers(p_headers) {}
+	FFmpegRemoteIO(const SafeFlag *p_cancel, const Dictionary &p_headers, const SafeFlag *p_stop = nullptr, uint64_t p_absolute_deadline = 0) : http(p_cancel, p_stop, p_absolute_deadline), cancel(p_cancel), stop(p_stop), absolute_deadline(p_absolute_deadline), headers(p_headers) {}
 	void set_dvr(const Ref<FFmpegDVRWindow> &p_dvr, bool p_primary) {
 		dvr = p_dvr;
 		primary = p_primary;
@@ -214,6 +217,9 @@ public:
 		(*r_format)->max_probe_packets = 256;
 		(*r_format)->max_analyze_duration = 3 * AV_TIME_BASE;
 		AVDictionary *options = nullptr;
+		// Finite PCM also needs a fresh demuxer at declared MAP changes.
+		// Its decoder separately disables real-time clock trimming/padding.
+		av_dict_set(&options, "toi_pdt_timeline", "1", 0);
 		if (input_start >= 0) {
 			av_dict_set(&options, "live_start_index", "0", 0);
 		}

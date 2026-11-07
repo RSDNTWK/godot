@@ -1,0 +1,8 @@
+Files: hls.min.js
+Upstream: https://github.com/video-dev/hls.js
+Version: v1.7.4 (142fcab)
+Source: official release.zip, dist/hls.min.js
+SHA256: cfc70cc9e9fc63d071919e087670abc760c8fd1bc889b88588026e4d22193bbe
+License: Apache-2.0
+Purpose: optional browser HLS playback for the FFmpeg module's media controller.
+No upstream source modifications.

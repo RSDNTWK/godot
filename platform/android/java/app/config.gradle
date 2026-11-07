@@ -193,7 +193,7 @@ final String VALUE_SEPARATOR_REGEX = "\\|"
 ext.getExportEnabledABIs = { ->
     String enabledABIs = project.hasProperty("export_enabled_abis") ? project.property("export_enabled_abis") : ""
     if (enabledABIs == null || enabledABIs.isEmpty()) {
-        enabledABIs = "armeabi-v7a|arm64-v8a|x86|x86_64|"
+        enabledABIs = "armeabi-v7a|arm64-v8a|"
     }
     Set<String> exportAbiFilter = []
     for (String abi_name : enabledABIs.split(VALUE_SEPARATOR_REGEX)) {

@@ -219,5 +219,13 @@
     "avcodec": "1ee28032e885594c8a9746e13eb85abf9d2645c37113a5ff14ef12502f3e08f4",
     "swresample": "99c6875847d9d883dfd01dbd5de4613d67771fc14f8f06b6137e9b52cbe9b83a"
   },
-  "android_shared_link_test": false
+  "android_shared_link_test": false,
+  "hls_declared_epochs": {
+    "patch": "modules/ffmpeg/patches/hls-declared-epochs.patch",
+    "patch_sha256": "302ae91cbba12503b062e5632c755245004682331894ac8fdbc15f0540728a82",
+    "library_sha256": "a2aeb9ded516d145abbc5c9a70cfe25f1dc5b77d0ca466eb329199b4db82e99c",
+    "default": "off in FFmpeg; enabled by native engine playback and finite PCM demuxing; PCM adds no clock padding",
+    "updated_utc": "2026-11-07T10:58:26.870479+00:00",
+    "patch_chain_verification": "build/release-20261107/verification/pcm-hls-discontinuity/patch-chain-verification.json"
+  }
 }

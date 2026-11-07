@@ -270,6 +270,11 @@ TEST_CASE("[PCKPacker] Pack a PCK file with some files and directories") {
 			"Starting a PCK file should return an OK error code.");
 
 	const String base_dir = OS::get_singleton()->get_executable_path().get_base_dir();
+	const uint64_t version_size = FileAccess::get_file_as_bytes(base_dir.path_join("../version.py")).size();
+	const uint64_t initial_icon_size = FileAccess::get_file_as_bytes(base_dir.path_join("../misc/logo/icon.png")).size();
+	const uint64_t svg_size = FileAccess::get_file_as_bytes(base_dir.path_join("../misc/logo/icon.svg")).size();
+	const uint64_t replacement_icon_size = FileAccess::get_file_as_bytes(base_dir.path_join("../misc/logo/logo.png")).size();
+	const uint64_t final_payload_size = version_size + svg_size + replacement_icon_size + String("Hello world!").to_utf8_buffer().size();
 
 	CHECK_MESSAGE(
 			pck_packer.add_file("version.py", base_dir.path_join("../version.py"), "version.py") == OK,
@@ -296,11 +301,11 @@ TEST_CASE("[PCKPacker] Pack a PCK file with some files and directories") {
 			err == OK,
 			"The generated non-empty PCK file should be opened successfully.");
 	CHECK_MESSAGE(
-			f->get_length() >= 18000,
-			"The generated non-empty PCK file should be large enough to actually hold the contents specified above.");
+			f->get_length() >= final_payload_size,
+			"The generated PCK should hold the final uncompressed file payloads.");
 	CHECK_MESSAGE(
-			f->get_length() <= 27000,
-			"The generated non-empty PCK file shouldn't be too large.");
+			f->get_length() <= final_payload_size + initial_icon_size + 4096,
+			"PCK metadata, alignment and replaced file data should have bounded overhead.");
 }
 
 } // namespace TestPCKPacker

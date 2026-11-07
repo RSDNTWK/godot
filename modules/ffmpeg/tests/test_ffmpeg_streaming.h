@@ -46,6 +46,7 @@
 #include "tests/signal_watcher.h"
 #include "tests/test_macros.h"
 
+#include "modules/ffmpeg/audio_stream_pcm_decoder.h"
 #include "modules/ffmpeg/ffmpeg_adaptive_quality.h"
 #include "modules/ffmpeg/ffmpeg_async_playback.h"
 #include "modules/ffmpeg/ffmpeg_file_io.h"
@@ -58,7 +59,7 @@
 
 #include <cstring>
 
-Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata);
+Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel = nullptr, double p_seek_from = 0.0);
 
 namespace TestNativeStreaming {
 
@@ -1005,6 +1006,39 @@ TEST_CASE("[SceneTree][NativeStreaming][PacketReadAhead] Audio preserves playing
 	CHECK(energy > 0);
 }
 
+TEST_CASE("[SceneTree][NativeStreaming][SeekPreroll] A completed audio seek retains PCM when following packets are delayed") {
+	initialize_audio();
+	const int rate = AudioServer::get_singleton()->get_mix_rate();
+	for (bool cancel : { false, true }) {
+		SafeFlag cancelled;
+		if (cancel) {
+			cancelled.set();
+		}
+		PacketReadFixture fixture;
+		fixture.allowed.set(0);
+		const double from = 0.0125;
+		Ref<AudioStreamPlayback> playback = ffmpeg_test_audio_packet_reader(packet_test_wave(rate), PacketReadFixture::read, &fixture, &cancelled, from);
+		if (cancel) {
+			CHECK(playback.is_null());
+			continue;
+		}
+		REQUIRE(playback.is_valid());
+		playback->start(from);
+		REQUIRE(wait_packet_calls(fixture, 1));
+		CHECK(Math::abs(playback->get_playback_position() - from) <= 1.0 / rate);
+		AudioFrame samples[256];
+		CHECK(playback->mix(samples, 1.0, 256) == 256);
+		double energy = 0;
+		for (const AudioFrame &sample : samples) {
+			energy += Math::abs(sample.left) + Math::abs(sample.right);
+		}
+		CHECK(energy > 1.0);
+		CHECK(playback->is_playing());
+		CHECK(int(playback->get_parameter(SNAME("stream_error"))) == OK);
+		CHECK(Math::abs(playback->get_playback_position() - from - 256.0 / rate) <= 1.0 / rate);
+	}
+}
+
 static void check_playback(const String &url, bool p_explicit_pair) {
 	REQUIRE(!url.is_empty());
 	if (url.is_empty()) {
@@ -1787,7 +1821,7 @@ TEST_CASE("[SceneTree][LiveStreaming][Network] Audio resource decodes a live inp
 }
 
 #ifdef DEV_ENABLED
-TEST_CASE("[SceneTree][HLSEpoch][Local] An unsupported HLS timestamp reset reports an error and stops" * doctest::skip()) {
+TEST_CASE("[SceneTree][HLSEpoch][Local] Declared dated fMP4 epochs play through the captured reset" * doctest::skip()) {
 	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_FILE");
 	REQUIRE(!path.is_empty());
 	REQUIRE(!FFmpegFileIO::is_remote(path));
@@ -1798,38 +1832,236 @@ TEST_CASE("[SceneTree][HLSEpoch][Local] An unsupported HLS timestamp reset repor
 	SafeFlag cancelled;
 	String open_error;
 	Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancelled, String(), Dictionary(), &open_error);
-	print_line("Local HLS epoch opening: " + open_error);
+	INFO(open_error.utf8().get_data());
 	REQUIRE(playback.is_valid());
 	const Dictionary opened = playback->get(SNAME("_ffmpeg_debug_state"));
-	// The trusted local fixture begins with independent old-period frames,
-	// then a new MAP whose source timestamps retreat by hundreds of seconds.
-	// A probe starting in the new period would not exercise this regression.
-	REQUIRE(double(opened.get("origin", 0.0)) > 100.0);
+	REQUIRE(double(opened.get("origin", 0.0)) > 946684800.0);
 	playback->play();
-	const uint64_t started = OS::get_singleton()->get_ticks_usec();
-	const uint64_t deadline = started + 5000000;
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 10000000;
 	double virtual_seconds = 0.0;
 	while (playback->is_playing() && int(playback->get(SNAME("stream_error"))) == OK && OS::get_singleton()->get_ticks_usec() < deadline) {
-		// There is no audio track in this finite fixture. Drive the video-only
-		// clock directly rather than pretending an audio callback consumed PCM.
-		const double delta = virtual_seconds < 25.0 ? 0.05 : 0.0;
+		const double delta = virtual_seconds < 25.0 ? 0.025 : 0.0;
 		playback->update(delta);
 		virtual_seconds += delta;
-		// Publishing a usable frame can yield before the next packet read.
-		// Once the target clock reaches 25s, retire remaining frames at that
-		// fixed clock until the bounded fixture ends or reports the reset.
 	}
 	const Dictionary finished = playback->get(SNAME("_ffmpeg_debug_state"));
-	const bool decoded_reset = int64_t(finished.get("negative_frames", 0)) > 0 || double(finished.get("last_decoded_position", 0.0)) < 0.0;
-	print_line(vformat("Local HLS epoch: virtual %.3fs, wall %.3fs, error %d, decoded reset %s, state %s.", virtual_seconds, double(OS::get_singleton()->get_ticks_usec() - started) / 1000000.0, int(playback->get(SNAME("stream_error"))), decoded_reset ? "yes" : "no", JSON::stringify(finished)));
-	// Finite EOF alone is insufficient: silently discarding a whole new epoch
-	// would otherwise look like normal completion while live inputs hang.
-	CHECK(int(playback->get(SNAME("stream_error"))) == ERR_UNAVAILABLE);
-	const String error_message = playback->get(SNAME("_ffmpeg_error_message"));
-	print_line("Local HLS epoch error: " + error_message);
-	CHECK((error_message.contains("timestamps") && error_message.contains("discontinuity")));
+	print_line("Declared HLS epoch: " + JSON::stringify(finished));
+	CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+	CHECK(int64_t(finished.get("negative_frames", 0)) == 0);
+	CHECK(double(finished.get("last_decoded_position", 0.0)) > 19.0);
+	CHECK(int64_t(finished.get("decoded_frames", 0)) > 400);
 	CHECK_FALSE(playback->is_playing());
 	playback.unref();
+}
+
+TEST_CASE("[SceneTree][HLSEpoch][Local] Dated HLS audio reconciles the captured encoder overlap" * doctest::skip()) {
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_AUDIO_FILE");
+	REQUIRE(FileAccess::exists(path));
+	initialize_audio();
+	SafeFlag cancelled;
+	Ref<AudioStreamPlayback> playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, path, Ref<AudioStream>(), Dictionary(), &cancelled);
+	REQUIRE(playback.is_valid());
+	Dictionary state = playback->get_parameter(SNAME("_ffmpeg_hls_timeline"));
+	REQUIRE(bool(state.get("enabled", false)));
+	playback->start();
+	AudioFrame samples[1024];
+	int64_t frames = 0;
+	double energy = 0.0;
+	while (playback->is_playing() && frames < 30 * AudioServer::get_singleton()->get_mix_rate()) {
+		const int mixed = playback->mix(samples, 1.0, 1024);
+		frames += mixed;
+		for (int i = 0; i < mixed; i++) {
+			energy += Math::abs(samples[i].left) + Math::abs(samples[i].right);
+		}
+	}
+	state = playback->get_parameter(SNAME("_ffmpeg_hls_timeline"));
+	state["seconds"] = double(frames) / AudioServer::get_singleton()->get_mix_rate();
+	print_line("Declared HLS audio: " + JSON::stringify(state));
+	CHECK(int(playback->get_parameter(SNAME("stream_error"))) == OK);
+	CHECK(energy > 1.0);
+	CHECK(double(state["seconds"]) > 19.9);
+	CHECK(double(state["seconds"]) < 20.2);
+	CHECK(int64_t(state.get("trimmed_frames", 0)) > 1000);
+	CHECK_FALSE(playback->is_playing());
+}
+
+TEST_CASE("[SceneTree][HLSEpoch][Local] Paired dated epochs keep the consumed audio clock" * doctest::skip()) {
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_FILE");
+	const String audio_path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_AUDIO_FILE");
+	REQUIRE(FileAccess::exists(path));
+	REQUIRE(FileAccess::exists(audio_path));
+	initialize_audio();
+	for (bool queued : { false, true }) {
+		SafeFlag cancelled;
+		String error;
+		Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancelled, audio_path, Dictionary(), &error);
+		INFO(error.utf8().get_data());
+		REQUIRE(playback.is_valid());
+		AudioSink sink;
+		sink.clock_mix_rate = playback->get_mix_rate();
+		playback->set_mix_callback(AudioSink::mix, &sink);
+		playback->set_audio_playback_position_callback(AudioSink::read_consumed_clock, &sink);
+		playback->play();
+		if (queued) {
+			REQUIRE(ffmpeg_start_video_read_ahead(playback, &error));
+		}
+		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 15000000;
+		double maximum_skew = 0.0;
+		double virtual_time = 0.0;
+		while (playback->is_playing() && int(playback->get(SNAME("stream_error"))) == OK && OS::get_singleton()->get_ticks_usec() < deadline) {
+			const double before = playback->get_playback_position();
+			// Advance the sample clock only after video has caught up. Network
+			// producer scheduling must not masquerade as sustained decode loss.
+			const double audio_clock = AudioSink::read_consumed_clock(&sink);
+			const double delta = audio_clock - before < 0.06 ? 0.02 : 0.0;
+			playback->update(delta);
+			virtual_time += delta;
+			if (playback->get_playback_position() > before) {
+				maximum_skew = MAX(maximum_skew, Math::abs(playback->get_playback_position() - AudioSink::read_consumed_clock(&sink)));
+			}
+			if (virtual_time > 26.0) {
+				break;
+			}
+		}
+		const Dictionary state = playback->get(SNAME("_ffmpeg_debug_state"));
+		print_line(vformat("Paired HLS epoch: queued %s, PCM %.6fs, video %.6fs, maximum observed skew %.6fs, error %d.", queued, AudioSink::read_consumed_clock(&sink), playback->get_playback_position(), maximum_skew, int(playback->get(SNAME("stream_error")))));
+		CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+		CHECK(AudioSink::read_consumed_clock(&sink) > 19.9);
+		CHECK(playback->get_playback_position() > 19.0);
+		CHECK(sink.energy > 1.0);
+		CHECK(maximum_skew < 0.15);
+		CHECK(int64_t(state.get("negative_frames", 0)) == 0);
+		CHECK_FALSE(playback->is_playing());
+		playback.unref();
+	}
+}
+
+TEST_CASE("[SceneTree][HLSEpoch][Local] Dated epochs can seek forward and backward across the boundary" * doctest::skip()) {
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_FILE");
+	const String audio_path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_AUDIO_FILE");
+	initialize_audio();
+	SafeFlag cancelled;
+	Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancelled);
+	REQUIRE(playback.is_valid());
+	playback->play();
+	for (double target : { 14.0, 4.0, 10.0 }) {
+		playback->seek(target);
+		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 3000000;
+		while (playback->get_playback_position() < target + 0.5 && playback->is_playing() && int(playback->get(SNAME("stream_error"))) == OK && OS::get_singleton()->get_ticks_usec() < deadline) {
+			playback->update(0.025);
+		}
+		print_line(vformat("HLS epoch seek %.3f reached %.6f, error %d.", target, playback->get_playback_position(), int(playback->get(SNAME("stream_error")))));
+		CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+		CHECK(playback->get_playback_position() >= target + 0.5);
+		CHECK(playback->get_playback_position() < target + 1.0);
+	}
+	Ref<AudioStreamPlayback> audio = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, audio_path, Ref<AudioStream>(), Dictionary(), &cancelled);
+	REQUIRE(audio.is_valid());
+	AudioFrame samples[1024];
+	audio->start();
+	for (double target : { 14.0, 4.0, 10.0 }) {
+		audio->seek(target);
+		CHECK(audio->mix(samples, 1.0, 1024) == 1024);
+		CHECK(int(audio->get_parameter(SNAME("stream_error"))) == OK);
+		CHECK(Math::abs(audio->get_playback_position() - target - 1024.0 / AudioServer::get_singleton()->get_mix_rate()) < 0.0001);
+	}
+}
+
+TEST_CASE("[SceneTree][HLSEpoch][Local] Unannounced or undated resets still stop with an explicit error" * doctest::skip()) {
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_FILE");
+	REQUIRE(FileAccess::exists(path));
+	const String original = FileAccess::get_file_as_string(path);
+	initialize_audio();
+	for (int variant = 0; variant < 4; variant++) {
+		const String fixture = OS::get_singleton()->get_cache_path().path_join(vformat("godot-hls-invalid-%d.m3u8", variant));
+		Ref<FileAccess> file = FileAccess::open(fixture, FileAccess::WRITE);
+		REQUIRE(file.is_valid());
+		String body;
+		bool after_boundary = false;
+		for (const String &raw_line : original.split("\n")) {
+			String line = raw_line.strip_edges();
+			after_boundary = after_boundary || line == "#EXT-X-DISCONTINUITY";
+			if ((variant == 0 && line == "#EXT-X-DISCONTINUITY") ||
+					(variant == 1 && line.begins_with("#EXT-X-PROGRAM-DATE-TIME:")) ||
+					(variant == 2 && after_boundary && line.begins_with("#EXT-X-PROGRAM-DATE-TIME:"))) {
+				continue;
+			}
+			if (variant == 3 && after_boundary && line.begins_with("#EXT-X-PROGRAM-DATE-TIME:")) {
+				line = "#EXT-X-PROGRAM-DATE-TIME:2026-11-08T11:23:17+01:00";
+			}
+			body += line + "\n";
+		}
+		file->store_string(body);
+		file.unref();
+		SafeFlag cancelled;
+		Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(fixture, Dictionary(), &cancelled);
+		REQUIRE(playback.is_valid());
+		playback->play();
+		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 3000000;
+		while (playback->is_playing() && int(playback->get(SNAME("stream_error"))) == OK && OS::get_singleton()->get_ticks_usec() < deadline) {
+			playback->update(0.05);
+		}
+		CHECK(int(playback->get(SNAME("stream_error"))) == ERR_UNAVAILABLE);
+		CHECK_FALSE(playback->is_playing());
+		CHECK_FALSE(String(playback->get(SNAME("_ffmpeg_error_message"))).is_empty());
+		playback.unref();
+		DirAccess::remove_absolute(fixture);
+	}
+}
+
+TEST_CASE("[SceneTree][HLSEpoch][Local] Declared audio gaps pad the clock without unbounded buffering" * doctest::skip()) {
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_AUDIO_FILE");
+	REQUIRE(FileAccess::exists(path));
+	const String fixture = OS::get_singleton()->get_cache_path().path_join("godot-hls-audio-gap.m3u8");
+	Ref<FileAccess> file = FileAccess::open(fixture, FileAccess::WRITE);
+	REQUIRE(file.is_valid());
+	file->store_string(FileAccess::get_file_as_string(path).replace("11:23:17+01:00", "11:23:19+01:00"));
+	file.unref();
+	initialize_audio();
+	SafeFlag cancelled;
+	Ref<AudioStreamPlayback> audio = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, fixture, Ref<AudioStream>(), Dictionary(), &cancelled);
+	REQUIRE(audio.is_valid());
+	audio->set_parameter(SNAME("_ffmpeg_start_read_ahead"), true);
+	audio->start();
+	AudioFrame samples[1024];
+	int64_t frames = 0;
+	const int rate = AudioServer::get_singleton()->get_mix_rate();
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 10000000;
+	while (audio->is_playing() && frames < rate * 25 && OS::get_singleton()->get_ticks_usec() < deadline) {
+		const int count = audio->mix(samples, 1.0, 1024);
+		frames += count;
+		if (!count) {
+			OS::get_singleton()->delay_usec(1000);
+		}
+	}
+	const Dictionary timeline = audio->get_parameter(SNAME("_ffmpeg_hls_timeline"));
+	print_line(vformat("HLS audio gap: %.6fs, state %s.", double(frames) / rate, JSON::stringify(timeline)));
+	CHECK(int(audio->get_parameter(SNAME("stream_error"))) == OK);
+	CHECK(double(frames) / rate > 21.9);
+	CHECK(double(frames) / rate < 22.2);
+	CHECK(int64_t(timeline.get("padded_frames", 0)) > rate);
+	CHECK(int64_t(timeline.get("padded_frames", 0)) < 2 * rate);
+	CHECK_FALSE(audio->is_playing());
+	audio.unref();
+	DirAccess::remove_absolute(fixture);
+}
+
+TEST_CASE("[SceneTree][HLSEpoch][Local] Finite playlist PCM retains decoder samples across the same reset" * doctest::skip()) {
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_AUDIO_FILE");
+	REQUIRE(FileAccess::exists(path));
+	initialize_audio();
+	SafeFlag cancelled;
+	Dictionary result;
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 10000000;
+	REQUIRE(ffmpeg_decode_audio_pcm(path, Dictionary(), cancelled, 44100, 4 * 1024 * 1024, deadline, result) == OK);
+	// Independently decoded SDK reference: 899 AAC frames, 1024 samples each.
+	// The real-time path trims 39392 overlapping samples in this fixture;
+	// bounded offline preparation must retain all actual decoder samples.
+	CHECK(int64_t(result.get("frame_count", 0)) == 899 * 1024);
+	CHECK(int64_t(result.get("pcm_bytes", 0)) == 899 * 1024 * 4);
+	CHECK(int(result.get("mix_rate", 0)) == 44100);
+	CHECK(Math::abs(double(result.get("duration", 0.0)) - 899.0 * 1024.0 / 44100.0) < 0.000001);
+	CHECK(result.get("stream", Variant()).get_type() == Variant::OBJECT);
 }
 
 TEST_CASE("[SceneTree][LiveOrigin][Network] Delayed live input opening prepares both tracks at a common source PTS" * doctest::skip()) {

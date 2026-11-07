@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="MediaStreamPlayer" inherits="Control" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>One engine controller for native, browser, iframe and prepared-PCM media backends.</brief_description>
+	<description>
+		This opt-in controller leaves existing project players unchanged. It owns playback commands and advisory media metadata; applications retain evidence IDs, revisions, permissions, shared clocks, queue-entry identities, titles chosen by users, playlist selection and UI layout.
+		Every event dictionary carries [code]type[/code], [code]source[/code], [code]playback_instance_id[/code] and [code]generation[/code]. Capture the instance and generation for the exact application entry. A new opening or [method stop] invalidates the previous generation. Callbacks from retired backends are suppressed. Seek completions also carry [code]seek_request_id[/code].
+		Capabilities describe backend differences. Prepared WAV playback has precise, exclusive, sample-indexed loops. Browser media and finite YouTube iframes have approximate seek-based loops. Live sources remain streamed; DVR and loop ranges are exposed only when a backend provides actual seekable ranges. Moving ranges can invalidate an active loop: only that loop is disabled, its requested boundaries remain available, and playback continues unless a separate playback error occurs.
+		Web sources obey browser CORS, restricted-header, autoplay and networking policies. A CORS decode/readback failure may fall back to ordinary media embedding. Such a fallback cannot supply PCM or a Godot texture. DOM-only media is composed below the canvas so later Godot UI can cover it; it requires an axis-aligned main-viewport Control. Arbitrary transforms, SubViewports and fullscreen DOM composition are not qualified. Browser-managed internal media memory has no engine-enforced hard byte ceiling; HLS uses explicit buffering targets rather than claiming a total browser-memory limit. Browser media audio has independent volume control and does not pass through Godot audio buses/effects. Capabilities report these differences.
+		YouTube remains an iframe backend on Web, never an extracted-URL or PCM backend. The documented iframe API does not provide an advertised DVR range. Specify [code]timeline_mode: "finite"[/code] only for a known finite playlist item, or [code]"live"[/code] for a known live source. Without known timeline information, unsupported seek/loop operations remain unavailable until that information is established. Native YouTube uses the existing engine resolver unchanged.
+		This API is under qualification. Its presence does not authorize removal of existing browser fallbacks or extraction plugins.
+	</description>
+	<tutorials />
+	<methods>
+		<method name="open">
+			<return type="int" enum="Error" />
+			<param index="0" name="source" type="String" />
+			<param index="1" name="options" type="Dictionary" default="{}" />
+			<description>Replaces the current opening. Options: [code]video[/code] (default false), [code]autoplay[/code] (true), [code]prepare_pcm[/code] (false; finite playlists only), [code]allow_browser_fallback[/code] (true), [code]mix_rate[/code], [code]max_pcm_bytes[/code], [code]timeout_msec[/code], native [code]http_headers[/code], native [code]dvr[/code] (true), browser [code]format: "hls"[/code] for non-extension manifest URLs, and browser [code]timeline_mode[/code]. Wait for [signal media_ready] before applying the shared playback position. Native transport and PCM preparation require HTTPS. Ordinary Web playback retains HTTP/HTTPS URLs under the browser mixed-content and redirect policies, including browser-supported ports and media fragments; it does not rewrite HTTP into HTTPS or claim native destination validation. Browser HTML media cannot accept arbitrary custom request headers. Invalid setup returns an error; later failures use [signal playback_error].</description>
+		</method>
+		<method name="stop"><return type="void" /><description>Cancels preparation, closes playback, removes DOM resources and invalidates the opening generation.</description></method>
+		<method name="play"><return type="void" /><description>Requests playback or resumes an open source. Browser gesture restrictions can still apply.</description></method>
+		<method name="set_paused"><return type="void" /><param index="0" name="paused" type="bool" /><description>Pauses or resumes without replacing the opening.</description></method>
+		<method name="is_paused" qualifiers="const"><return type="bool" /><description>Returns the requested pause state.</description></method>
+		<method name="seek"><return type="int" enum="Error" /><param index="0" name="seconds" type="float" /><description>Seeks within a currently advertised range. Returns ERR_BUSY while a seek is pending, ERR_UNCONFIGURED before readiness, ERR_UNAVAILABLE without backend support, or ERR_INVALID_PARAMETER for an out-of-range/non-finite position. Wait for [signal seek_completed] before issuing another seek.</description></method>
+		<method name="set_loop_range"><return type="int" enum="Error" /><param index="0" name="begin" type="float" /><param index="1" name="end" type="float" /><description>Sets an exclusive-end loop in fractional seconds, inside one advertised range. PCM uses roundi(seconds * actual decoded mix_rate). Invalid requests preserve the previous loop. Seek-based loops can have gaps and must not be described as sample-accurate.</description></method>
+		<method name="clear_loop"><return type="void" /><description>Disables looping while leaving playback open.</description></method>
+		<method name="get_snapshot" qualifiers="const"><return type="Dictionary" /><description>Returns identity, generation, source, readiness, buffering, requested pause state, position, duration, seek status/ID, volume, metadata, capabilities, seekable_ranges and loop (active, begin, end). Unknown/live duration is not a permanent finite track length.</description></method>
+		<method name="get_capabilities" qualifiers="const"><return type="Dictionary" /><description>Returns current precise_loop, seek_loop, seek, live_playback, dvr, pcm_decode and backend-specific limitations. Capability changes are also signalled.</description></method>
+		<method name="get_seekable_ranges" qualifiers="const"><return type="Array" /><description>Returns current start/end ranges in media seconds, optionally with timeline_origin_utc when the backend provides a UTC mapping. Ranges may move, shrink, disappear or be disjoint.</description></method>
+		<method name="get_generation" qualifiers="const"><return type="int" /><description>Returns the current opening generation. Pair it with this controller's instance ID and the application's queue/evidence identity.</description></method>
+		<method name="set_volume_linear"><return type="void" /><param index="0" name="volume" type="float" /><description>Sets independent player gain from zero to one, preserved across openings and fallbacks.</description></method>
+		<method name="get_volume_linear" qualifiers="const"><return type="float" /><description>Returns the requested gain.</description></method>
+	</methods>
+	<members>
+		<member name="paused" type="bool" setter="set_paused" getter="is_paused" default="false">Requested pause state.</member>
+		<member name="volume_linear" type="float" setter="set_volume_linear" getter="get_volume_linear" default="1.0">Independent media gain.</member>
+	</members>
+	<signals>
+		<signal name="playback_event"><param index="0" name="event" type="Dictionary" /><description>Unified stream of the events below. Reject notifications whose playback_instance_id/generation do not match the active application entry.</description></signal>
+		<signal name="media_ready"><param index="0" name="event" type="Dictionary" /><description>The opened backend is ready; payload includes a snapshot.</description></signal>
+		<signal name="buffering_changed"><param index="0" name="event" type="Dictionary" /><description>Includes buffering.</description></signal>
+		<signal name="playback_error"><param index="0" name="event" type="Dictionary" /><description>Includes error and message. Separate from loop invalidation or a recoverable PCM-preparation fallback.</description></signal>
+		<signal name="seek_completed"><param index="0" name="event" type="Dictionary" /><description>Includes actual position and seek_request_id.</description></signal>
+		<signal name="metadata_changed"><param index="0" name="event" type="Dictionary" /><description>Includes advisory metadata for this opening. Never overwrite an application's authoritative playlist/evidence title automatically.</description></signal>
+		<signal name="capabilities_changed"><param index="0" name="event" type="Dictionary" /><description>Includes capabilities.</description></signal>
+		<signal name="seekable_ranges_changed"><param index="0" name="event" type="Dictionary" /><description>Includes current ranges.</description></signal>
+		<signal name="loop_invalidated"><param index="0" name="event" type="Dictionary" /><description>Includes reason, requested begin/end and active=false. Only the loop has been disabled; no automatic boundary clamping or playback stop occurs.</description></signal>
+		<signal name="loop_changed"><param index="0" name="event" type="Dictionary" /><description>Includes active, begin and end after an explicit loop command.</description></signal>
+		<signal name="finished"><param index="0" name="event" type="Dictionary" /><description>The current source finished outside an active loop.</description></signal>
+		<signal name="preparation_failed"><param index="0" name="event" type="Dictionary" /><description>PCM preparation failed and a browser playback fallback is being attempted. Does not by itself mean playback is unavailable.</description></signal>
+	</signals>
+</class>

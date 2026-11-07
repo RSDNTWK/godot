@@ -157,6 +157,40 @@ TEST_CASE("[YouTube] Named bootstrap calls cannot hide later watch configuration
 	CHECK(YouTubeParser::configuration("ytcfg.set('FLAG', true)").is_empty());
 }
 
+TEST_CASE("[YouTube] Configuration calls accept upstream whitespace without losing later records") {
+	String page = "ytcfg.set \t ('FLAG', true); ytcfg.set\n( \r\n{\"VISITOR_DATA\":\"spaced\"});"
+			"ytcfg.setter({\"VISITOR_DATA\":\"wrong\"}); ytcfg.set \t({broken:true});"
+			"ytcfg.set\r\n(\t{\"PLAYER_JS_URL\":\"/s/player/test/base.js\",\"replace\":1});"
+			"ytcfg.set({\"replace\":2});";
+	Dictionary config = YouTubeParser::configuration(page);
+	CHECK(String(config.get("VISITOR_DATA", "")) == "spaced");
+	CHECK(YouTubeParser::player_url(page, config) == "https://www.youtube.com/s/player/test/base.js");
+	CHECK(int(config.get("replace", 0)) == 2);
+	CHECK(YouTubeParser::configuration("ytcfg.set \n ('FLAG', true)").is_empty());
+}
+
+TEST_CASE("[YouTube] Visitor identity falls back to response context without replacing page identity") {
+	JSON parser;
+	REQUIRE(parser.parse(R"({"responseContext":{"visitorData":"response-visitor"}})") == OK);
+	Dictionary response = parser.get_data();
+	CHECK(YouTubeParser::visitor_data(Dictionary(), response) == "response-visitor");
+	Dictionary config;
+	config["VISITOR_DATA"] = "page-visitor";
+	CHECK(YouTubeParser::visitor_data(config, response) == "page-visitor");
+	REQUIRE(parser.parse(R"({"VISITOR_DATA":"","INNERTUBE_CONTEXT":{"client":{"visitorData":"context-visitor"}}})") == OK);
+	config = parser.get_data();
+	CHECK(YouTubeParser::visitor_data(config, response) == "context-visitor");
+	REQUIRE(parser.parse(R"({"VISITOR_DATA":12,"INNERTUBE_CONTEXT":{"client":{"visitorData":false}},"responseContext":{"visitorData":[]}})") == OK);
+	config = parser.get_data();
+	CHECK(YouTubeParser::visitor_data(config, response) == "response-visitor");
+	CHECK(YouTubeParser::visitor_data(config).is_empty());
+	// The extractor promotes fallback identity once, so following clients use it.
+	config["VISITOR_DATA"] = YouTubeParser::visitor_data(config, response);
+	Dictionary later;
+	later["VISITOR_DATA"] = "later-response";
+	CHECK(YouTubeParser::visitor_data(config, later) == "response-visitor");
+}
+
 TEST_CASE("[YouTube] Unsupported IAMF presentations cannot hide elementary audio") {
 	Dictionary iamf;
 	iamf["url"] = "https://example.com/immersive";

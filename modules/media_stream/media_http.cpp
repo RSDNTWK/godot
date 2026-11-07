@@ -105,7 +105,8 @@ String MediaHTTP::resolve_url(const String &p_base, const String &p_target) {
 }
 
 bool MediaHTTP::interrupted() const {
-	return (cancel && cancel->is_set()) || (secondary_cancel && secondary_cancel->is_set()) || OS::get_singleton()->get_ticks_usec() >= deadline;
+	const uint64_t now = OS::get_singleton()->get_ticks_usec();
+	return (cancel && cancel->is_set()) || (secondary_cancel && secondary_cancel->is_set()) || now >= deadline || (absolute_deadline && now >= absolute_deadline);
 }
 
 Error MediaHTTP::connect(const String &p_host) {

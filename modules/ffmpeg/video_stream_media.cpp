@@ -893,7 +893,10 @@ public:
 					}
 					if (read_error < 0) {
 						if (network_cancel && read_error != AVERROR_EOF) {
-							stream_error = ERR_CONNECTION_ERROR;
+							stream_error = read_error == AVERROR(ENOSYS) ? ERR_UNAVAILABLE : ERR_CONNECTION_ERROR;
+							if (read_error == AVERROR(ENOSYS)) {
+								stream_error_message = "This HLS transition has no supported shared timeline or changes the track layout.";
+							}
 							playing = false;
 							return;
 						}
@@ -919,6 +922,27 @@ public:
 						}
 						if (packet->dts != AV_NOPTS_VALUE) {
 							last_packet_dts = packet->dts;
+						}
+						size_t extra_size = 0;
+						const uint8_t *extra = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &extra_size);
+						if (extra && extra_size) {
+							// Keep fallback initialization consistent with the
+							// new HLS MAP if hardware fails in a later epoch.
+							if (extra_size > 1024 * 1024) {
+								stream_error = ERR_INVALID_DATA;
+								playing = false;
+								return;
+							}
+							uint8_t *copy = static_cast<uint8_t *>(av_mallocz(extra_size + AV_INPUT_BUFFER_PADDING_SIZE));
+							if (!copy) {
+								stream_error = ERR_OUT_OF_MEMORY;
+								playing = false;
+								return;
+							}
+							memcpy(copy, extra, extra_size);
+							av_freep(&video_parameters->extradata);
+							video_parameters->extradata = copy;
+							video_parameters->extradata_size = int(extra_size);
 						}
 						packet_pending = true;
 					}

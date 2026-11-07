@@ -7,6 +7,10 @@
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 #include "ffmpeg_async_playback.h"
 #endif
+#if defined(MODULE_MEDIA_STREAM_ENABLED) || defined(WEB_ENABLED)
+#include "audio_stream_pcm_decoder.h"
+#include "media_stream_player.h"
+#endif
 
 static Ref<ResourceFormatLoaderMedia> resource_loader_media;
 
@@ -18,6 +22,10 @@ void initialize_ffmpeg_module(ModuleInitializationLevel p_level) {
         GDREGISTER_CLASS(AudioStreamMedia);
 #ifdef MODULE_MEDIA_STREAM_ENABLED
         register_ffmpeg_async_playback_types();
+#endif
+#if defined(MODULE_MEDIA_STREAM_ENABLED) || defined(WEB_ENABLED)
+        GDREGISTER_CLASS(AudioStreamPCMDecoder);
+        GDREGISTER_CLASS(MediaStreamPlayer);
 #endif
     }
 }
