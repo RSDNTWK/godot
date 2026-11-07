@@ -12,6 +12,29 @@
 		<link title="Playing videos">$DOCS_URL/tutorials/animation/playing_videos.html</link>
 	</tutorials>
 	<methods>
+		<method name="get_stream_metadata" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns advisory metadata supplied by the native media backend. Fields include [code]title[/code] (at most 256 characters), [code]title_source[/code] ([code]youtube[/code], [code]container[/code], or [code]filename[/code]), [code]source[/code] (the original input), [code]source_type[/code], [code]duration[/code], [code]is_live[/code], and [code]opened[/code]. YouTube titles reuse existing URL resolution; direct media uses an embedded title tag or decoded filename, without a second title lookup. [code]opened = false[/code] denotes preliminary resolution metadata; successful readiness publishes [code]opened = true[/code]. Live DVR duration remains zero; use [method get_dvr_window] for the rewind range.
+				The playback emits [code]metadata_changed(metadata)[/code] on the main thread. Native snapshots also include [code]playback_instance_id[/code] and [code]generation[/code]; superseded opens cannot emit stale metadata. Applications must additionally associate callbacks with their own queue-entry IDs, since URLs can repeat. Metadata never changes a resource name, playlist title, or user-entered evidence title. Preserve authoritative application titles and treat discovered titles as optional plain text. Unsupported backends return an empty dictionary.
+			</description>
+		</method>
+		<method name="get_dvr_window" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns the native backend's observed DVR window. With YouTube DVR enabled on [VideoStreamMedia], the dictionary contains [code]available[/code], [code]start[/code], [code]end[/code], [code]live_position[/code], [code]position[/code], and [code]opened_position[/code] (the fixed target selected for the current opening) in seconds on the playback instance's fixed timeline. [code]timeline_origin_utc[/code], [code]start_utc[/code], [code]end_utc[/code], and [code]position_utc[/code] express the same timeline in Unix seconds. The safe live position leaves a few segments of buffering. Set [member stream_position] to rewind or seek forward; expired and future requests clamp to the actual available window. Range observations update when the decoder reloads its playlist and are refreshed on seeking. They can become stale while playback is paused or buffered far behind live. An unsupported backend returns an empty dictionary or [code]available = false[/code].
+			</description>
+		</method>
+		<method name="seek_to_live">
+			<return type="bool" />
+			<description>
+				Requests a fresh native YouTube DVR opening at the safe live edge. Returns [code]false[/code] if DVR is unavailable. The request is asynchronous, preserves pause state, and emits [code]seek_completed(position)[/code] on the playback instance after worker preparation. Superseded requests do not deliver stale completions.
+			</description>
+		</method>
+        <method name="get_stream_playback" qualifiers="const">
+            <return type="VideoStreamPlayback" />
+            <description>Returns the current playback instance. On native Windows, Linux/BSD, and Android builds with the media streaming module, its readiness, buffering, error, and seek completion signals can be used to coordinate asynchronous media loading. This method is not exposed on Web.</description>
+        </method>
 		<method name="get_stream_length" qualifiers="const">
 			<return type="float" />
 			<description>

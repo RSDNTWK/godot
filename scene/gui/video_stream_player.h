@@ -33,6 +33,7 @@
 #include "scene/gui/control.h"
 #include "scene/resources/video_stream.h"
 #include "servers/audio/audio_rb_resampler.h"
+#include "servers/audio/audio_sample_clock.h"
 
 class VideoStreamPlayer : public Control {
 	GDCLASS(VideoStreamPlayer, Control);
@@ -51,6 +52,13 @@ class VideoStreamPlayer : public Control {
 	Vector<AudioFrame> mix_buffer;
 	int wait_resampler = 0;
 	int wait_resampler_limit = 2;
+	SafeNumeric<uint64_t> audio_frames_consumed;
+	SafeNumeric<uint64_t> audio_generation{ UINT64_MAX };
+	uint64_t audio_scheduled_frame = 0;
+	double audio_last_mix_speed = 1.0;
+	double audio_clock_origin = 0;
+	AudioSampleClock audio_sample_clock;
+	bool native_streaming = false;
 
 	bool paused = false;
 	bool paused_from_tree = false;
@@ -67,6 +75,9 @@ class VideoStreamPlayer : public Control {
 	StringName bus;
 
 	void _mix_audio();
+	bool _can_drain_native_audio() const;
+	void _stream_ready();
+	void _sync_native_audio_clock();
 	static int _audio_mix_callback(void *p_udata, const float *p_data, int p_frames);
 	static void _mix_audios(void *p_self);
 
@@ -84,6 +95,7 @@ public:
 
 	void set_stream(const Ref<VideoStream> &p_stream);
 	Ref<VideoStream> get_stream() const;
+	Ref<VideoStreamPlayback> get_stream_playback() const { return playback; }
 
 	void play();
 	void stop();
@@ -108,6 +120,9 @@ public:
 	double get_stream_length() const;
 	double get_stream_position() const;
 	void set_stream_position(double p_position);
+	Dictionary get_dvr_window() const;
+	Dictionary get_stream_metadata() const;
+	bool seek_to_live();
 
 	void set_autoplay(bool p_enable);
 	bool has_autoplay() const;

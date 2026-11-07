@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="VideoStreamMedia" inherits="VideoStream" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		FFmpeg video with native asynchronous streaming and paired audio inputs.
+	</brief_description>
+	<description>
+		The playback's [code]get_stream_metadata()[/code] and [code]metadata_changed(metadata)[/code] expose advisory titles for both original YouTube URLs and direct media. [method VideoStreamPlayer.get_stream_metadata] provides the same snapshot. YouTube metadata reuses the existing extraction; direct media reads its opened container's title or falls back to the filename. No separate title lookup is performed. Metadata includes playback identity and opening generation, and never changes application-owned titles.
+		Set [member VideoStream.file] to a local media path, a direct HTTPS video URL, or an original YouTube URL. Threaded Windows, Linux/BSD, and Android builds with the native media modules resolve remote URLs automatically. When YouTube supplies separate video and audio tracks, both inputs open on workers and use one playback clock and shared pause/seek controls. No complete-file download or persistent media cache is required.
+		Use [method VideoStreamPlayer.get_stream_playback] to connect the native playback's [code]ready[/code], [code]buffering_changed(buffering)[/code], [code]error(code, message)[/code], and [code]seek_completed(position)[/code] signals. Current state is available through [code]stream_ready[/code], [code]buffering[/code], and [code]stream_error[/code]. Readiness means inputs and decoders are open. Seek completion means the worker accepted the new timeline position; superseded seeks do not emit completion. These notifications let project logic apply its shared playback position without doing network work on the main thread.
+		For manually paired direct URLs, set [member audio_file]. Both inputs must use HTTPS and pass destination validation, including redirects and secondary requests. Only bounded transport and PCM buffers are retained. HLS requires an FFmpeg SDK with HLS/MPEG-TS demuxers. Login, DRM, proof-of-origin token generation, and SABR transport are not implemented. Native streaming is unavailable on Web; retain the project's browser/iframe adapter. Aspect fitting, cross-client synchronization, permissions, and playlist controls remain the application's responsibility.
+		Enable [member live_dvr_enabled] before creating playback to rewind a DVR-enabled YouTube livestream. Use [method VideoStreamPlayer.get_dvr_window] for the advertised window, [member VideoStreamPlayer.stream_position] to seek within it, and [method VideoStreamPlayer.seek_to_live] to return to the safe live edge. Seeking reopens both validated network inputs on the worker and completes only after common-clock preroll. No media files are cached. Unsupported or ambiguous HLS timelines do not expose a DVR window.
+	</description>
+	<tutorials />
+	<members>
+		<member name="live_dvr_enabled" type="bool" setter="set_live_dvr_enabled" getter="is_live_dvr_enabled" default="false">
+			Enables native YouTube DVR when the service advertises it and the selected HLS inputs provide a continuous, timestamped rewind window. Initially starts near the live edge. Positions use a fixed origin established from the first advertised window; its start and end advance as older segments expire and new segments arrive. Normal playback and non-YouTube inputs keep their existing behavior when this option is disabled. DVR across timestamp discontinuities, encrypted HLS, and byte-ranged segments is unsupported.
+		</member>
+		<member name="audio_file" type="String" setter="set_audio_file" getter="get_audio_file" default="&quot;&quot;">
+			Optional separate audio source for a direct video URL. Leave empty for embedded audio or automatic YouTube pairing.
+		</member>
+		<member name="audio_http_headers" type="Dictionary" setter="set_audio_http_headers" getter="get_audio_http_headers" default="{}">
+			Approved transport metadata for a manually supplied separate audio input.
+		</member>
+		<member name="http_headers" type="Dictionary" setter="set_http_headers" getter="get_http_headers" default="{}">
+			Approved transport metadata for a direct video input. YouTube metadata is supplied automatically.
+		</member>
+	</members>
+</class>

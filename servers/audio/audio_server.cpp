@@ -44,6 +44,8 @@
 #include "servers/audio/audio_stream.h"
 #include "servers/audio/effects/audio_effect_compressor.h"
 
+#include "modules/modules_enabled.gen.h"
+
 #ifdef TOOLS_ENABLED
 #define MARK_EDITED set_edited(true);
 #else
@@ -270,6 +272,9 @@ AudioDriver *AudioDriverManager::get_driver(int p_driver) {
 //////////////////////////////////////////////
 
 void AudioServer::_driver_process(int p_frames, int32_t *p_buffer) {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	mix_time = OS::get_singleton()->get_ticks_usec();
+#endif
 	mix_count++;
 	int todo = p_frames;
 
@@ -343,6 +348,9 @@ void AudioServer::_driver_process(int p_frames, int32_t *p_buffer) {
 		todo -= to_copy;
 		to_mix -= to_copy;
 	}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	driver_frames += p_frames;
+#endif
 
 #ifdef DEBUG_ENABLED
 	prof_time.add(OS::get_singleton()->get_ticks_usec() - prof_ticks);
@@ -771,6 +779,13 @@ AudioFrame *AudioServer::thread_get_channel_mix_buffer(int p_bus, int p_buffer) 
 
 int AudioServer::thread_get_mix_buffer_size() const {
 	return buffer_size;
+}
+
+AudioServer::OutputFrameClock AudioServer::thread_get_output_frame_clock() const {
+	OutputFrameClock clock;
+	clock.delivered_frames = driver_frames;
+	clock.since_mix = double(OS::get_singleton()->get_ticks_usec() - mix_time) / 1000000.0;
+	return clock;
 }
 
 int AudioServer::thread_find_bus_index(const StringName &p_name) {

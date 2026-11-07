@@ -1325,3 +1325,25 @@ Files extracted from upstream source:
 
 - `lib/{common/,compress/,decompress/,zstd.h,zstd_errors.h}`
 - `LICENSE`
+
+
+## quickjs_ng
+
+- Upstream: https://github.com/quickjs-ng/quickjs
+- Version: 0.18.0 (`d7215b0ad3fc2c562e8317fd9bca058fd4863804`)
+- License: MIT
+
+The four core C sources and root headers are retained. CLI, libc bindings, module
+loading, and operating-system APIs are not built into the YouTube solver.
+
+
+## yt_dlp_ejs
+
+- Upstream: https://github.com/yt-dlp/ejs
+- Version: 0.8.0
+- License: Unlicense, MIT and ISC (bundled dependencies)
+
+Official core/lib minified bundles, unmodified and verified against the SHA3-512
+hashes in yt-dlp 2026.11.04.232659. License notices are retained in the bundles and
+`THIRD_PARTY_NOTICES.txt`. Native extraction provenance is in
+`modules/youtube/upstream.json`.

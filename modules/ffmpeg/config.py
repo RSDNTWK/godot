@@ -18,6 +18,9 @@ def get_opts(platform):
 
 def configure(env):
     env.module_add_dependencies("ffmpeg", ["ogg"])
+    if env["platform"] in ["windows", "linuxbsd", "android"] and env["threads"]:
+        env.module_add_dependencies("ffmpeg", ["media_stream"])
+        env.module_add_dependencies("ffmpeg", ["youtube"], optional=True)
 
 
 def get_doc_classes():

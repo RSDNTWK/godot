@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="AudioStreamMedia" inherits="AudioStream" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Audio decoded by FFmpeg, with asynchronous native HTTPS and YouTube streaming.
+	</brief_description>
+	<description>
+		Native playback exposes [code]get_stream_metadata()[/code] and [code]metadata_changed(metadata)[/code] with the same advisory fields as [method VideoStreamPlayer.get_stream_metadata]. YouTube titles reuse URL resolution; direct media uses an opened container title or filename fallback. Titles are limited to 256 characters. Preliminary metadata has [code]opened = false[/code]; successful readiness publishes [code]opened = true[/code]. Use playback identity, generation, and the application's own queue-entry ID to reject delayed results. This metadata never overwrites playlist names or user-entered titles. Queued tracks may retain a temporary title until playback opens.
+		Set [member file] to a local media file, a direct HTTPS audio URL, or an original YouTube URL. Threaded Windows, Linux/BSD, and Android builds with the native media modules resolve and decode remote inputs on a worker. The application does not need a yt-dlp executable or Python runtime. Remote media uses bounded memory buffers, without a persistent media cache.
+		Obtain the playback instance from the audio player and connect its [code]ready[/code], [code]buffering_changed(buffering)[/code], [code]error(code, message)[/code], and [code]seek_completed(position)[/code] signals. Its [code]stream_ready[/code], [code]buffering[/code], and [code]stream_error[/code] properties expose current state. Readiness means input and decoder initialization has finished; seek completion means the worker accepted the new timeline position. Superseded seeks do not emit completion. Duration is initially zero for remote inputs.
+		Player-level seeks and restarts create a new playback instance. Reacquire [method AudioStreamPlayer.get_stream_playback] and connect that instance's signals after these operations.
+		With [member live_dvr_enabled], a DVR-enabled YouTube livestream exposes [code]get_dvr_window()[/code] and [code]seek_to_live()[/code] on its native playback instance. Seek that instance directly to retain its fixed DVR timeline origin. The window dictionary contains [code]available[/code], [code]start[/code], [code]end[/code], [code]live_position[/code], [code]position[/code], and UTC fields matching [method VideoStreamPlayer.get_dvr_window]. Expired positions clamp to the available window. A new playback instance establishes a new origin; UTC values let application logic translate positions between instances.
+		YouTube service restrictions can prevent playback. Login, DRM, proof-of-origin token generation, playlists, and subtitles are not supported by the native resolver. HTTPS transport validates certificates and public destinations, including redirects and subsequent media requests. Native streaming is unavailable on Web; retain the project's browser playback adapter.
+	</description>
+	<tutorials />
+	<members>
+		<member name="live_dvr_enabled" type="bool" setter="set_live_dvr_enabled" getter="is_live_dvr_enabled" default="false">
+			Enables worker-side rewind and return-to-live for YouTube live audio when a continuous DVR window is advertised. Set before creating playback. Audio begins near the live edge and uses bounded in-memory buffering without persistent media caching. Unsupported HLS timelines do not expose a DVR window.
+		</member>
+		<member name="file" type="String" setter="set_file" getter="get_file" default="&quot;&quot;">
+			Local media path, direct HTTPS media URL, or original YouTube URL.
+		</member>
+		<member name="http_headers" type="Dictionary" setter="set_http_headers" getter="get_http_headers" default="{}">
+			Optional transport metadata. Native streaming forwards only approved headers and does not accept authentication headers. YouTube requests obtain their required metadata automatically.
+		</member>
+	</members>
+</class>

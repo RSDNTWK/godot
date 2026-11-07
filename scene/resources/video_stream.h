@@ -37,6 +37,7 @@ class VideoStreamPlayback : public Resource {
 
 public:
 	typedef int (*AudioMixCallback)(void *p_udata, const float *p_data, int p_frames);
+	typedef double (*AudioPlaybackPositionCallback)(void *p_udata);
 
 protected:
 	AudioMixCallback mix_callback = nullptr;
@@ -85,6 +86,16 @@ public:
 	virtual void set_mix_callback(AudioMixCallback p_callback, void *p_userdata);
 	virtual int get_channels() const;
 	virtual int get_mix_rate() const;
+	// Native streaming backends can present video against samples consumed by
+	// the audio mixer, rather than samples merely submitted to its queue.
+	virtual void set_audio_playback_position(double p_position) {}
+	virtual void set_audio_playback_position_callback(AudioPlaybackPositionCallback p_callback, void *p_userdata) {}
+	// Source-timeline seconds account for playback speed in the output pipeline.
+	virtual void set_audio_output_latency(double p_source_seconds) {}
+	// A native live backend may expose an advertised, sliding seekable window.
+	virtual Dictionary get_dvr_window() const { return Dictionary(); }
+	virtual bool seek_to_live() { return false; }
+	virtual Dictionary get_stream_metadata() const { return Dictionary(); }
 };
 
 class VideoStream : public Resource {

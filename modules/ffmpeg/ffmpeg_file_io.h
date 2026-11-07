@@ -2,6 +2,12 @@
 #define FFMPEG_FILE_IO_H
 
 #include "core/io/file_access.h"
+#include "core/templates/safe_refcount.h"
+#include "modules/modules_enabled.gen.h"
+
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+#include "ffmpeg_remote_io.h"
+#endif
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -12,6 +18,14 @@ extern "C" {
 class FFmpegFileIO {
     Ref<FileAccess> file;
     AVIOContext *io = nullptr;
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+    FFmpegRemoteIO *remote = nullptr;
+    Dictionary remote_headers;
+    const SafeFlag *remote_cancel = nullptr;
+    const SafeFlag *remote_stop = nullptr;
+    Ref<FFmpegDVRWindow> dvr;
+    bool dvr_primary = true;
+#endif
 
     static int read(void *p_opaque, uint8_t *p_buffer, int p_size) {
         FFmpegFileIO *self = static_cast<FFmpegFileIO *>(p_opaque);
@@ -48,8 +62,28 @@ class FFmpegFileIO {
     }
 
 public:
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+    void set_dvr(const Ref<FFmpegDVRWindow> &p_dvr, bool p_primary) { dvr = p_dvr; dvr_primary = p_primary; }
+    double get_dvr_input_start() const { return remote ? remote->get_dvr_input_start() : -1; }
+#endif
+    static bool is_remote(const String &p_path) {
+        return p_path.contains("://") && !p_path.begins_with("res://") && !p_path.begins_with("user://") && !p_path.begins_with("uid://");
+    }
+    void set_remote_options(const Dictionary &p_headers, const SafeFlag *p_cancel, const SafeFlag *p_stop = nullptr) {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+        remote_headers = p_headers;
+        remote_cancel = p_cancel;
+        remote_stop = p_stop;
+#endif
+    }
     // Close the AVFormatContext before releasing its custom IO.
     void close() {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+        if (remote) {
+            memdelete(remote);
+            remote = nullptr;
+        }
+#endif
         if (io) {
             av_freep(&io->buffer);
             avio_context_free(&io);
@@ -60,8 +94,17 @@ public:
     int open(AVFormatContext **r_format, const String &p_path, const AVInputFormat *p_input_format = nullptr) {
         close();
         // Keep FFmpeg protocol handling for remote URLs.
-        if (p_path.contains("://") && !p_path.begins_with("res://") && !p_path.begins_with("user://") && !p_path.begins_with("uid://")) {
+        if (is_remote(p_path)) {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+            if (!MediaHTTP::valid_url(p_path) || !remote_cancel) {
+                return AVERROR(EACCES);
+            }
+            remote = memnew(FFmpegRemoteIO(remote_cancel, remote_headers, remote_stop));
+            remote->set_dvr(dvr, dvr_primary);
+            return remote->open_format(r_format, p_path, p_input_format);
+#else
             return avformat_open_input(r_format, p_path.utf8().get_data(), p_input_format, nullptr);
+#endif
         }
         file = FileAccess::open(p_path, FileAccess::READ);
         if (file.is_null()) {

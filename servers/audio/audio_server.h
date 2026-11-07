@@ -212,6 +212,7 @@ private:
 	uint32_t buffer_size = 0;
 	uint64_t mix_count = 0;
 	uint64_t mix_frames = 0;
+	uint64_t driver_frames = 0;
 #ifdef DEBUG_ENABLED
 	SafeNumeric<uint64_t> prof_time;
 #endif
@@ -371,6 +372,13 @@ public:
 	bool thread_has_channel_mix_buffer(int p_bus, int p_buffer) const;
 	AudioFrame *thread_get_channel_mix_buffer(int p_bus, int p_buffer);
 	int thread_get_mix_buffer_size() const;
+	// Native playback clocks call these while holding the audio-driver lock.
+	uint64_t thread_get_mix_frame_count() const { return mix_frames; }
+	struct OutputFrameClock {
+		uint64_t delivered_frames = 0;
+		double since_mix = 0.0;
+	};
+	OutputFrameClock thread_get_output_frame_clock() const;
 	int thread_find_bus_index(const StringName &p_name);
 
 #ifdef DEBUG_ENABLED

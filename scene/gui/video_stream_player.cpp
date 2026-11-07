@@ -37,6 +37,8 @@
 #include "servers/audio/audio_server.h"
 #include "servers/display/accessibility_server.h"
 
+#include "modules/modules_enabled.gen.h"
+
 int VideoStreamPlayer::sp_get_channel_count() const {
 	if (playback.is_null()) {
 		return 0;
@@ -83,22 +85,56 @@ void VideoStreamPlayer::_mix_audios(void *p_self) {
 	static_cast<VideoStreamPlayer *>(p_self)->_mix_audio();
 }
 
+bool VideoStreamPlayer::_can_drain_native_audio() const {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	// Normal asynchronous EOF leaves readiness intact. Stop/seek clear it,
+	// and an error must discard stale samples rather than drain them.
+	return native_streaming && playback.is_valid() && bool(playback->get(SNAME("stream_ready"))) && int(playback->get(SNAME("stream_error"))) == OK && resampler.has_data();
+#else
+	return false;
+#endif
+}
+
 // Called from audio thread
 void VideoStreamPlayer::_mix_audio() {
 	if (stream.is_null()) {
 		return;
 	}
-	if (playback.is_null() || !playback->is_playing() || playback->is_paused()) {
+	if (playback.is_null() || !is_playing() || playback->is_paused()) {
 		return;
 	}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	if (native_streaming && (!bool(playback->get(SNAME("stream_ready"))) || uint64_t(int64_t(playback->get(SNAME("_ffmpeg_generation")))) != audio_generation.get())) {
+		return;
+	}
+#endif
 
 	AudioFrame *buffer = mix_buffer.ptrw();
 	int buffer_size = mix_buffer.size();
 
 	// Resample
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	const int read_before = resampler.rb_read_pos.get();
+#endif
 	if (!mix(buffer, buffer_size)) {
 		return;
 	}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	// Count source samples actually read, excluding underrun padding. Only the
+	// audio thread moves this cursor; stream/seek resets hold the audio lock.
+	const uint64_t source_frames = (resampler.rb_read_pos.get() - read_before) & resampler.rb_mask;
+	audio_frames_consumed.add(source_frames);
+	if (native_streaming && source_frames > 0) {
+		const double source_speed = resampler.get_playback_speed();
+		const double source_rate = playback->get_mix_rate();
+		const double device_rate = AudioServer::get_singleton()->get_mix_rate();
+		if (source_speed > 0.0 && source_rate > 0.0) {
+			const int real_output_frames = int(MIN(double(buffer_size), Math::ceil(source_frames * device_rate / (source_rate * source_speed))));
+			audio_scheduled_frame = AudioServer::get_singleton()->thread_get_mix_frame_count() + real_output_frames;
+			audio_last_mix_speed = source_speed;
+		}
+	}
+#endif
 
 	AudioFrame vol = AudioFrame(volume, volume);
 
@@ -154,22 +190,55 @@ void VideoStreamPlayer::_notification(int p_notification) {
 		case NOTIFICATION_INTERNAL_PROCESS: {
 			bus_index = AudioServer::get_singleton()->thread_find_bus_index(bus);
 
-			if (stream.is_null() || paused || playback.is_null() || !playback->is_playing()) {
+			if (stream.is_null() || paused || playback.is_null() || (!native_streaming && !playback->is_playing()) || (native_streaming && !is_processing_internal())) {
 				return;
 			}
 
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+			_sync_native_audio_clock();
+#endif
 			double delta = first_frame ? 0 : get_process_delta_time();
 			first_frame = false;
 
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+			AudioServer::get_singleton()->lock();
 			resampler.set_playback_speed(Engine::get_singleton()->get_effective_time_scale() * speed_scale);
-
+			const uint64_t consumed_frames = audio_frames_consumed.get();
+			const uint64_t scheduled_end_frame = audio_scheduled_frame;
+			const double mixed_source_speed = audio_last_mix_speed;
+			const AudioServer::OutputFrameClock output_clock = AudioServer::get_singleton()->thread_get_output_frame_clock();
+			AudioServer::get_singleton()->unlock();
+			if ((!native_streaming || bool(playback->get(SNAME("stream_ready")))) && playback->get_channels() > 0 && playback->get_mix_rate() > 0) {
+				const double speed = Engine::get_singleton()->get_effective_time_scale() * speed_scale;
+				const double mixed_time = double(consumed_frames) / playback->get_mix_rate();
+				const double output_latency = AudioServer::get_singleton()->get_output_latency();
+				const double source_latency = output_latency * speed;
+				playback->set_audio_output_latency(source_latency);
+				const double source_position = audio_clock_origin + mixed_time;
+				const double audible_position = native_streaming ? audio_sample_clock.update_scheduled(source_position, scheduled_end_frame, output_clock.delivered_frames, output_clock.since_mix, output_latency, AudioServer::get_singleton()->get_mix_rate(), mixed_source_speed) : audio_clock_origin + MAX(0.0, mixed_time - source_latency);
+				playback->set_audio_playback_position(audible_position);
+			}
+#else
+			resampler.set_playback_speed(Engine::get_singleton()->get_effective_time_scale() * speed_scale);
+#endif
 			playback->update(delta * speed_scale); // playback->is_playing() returns false in the last video frame
 
 			if (!playback->is_playing()) {
+				const bool drain_tail = _can_drain_native_audio();
 				AudioServer::get_singleton()->lock();
+				if (drain_tail && resampler.get_num_of_ready_frames() > 0) {
+					AudioServer::get_singleton()->unlock();
+					return;
+				}
 				resampler.flush();
 				wait_resampler = 0;
 				AudioServer::get_singleton()->unlock();
+				// The worker can finish between process ticks, even with no PCM.
+				// Disable processing before loop/replay or user callbacks so that
+				// normal completion is observed exactly once.
+				if (native_streaming) {
+					set_process_internal(false);
+				}
 				if (loop) {
 					play();
 					return;
@@ -266,7 +335,66 @@ bool VideoStreamPlayer::has_loop() const {
 	return loop;
 }
 
+void VideoStreamPlayer::_sync_native_audio_clock() {
+	if (!native_streaming || playback.is_null() || !bool(playback->get(SNAME("stream_ready")))) {
+		return;
+	}
+	const uint64_t generation = int64_t(playback->get(SNAME("_ffmpeg_generation")));
+	if (audio_generation.get() != generation) {
+		const double opened_position = playback->get_playback_position();
+		AudioServer::get_singleton()->lock();
+		resampler.flush();
+		wait_resampler = 0;
+		audio_frames_consumed.set(0);
+		audio_clock_origin = opened_position;
+		audio_sample_clock.reset(opened_position);
+		audio_scheduled_frame = 0;
+		audio_last_mix_speed = 1.0;
+		audio_generation.set(generation);
+		AudioServer::get_singleton()->unlock();
+		first_frame = true;
+	}
+}
+
+void VideoStreamPlayer::_stream_ready() {
+	if (playback.is_null()) {
+		return;
+	}
+	_sync_native_audio_clock();
+	if (native_streaming) {
+		// Publish an already prepared CPU frame without advancing media time.
+		playback->update(0.0);
+	}
+	Ref<Texture2D> next = playback->get_texture();
+	if (next == texture) {
+		return;
+	}
+	if (texture.is_valid()) {
+		texture->disconnect_changed(callable_mp(this, &VideoStreamPlayer::texture_changed).bind(texture));
+	}
+	texture = next;
+	if (texture.is_valid()) {
+		texture->connect_changed(callable_mp(this, &VideoStreamPlayer::texture_changed).bind(texture));
+		texture_changed(texture);
+	}
+}
+
 void VideoStreamPlayer::set_stream(const Ref<VideoStream> &p_stream) {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	if (playback.is_valid() && playback->has_signal(SNAME("ready"))) {
+		if (texture.is_valid()) {
+			texture->disconnect_changed(callable_mp(this, &VideoStreamPlayer::texture_changed).bind(texture));
+		}
+		Callable ready = callable_mp(this, &VideoStreamPlayer::_stream_ready);
+		if (playback->is_connected(SNAME("ready"), ready)) {
+			playback->disconnect(SNAME("ready"), ready);
+		}
+		Callable seek = ready.unbind(1);
+		if (playback->is_connected(SNAME("seek_completed"), seek)) {
+			playback->disconnect(SNAME("seek_completed"), seek);
+		}
+	}
+#endif
 	stop();
 
 	// Make sure to handle stream changes seamlessly, e.g. when done via
@@ -284,6 +412,11 @@ void VideoStreamPlayer::set_stream(const Ref<VideoStream> &p_stream) {
 	} else {
 		playback = Ref<VideoStreamPlayback>();
 	}
+	native_streaming = false;
+	audio_generation.set(UINT64_MAX);
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	native_streaming = playback.is_valid() && playback->has_signal(SNAME("ready"));
+#endif
 	AudioServer::get_singleton()->unlock();
 
 	if (stream.is_valid()) {
@@ -311,11 +444,24 @@ void VideoStreamPlayer::set_stream(const Ref<VideoStream> &p_stream) {
 		} else {
 			resampler.clear();
 		}
+		audio_frames_consumed.set(0);
+		audio_clock_origin = 0;
 		AudioServer::get_singleton()->unlock();
 
 		if (channels > 0) {
 			playback->set_mix_callback(_audio_mix_callback, this);
 		}
+
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (playback->has_signal(SNAME("ready"))) {
+			Callable ready = callable_mp(this, &VideoStreamPlayer::_stream_ready);
+			playback->connect(SNAME("ready"), ready);
+			playback->connect(SNAME("seek_completed"), ready.unbind(1));
+			if (bool(playback->get(SNAME("stream_ready")))) {
+				_stream_ready();
+			}
+		}
+#endif
 
 	} else {
 		texture.unref();
@@ -340,6 +486,15 @@ void VideoStreamPlayer::play() {
 	if (playback.is_null()) {
 		return;
 	}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	AudioServer::get_singleton()->lock();
+	audio_generation.set(UINT64_MAX);
+	resampler.flush();
+	wait_resampler = 0;
+	audio_frames_consumed.set(0);
+	audio_clock_origin = 0;
+	AudioServer::get_singleton()->unlock();
+#endif
 	playback->play();
 	set_process_internal(true);
 	first_frame = true;
@@ -359,8 +514,11 @@ void VideoStreamPlayer::stop() {
 
 	playback->stop();
 	AudioServer::get_singleton()->lock();
+	audio_generation.set(UINT64_MAX);
 	resampler.flush();
 	wait_resampler = 0;
+	audio_frames_consumed.set(0);
+	audio_clock_origin = 0;
 	AudioServer::get_singleton()->unlock();
 	set_process_internal(false);
 }
@@ -370,7 +528,7 @@ bool VideoStreamPlayer::is_playing() const {
 		return false;
 	}
 
-	return playback->is_playing();
+	return playback->is_playing() || _can_drain_native_audio();
 }
 
 void VideoStreamPlayer::set_paused(bool p_paused) {
@@ -474,15 +632,46 @@ double VideoStreamPlayer::get_stream_position() const {
 }
 
 void VideoStreamPlayer::set_stream_position(double p_position) {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	if (!Math::is_finite(p_position)) {
+		return;
+	}
+#endif
 	if (playback.is_valid()) {
 		// Reset the read cursor and interpolation offset together, outside the audio callback.
 		AudioServer::get_singleton()->lock();
+		audio_generation.set(UINT64_MAX);
 		resampler.flush();
 		wait_resampler = 0;
+		audio_frames_consumed.set(0);
+		audio_clock_origin = CLAMP(p_position, 0.0, double(INT32_MAX));
 		AudioServer::get_singleton()->unlock();
 		playback->seek(p_position);
 		first_frame = true;
 	}
+}
+
+Dictionary VideoStreamPlayer::get_dvr_window() const {
+	return playback.is_valid() ? playback->get_dvr_window() : Dictionary();
+}
+
+Dictionary VideoStreamPlayer::get_stream_metadata() const {
+	return playback.is_valid() ? playback->get_stream_metadata() : Dictionary();
+}
+
+bool VideoStreamPlayer::seek_to_live() {
+	if (playback.is_null() || !playback->seek_to_live()) {
+		return false;
+	}
+	AudioServer::get_singleton()->lock();
+	audio_generation.set(UINT64_MAX);
+	resampler.flush();
+	wait_resampler = 0;
+	audio_frames_consumed.set(0);
+	audio_clock_origin = 0;
+	AudioServer::get_singleton()->unlock();
+	first_frame = true;
+	return true;
 }
 
 Ref<Texture2D> VideoStreamPlayer::get_video_texture() const {
@@ -538,6 +727,9 @@ void VideoStreamPlayer::_validate_property(PropertyInfo &p_property) const {
 void VideoStreamPlayer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_stream", "stream"), &VideoStreamPlayer::set_stream);
 	ClassDB::bind_method(D_METHOD("get_stream"), &VideoStreamPlayer::get_stream);
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	ClassDB::bind_method(D_METHOD("get_stream_playback"), &VideoStreamPlayer::get_stream_playback);
+#endif
 
 	ClassDB::bind_method(D_METHOD("play"), &VideoStreamPlayer::play);
 	ClassDB::bind_method(D_METHOD("stop"), &VideoStreamPlayer::stop);
@@ -567,6 +759,9 @@ void VideoStreamPlayer::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_stream_position", "position"), &VideoStreamPlayer::set_stream_position);
 	ClassDB::bind_method(D_METHOD("get_stream_position"), &VideoStreamPlayer::get_stream_position);
+	ClassDB::bind_method(D_METHOD("get_dvr_window"), &VideoStreamPlayer::get_dvr_window);
+	ClassDB::bind_method(D_METHOD("get_stream_metadata"), &VideoStreamPlayer::get_stream_metadata);
+	ClassDB::bind_method(D_METHOD("seek_to_live"), &VideoStreamPlayer::seek_to_live);
 
 	ClassDB::bind_method(D_METHOD("set_autoplay", "enabled"), &VideoStreamPlayer::set_autoplay);
 	ClassDB::bind_method(D_METHOD("has_autoplay"), &VideoStreamPlayer::has_autoplay);

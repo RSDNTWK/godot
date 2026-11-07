@@ -1,9 +1,15 @@
 #include "video_stream_media.h"
 
 #include "ffmpeg_file_io.h"
+#include "ffmpeg_media_metadata.h"
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+#include "ffmpeg_async_playback.h"
+#include "ffmpeg_packet_reader.h"
+#endif
 #include "core/io/file_access.h"
 #include "core/math/math_funcs.h"
 #include "core/object/class_db.h"
+#include "core/os/os.h"
 #include "modules/ogg/ogg_packet_sequence.h"
 #include "servers/audio/audio_server.h"
 
@@ -62,6 +68,9 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	GDCLASS(AudioStreamPlaybackFFmpeg, AudioStreamPlayback);
 
 	FFmpegFileIO file_io;
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	FFmpegPacketReader packet_reader;
+#endif
 	FFmpegBufferIO buffer_io;
 	Vector<uint8_t> encoded;
 	String path;
@@ -80,14 +89,17 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	bool parser_flushed = false;
 	bool eof = false;
 	bool failed = false;
+	String decode_error;
 	bool playing = false;
 	bool rewind_pending = false;
+	bool packet_waiting = false;
 	int64_t raw_position = 0;
 	int64_t encoded_size = 0;
 	uint64_t frame_position = 0;
 	uint64_t skip_frames = 0;
 	uint64_t decoded_frames = 0;
 	double length = 0.0;
+	Dictionary stream_metadata;
 	Vector<float> pcm;
 	int pcm_position = 0;
 	int pcm_frames = 0;
@@ -95,8 +107,24 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	bool looping_override = false;
 	bool looping = false;
 	int loops = 0;
+	double remote_seek_target = -1.0;
+	const SafeFlag *remote_cancel = nullptr;
+	double remote_origin = 0.0;
+	uint64_t silence_frames = 0;
+	uint64_t live_preroll_deadline = 0;
+	AVRational source_time_base = { 0, 1 };
+	int64_t source_start_time = AV_NOPTS_VALUE;
+	double input_origin = 0.0;
+	bool input_origin_known = false;
+	bool remote_live_hls = false;
+	bool read_ahead_used = false;
 
 	void close_decoder() {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		// The reader owns all format reads until it has joined. Its stop flag
+		// also interrupts active Godot HTTP requests, including HLS children.
+		packet_reader.stop();
+#endif
 		swr_free(&resampler);
 		av_frame_free(&frame);
 		av_packet_free(&packet);
@@ -118,11 +146,22 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 
 	bool open_decoder() {
 		close_decoder();
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		packet_reader.reset();
+#endif
 		packet_pending = false;
 		draining = false;
 		parser_flushed = false;
 		eof = false;
 		failed = false;
+		decode_error = String();
+		packet_waiting = false;
+		source_time_base = { 0, 1 };
+		source_start_time = AV_NOPTS_VALUE;
+		input_origin = 0.0;
+		input_origin_known = false;
+		remote_live_hls = false;
+		read_ahead_used = false;
 		raw_position = 0;
 		decoded_frames = 0;
 		const AVCodec *decoder = nullptr;
@@ -172,7 +211,26 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 			if (stream_index < 0) {
 				return false;
 			}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+			if (remote_cancel && format->iformat && strcmp(format->iformat->name, "hls") == 0) {
+				for (unsigned int i = 0; i < format->nb_streams; i++) {
+					format->streams[i]->discard = int(i) == stream_index ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+				}
+			}
+#endif
 			const AVStream *stream = format->streams[stream_index];
+			source_time_base = stream->time_base;
+			source_start_time = stream->start_time;
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+			if (remote_cancel) {
+				remote_live_hls = format->iformat && strcmp(format->iformat->name, "hls") == 0 && format->duration <= 0;
+				input_origin_known = format->start_time != AV_NOPTS_VALUE;
+				input_origin = input_origin_known ? double(format->start_time) / AV_TIME_BASE : 0.0;
+				remote_origin = format->start_time == AV_NOPTS_VALUE ? 0.0 : double(format->start_time) / AV_TIME_BASE;
+				double audio_start = stream->start_time == AV_NOPTS_VALUE ? remote_origin : stream->start_time * av_q2d(stream->time_base);
+				silence_frames = uint64_t(CLAMP(audio_start - remote_origin, 0.0, double(INT32_MAX)) * output_sample_rate);
+			}
+#endif
 			decoder = avcodec_find_decoder(stream->codecpar->codec_id);
 			if (!decoder) {
 				return false;
@@ -186,6 +244,11 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 			} else if (format->duration != AV_NOPTS_VALUE && format->duration > 0) {
 				length = double(format->duration) / AV_TIME_BASE;
 			}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+			if (remote_cancel && format->duration != AV_NOPTS_VALUE && format->duration > 0) {
+				length = MAX(length, double(format->duration) / AV_TIME_BASE);
+			}
+#endif
 		}
 		codec->thread_count = 1;
 		if (avcodec_open2(codec, decoder, nullptr) < 0) {
@@ -198,6 +261,12 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 
 	int read_packet() {
 		if (!raw_aac) {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+			if (packet_reader.is_started()) {
+				av_packet_unref(packet);
+				return packet_reader.read(packet);
+			}
+#endif
 			int result;
 			do {
 				av_packet_unref(packet);
@@ -266,9 +335,29 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	bool decode_chunk() {
 		pcm_frames = 0;
 		pcm_position = 0;
+		packet_waiting = false;
 		while (!failed && !eof) {
+			if (live_preroll_deadline && ((remote_cancel && remote_cancel->is_set()) || OS::get_singleton()->get_ticks_usec() >= live_preroll_deadline)) {
+				failed = true;
+				return false;
+			}
 			const int result = avcodec_receive_frame(codec, frame);
 			if (result >= 0) {
+				if (remote_seek_target >= 0.0 && format && stream_index >= 0) {
+					if (frame->best_effort_timestamp != AV_NOPTS_VALUE) {
+						double pts = frame->best_effort_timestamp * av_q2d(source_time_base) - remote_origin;
+						if (remote_seek_target - pts > 30.0) { failed = true; return false; }
+						if (live_preroll_deadline) {
+							if (Math::abs(remote_seek_target - pts) > 30.0) { failed = true; return false; }
+							silence_frames = uint64_t(MAX(pts - remote_seek_target, 0.0) * output_sample_rate);
+						}
+						skip_frames = uint64_t(CLAMP(remote_seek_target - pts, 0.0, 30.0) * output_sample_rate);
+					} else if (live_preroll_deadline) {
+						failed = true;
+						return false;
+					}
+					remote_seek_target = -1.0;
+				}
 				if (convert_frame(false)) {
 					return true;
 				}
@@ -279,24 +368,43 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 					return true;
 				}
 				eof = true;
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+				if (!remote_cancel) {
+					length = double(decoded_frames) / output_sample_rate;
+				}
+#else
 				length = double(decoded_frames) / output_sample_rate;
+#endif
 				return false;
 			}
 			if (result != AVERROR(EAGAIN) || draining) {
+				decode_error = vformat("Audio decoder receive failed (FFmpeg error %d, draining %s).", result, draining ? "yes" : "no");
 				failed = true;
 				break;
 			}
 			int read_result = 0;
 			if (!packet_pending) {
 				read_result = read_packet();
+				if (read_result == AVERROR(EAGAIN)) {
+					// A live packet producer may still be fetching its next segment.
+					// Preserve decoder state and report temporary PCM starvation.
+					packet_waiting = true;
+					return false;
+				}
 				if (read_result < 0 && read_result != AVERROR_EOF) {
+					decode_error = vformat("Audio packet input failed (FFmpeg error %d).", read_result);
 					failed = true;
 					break;
 				}
 				packet_pending = read_result >= 0;
 			}
 			const int sent = avcodec_send_packet(codec, packet_pending ? packet : nullptr);
+			if (sent == AVERROR(EAGAIN)) {
+				packet_waiting = true;
+				return false;
+			}
 			if (sent < 0) {
+				decode_error = vformat("Audio decoder send failed (FFmpeg error %d).", sent);
 				failed = true;
 				break;
 			}
@@ -304,8 +412,8 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 			av_packet_unref(packet);
 			packet_pending = false;
 		}
-		if (failed) {
-			ERR_PRINT("FFmpeg: audio decoding failed.");
+		if (failed && !(remote_cancel && remote_cancel->is_set())) {
+			ERR_PRINT(decode_error.is_empty() ? String("FFmpeg: audio decoding failed.") : decode_error);
 		}
 		return false;
 	}
@@ -331,8 +439,44 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 		}
 	}
 
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	bool prepare_live_origin(double p_origin) {
+		if (!remote_live_hls || !input_origin_known || read_ahead_used || playing || frame_position != 0 || !Math::is_finite(p_origin)) {
+			return false;
+		}
+		const double discard_seconds = p_origin - remote_origin;
+		if (discard_seconds < 0.0 || discard_seconds > 30.0) {
+			return false;
+		}
+		remote_origin = p_origin;
+		if (discard_seconds == 0.0) {
+			return true;
+		}
+		// open_buffer() has already decoded the first PCM block. Discard it,
+		// then trim by source PTS without seeking/reopening the live input.
+		swr_free(&resampler);
+		pcm_position = pcm_frames = 0;
+		skip_frames = 0;
+		silence_frames = 0;
+		remote_seek_target = 0.0;
+		live_preroll_deadline = OS::get_singleton()->get_ticks_usec() + 30000000;
+		const bool prepared = ensure_samples();
+		live_preroll_deadline = 0;
+		return prepared && !failed && !eof;
+	}
+#endif
+
 public:
 	~AudioStreamPlaybackFFmpeg() override { close_decoder(); }
+	void set_remote_options(const Dictionary &p_headers, const SafeFlag *p_cancel, FFmpegDVRWindow *p_dvr = nullptr, bool p_primary = true) {
+		remote_cancel = p_cancel;
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		file_io.set_remote_options(p_headers, p_cancel, packet_reader.get_stop_flag());
+		file_io.set_dvr(Ref<FFmpegDVRWindow>(p_dvr), p_primary);
+#else
+		file_io.set_remote_options(p_headers, p_cancel);
+#endif
+	}
 
 	bool open_buffer(const Vector<uint8_t> &p_data, const char *p_format_name, const String &p_path, bool p_store_samples = true) {
 		encoded = p_data;
@@ -353,6 +497,7 @@ public:
 			while (decode_chunk()) {
 			}
 		}
+		stream_metadata = FFmpegMediaMetadata::container(format, stream_index, path, length, remote_live_hls);
 		return !failed;
 	}
 
@@ -376,6 +521,33 @@ public:
 		if (target == frame_position && !eof && !failed) {
 			return;
 		}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (remote_cancel && format && stream_index >= 0) {
+			if (read_ahead_used) {
+				// A live format may have an interrupted/queued read in flight.
+				// Public asynchronous seeks reopen a new generation instead.
+				failed = true;
+				return;
+			}
+			if (av_seek_frame(format, stream_index, int64_t((time + remote_origin) / av_q2d(source_time_base)), AVSEEK_FLAG_BACKWARD) < 0) {
+				failed = true;
+				return;
+			}
+			avcodec_flush_buffers(codec);
+			swr_free(&resampler);
+			av_packet_unref(packet);
+			av_frame_unref(frame);
+			pcm_position = pcm_frames = 0;
+			packet_pending = draining = eof = failed = rewind_pending = false;
+			skip_frames = 0;
+			remote_seek_target = time;
+			double audio_start = source_start_time == AV_NOPTS_VALUE ? remote_origin : source_start_time * av_q2d(source_time_base);
+			silence_frames = uint64_t(CLAMP(audio_start - remote_origin - time, 0.0, double(INT32_MAX)) * output_sample_rate);
+			frame_position = target;
+			packet_waiting = false;
+			return;
+		}
+#endif
 		// Rebuild decoder delay/resampler state, then discard in bounded chunks.
 		// This preserves exact sample positions even for timestamp-poor raw AAC.
 		rewind_pending = true;
@@ -383,12 +555,73 @@ public:
 		frame_position = target;
 	}
 	void set_parameter(const StringName &p_name, const Variant &p_value) override {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (p_name == SNAME("_ffmpeg_start_read_ahead")) {
+			if (!remote_cancel || !format || stream_index < 0) {
+				failed = true;
+				return;
+			}
+			if (!packet_reader.is_started()) {
+				if (read_ahead_used || packet_reader.start(format, stream_index, remote_cancel) != OK) {
+					failed = true;
+					return;
+				}
+				read_ahead_used = true;
+			}
+			return;
+		}
+		if (p_name == SNAME("_ffmpeg_stop_read_ahead")) {
+			packet_reader.stop();
+			return;
+		}
+		if (p_name == SNAME("_ffmpeg_live_origin")) {
+			if (!prepare_live_origin(double(p_value))) {
+				failed = true;
+			}
+			return;
+		}
+#endif
 		if (p_name == SNAME("looping")) {
 			looping_override = p_value != Variant();
 			looping = looping_override && bool(p_value);
 		}
 	}
 	Variant get_parameter(const StringName &p_name) const override {
+		if (p_name == SNAME("_ffmpeg_metadata")) {
+			return stream_metadata.duplicate();
+		}
+		if (p_name == SNAME("stream_error")) {
+			return failed ? int(ERR_INVALID_DATA) : int(OK);
+		}
+		if (p_name == SNAME("_ffmpeg_error_message")) {
+			return decode_error;
+		}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (p_name == SNAME("_ffmpeg_can_read_ahead")) {
+			return remote_cancel && format && stream_index >= 0 && FFmpegFileIO::is_remote(path);
+		}
+		if (p_name == SNAME("_ffmpeg_live_hls")) {
+			return remote_live_hls;
+		}
+		if (p_name == SNAME("_ffmpeg_remote_origin")) {
+			return input_origin_known ? Variant(remote_origin) : Variant();
+		}
+		if (p_name == SNAME("_ffmpeg_input_origin")) {
+			return input_origin_known ? Variant(input_origin) : Variant();
+		}
+		if (p_name == SNAME("_ffmpeg_dvr_input_start")) {
+			return file_io.get_dvr_input_start();
+		}
+		if (p_name == SNAME("_ffmpeg_read_ahead_ready")) {
+			return packet_reader.is_started() && packet_reader.has_prefill();
+		}
+		if (p_name == SNAME("_ffmpeg_read_ahead_error")) {
+			return packet_reader.is_started() ? packet_reader.get_terminal_error() : (failed ? AVERROR(EIO) : 0);
+		}
+		if (p_name == SNAME("_ffmpeg_packet_waiting")) {
+			return packet_waiting;
+		}
+#endif
 		return looping_override && p_name == SNAME("looping") ? Variant(looping) : Variant();
 	}
 	void tag_used_streams() override {
@@ -396,16 +629,45 @@ public:
 			loop_stream->tag_used(get_playback_position());
 		}
 	}
+#if defined(FFMPEG_TESTS_ENABLED) && defined(MODULE_MEDIA_STREAM_ENABLED)
+	bool attach_test_packet_reader(FFmpegPacketReader::TestReadCallback p_read, void *p_userdata) {
+		// Exercise actual PCM decode/mix recovery with controlled packet supply.
+		// No production path can attach a synthetic packet source.
+		if (!format || !codec || stream_index < 0) {
+			return false;
+		}
+		avcodec_flush_buffers(codec);
+		swr_free(&resampler);
+		av_packet_unref(packet);
+		av_frame_unref(frame);
+		pcm_position = pcm_frames = 0;
+		packet_pending = draining = eof = failed = rewind_pending = packet_waiting = false;
+		frame_position = skip_frames = silence_frames = 0;
+		read_ahead_used = true;
+		return packet_reader.start_for_test(p_read, p_userdata, stream_index, source_time_base) == OK;
+	}
+#endif
 	int mix(AudioFrame *p_buffer, float, int p_frames) override {
 		int mixed = 0;
 		bool restarted_without_output = false;
 		while (playing && mixed < p_frames) {
+			if (silence_frames > 0) {
+				int count = int(MIN(silence_frames, uint64_t(p_frames - mixed)));
+				for (int i = 0; i < count; i++) { p_buffer[mixed++] = AudioFrame(0, 0); }
+				silence_frames -= count;
+				frame_position += count;
+				continue;
+			}
 			const bool use_loop = looping_override ? looping : loop_stream.is_valid() && loop_stream->has_loop();
 			uint64_t loop_end = UINT64_MAX;
 			if (use_loop && loop_stream.is_valid() && loop_stream->get_bpm() > 0 && loop_stream->get_beat_count() > 0) {
 				loop_end = uint64_t(loop_stream->get_beat_count() * double(output_sample_rate) * 60.0 / loop_stream->get_bpm());
 			}
-			if (frame_position >= loop_end || !ensure_samples()) {
+			const bool at_loop_end = frame_position >= loop_end;
+			if (at_loop_end || !ensure_samples()) {
+				if (!at_loop_end && packet_waiting) {
+					break;
+				}
 				if (!failed && use_loop && !restarted_without_output) {
 					double offset = loop_stream.is_valid() ? double(loop_stream->get("loop_offset")) : 0.0;
 					if (!Math::is_finite(offset) || offset < 0 || offset >= length || offset * output_sample_rate >= loop_end) {
@@ -437,6 +699,7 @@ public:
 void AudioStreamMedia::set_file(const String &p_file) {
 	file = p_file;
 	length = -1.0;
+	remote_length_usec.set(0);
 }
 
 String AudioStreamMedia::get_file() const {
@@ -444,6 +707,11 @@ String AudioStreamMedia::get_file() const {
 }
 
 Ref<AudioStreamPlayback> AudioStreamMedia::instantiate_playback() {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+    if (FFmpegFileIO::is_remote(file)) {
+        return ffmpeg_async_audio(file, get_http_headers(), Ref<AudioStreamMedia>(this));
+    }
+#endif
     Ref<AudioStreamPlaybackFFmpeg> playback;
     if (file.get_extension().to_lower() == "aac") {
         Vector<uint8_t> data = FileAccess::get_file_as_bytes(file);
@@ -457,15 +725,44 @@ Ref<AudioStreamPlayback> AudioStreamMedia::instantiate_playback() {
     }
     return playback;
 }
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path, const Ref<AudioStream> &p_loop_stream) {
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path, const Ref<AudioStream> &p_loop_stream, const Dictionary &p_headers, const SafeFlag *p_cancel, double *r_length, FFmpegDVRWindow *p_dvr, bool p_dvr_primary) {
 	Ref<AudioStreamPlaybackFFmpeg> playback;
 	playback.instantiate();
+	playback->set_remote_options(p_headers, p_cancel, p_dvr, p_dvr_primary);
 	if (!playback->open_buffer(p_data, p_format, p_path)) {
 		return Ref<AudioStreamPlayback>();
 	}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	if (p_dvr && p_dvr_primary && bool(p_dvr->snapshot().get("available", false))) {
+		double input_start = playback->get_parameter(SNAME("_ffmpeg_dvr_input_start"));
+		double offset = double(p_dvr->snapshot()["selected_utc"]) - input_start;
+		Variant origin = playback->get_parameter(SNAME("_ffmpeg_remote_origin"));
+		if (input_start < 0 || origin.get_type() == Variant::NIL) {
+			return Ref<AudioStreamPlayback>();
+		}
+		playback->set_parameter(SNAME("_ffmpeg_live_origin"), double(origin) + offset);
+		if (int(playback->get_parameter(SNAME("stream_error"))) != OK) {
+			return Ref<AudioStreamPlayback>();
+		}
+	}
+#endif
 	playback->set_loop_stream(p_loop_stream);
+	if (r_length) {
+		*r_length = playback->get_decoded_length();
+	}
 	return playback;
 }
+
+#if defined(FFMPEG_TESTS_ENABLED) && defined(MODULE_MEDIA_STREAM_ENABLED)
+Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata) {
+	Ref<AudioStreamPlaybackFFmpeg> playback;
+	playback.instantiate();
+	if (!playback->open_buffer(p_wave, nullptr, String()) || !playback->attach_test_packet_reader(p_read, p_userdata)) {
+		return Ref<AudioStreamPlayback>();
+	}
+	return playback;
+}
+#endif
 
 bool ffmpeg_probe_audio_buffer(const Vector<uint8_t> &p_data, FFmpegAudioMetadata &r_metadata) {
 	if (p_data.is_empty()) {
@@ -554,6 +851,11 @@ Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPac
 }
 
 double AudioStreamMedia::get_length() const {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+    if (FFmpegFileIO::is_remote(file)) {
+        return double(remote_length_usec.get()) / 1000000.0;
+    }
+#endif
 	if (length >= 0.0) {
 		return length;
 	}
@@ -600,6 +902,14 @@ double AudioStreamMedia::get_length() const {
 }
 
 void AudioStreamMedia::_bind_methods() {
+    ClassDB::bind_method(D_METHOD("set_live_dvr_enabled", "enabled"), &AudioStreamMedia::set_live_dvr_enabled);
+    ClassDB::bind_method(D_METHOD("is_live_dvr_enabled"), &AudioStreamMedia::is_live_dvr_enabled);
+    ADD_PROPERTY(PropertyInfo(Variant::BOOL, "live_dvr_enabled"), "set_live_dvr_enabled", "is_live_dvr_enabled");
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+    ClassDB::bind_method(D_METHOD("set_http_headers", "headers"), &AudioStreamMedia::set_http_headers);
+    ClassDB::bind_method(D_METHOD("get_http_headers"), &AudioStreamMedia::get_http_headers);
+    ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "http_headers"), "set_http_headers", "get_http_headers");
+#endif
 	ClassDB::bind_method(D_METHOD("set_file", "file"), &AudioStreamMedia::set_file);
 	ClassDB::bind_method(D_METHOD("get_file"), &AudioStreamMedia::get_file);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "file"), "set_file", "get_file");

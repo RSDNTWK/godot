@@ -11,6 +11,10 @@ Import("env_modules")
 # the legacy WebM/libvpx module during the migration.
 env_ffmpeg = env_modules.Clone()
 env_ffmpeg.Prepend(CPPPATH=["#thirdparty/libogg/"])
+if env["tests"]:
+    # Keep test seams private to this module; the rest of the engine does not
+    # define TESTS_ENABLED uniformly across compilation units.
+    env_ffmpeg.Append(CPPDEFINES=["FFMPEG_TESTS_ENABLED"])
 
 ffmpeg_dir = env["ffmpeg_dir"]
 if not ffmpeg_dir:

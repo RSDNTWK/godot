@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="YouTubeResolver" inherits="Node" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>Asynchronously resolves public YouTube media URLs using a native extractor.</brief_description>
+	<description>
+		Resolves YouTube watch, short, live, and embed links without downloading media. Extraction runs on a worker thread. YouTube JavaScript challenges use the bundled EJS scripts in an embedded QuickJS runtime; Python and external executables are not required.
+		Available on threaded Windows, Linux/BSD, and Android builds. Web projects should use their browser playback path. Returned URLs expire and may require the returned HTTP headers and the same network identity used for resolution.
+		This class ports the public YouTube playback subset of yt-dlp, not its complete site/extractor feature set. Login, cookies, DRM, proof-of-origin tokens, playlists, subtitles are not implemented.
+	</description>
+	<tutorials />
+	<methods>
+		<method name="cancel">
+			<return type="void" />
+			<description>Cancels an outstanding request. No completed signal is emitted for the cancelled request.</description>
+		</method>
+		<method name="get_video_id" qualifiers="static">
+			<return type="String" />
+			<param index="0" name="url" type="String" />
+			<description>Returns the video ID from a supported HTTPS YouTube URL, or an empty string for unsupported input. An eleven-character video ID is also accepted.</description>
+		</method>
+		<method name="is_resolving" qualifiers="const">
+			<return type="bool" />
+			<description>Returns whether a resolution request is active.</description>
+		</method>
+		<method name="resolve">
+			<return type="int" enum="Error" />
+			<param index="0" name="url" type="String" />
+			<param index="1" name="audio_only" type="bool" default="true" />
+			<description>Starts asynchronous resolution. The node must be in the scene tree. Returns [constant OK] when started, [constant ERR_BUSY] if already resolving, or an input/setup error. The result is delivered through [signal completed].</description>
+		</method>
+	</methods>
+	<signals>
+		<signal name="completed">
+			<param index="0" name="error" type="int" />
+			<param index="1" name="result" type="Dictionary" />
+			<description>Emitted on the main thread. On success, the result contains [code]url[/code], [code]selected_format[/code], [code]formats[/code], [code]http_headers[/code], [code]id[/code], [code]title[/code], [code]duration[/code], and [code]is_live[/code]. Separate inputs also include [code]audio_url[/code], [code]audio_format[/code], and [code]audio_http_headers[/code]; attach those to [member VideoStreamMedia.audio_file] and [member VideoStreamMedia.audio_http_headers]. Errors may include a [code]message[/code]. Resolving a URL does not guarantee the media endpoint will accept playback; authentication and service policy can still apply.</description>
+		</signal>
+	</signals>
+</class>

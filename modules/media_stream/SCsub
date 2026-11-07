@@ -1,0 +1,7 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import("env")
+Import("env_modules")
+env_media_stream = env_modules.Clone()
+env_media_stream.add_source_files(env.modules_sources, "*.cpp")

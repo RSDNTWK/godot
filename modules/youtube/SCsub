@@ -1,0 +1,27 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+import youtube_builders
+
+Import("env")
+Import("env_modules")
+
+env_youtube = env_modules.Clone()
+env_qjs = env_youtube.Clone()
+env_qjs.disable_warnings()
+env_qjs.Prepend(CPPPATH=["#thirdparty/quickjs_ng"])
+env_qjs.Append(CPPDEFINES=["_GNU_SOURCE"])
+if env["platform"] == "windows":
+    env_qjs.Append(CPPDEFINES=["WIN32_LEAN_AND_MEAN"])
+    env_qjs.Append(CFLAGS=["/std:c11"] if env.msvc else [])
+env_qjs.add_source_files(
+    env.modules_sources,
+    ["#thirdparty/quickjs_ng/" + name for name in ["quickjs.c", "dtoa.c", "libregexp.c", "libunicode.c"]],
+)
+scripts = env_youtube.CommandNoCache(
+    "youtube_ejs.gen.h",
+    ["#thirdparty/yt_dlp_ejs/yt.solver.lib.min.js", "#thirdparty/yt_dlp_ejs/yt.solver.core.min.js"],
+    env.Run(youtube_builders.make_scripts),
+)
+env_youtube.add_source_files(env.modules_sources, "*.cpp")
+env_youtube.Depends("youtube_challenges.cpp", scripts)
