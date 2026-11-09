@@ -1058,36 +1058,62 @@ bool ffmpeg_probe_audio_buffer(const Vector<uint8_t> &p_data, FFmpegAudioMetadat
 	return success;
 }
 
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPacketSequence> &p_sequence, const Ref<AudioStream> &p_loop_stream) {
-	ERR_FAIL_COND_V(p_sequence.is_null(), Ref<AudioStreamPlayback>());
+bool ffmpeg_ogg_packet_sequence_to_buffer(const Ref<OggPacketSequence> &p_sequence, Vector<uint8_t> &r_data) {
+	r_data.clear();
+	ERR_FAIL_COND_V(p_sequence.is_null(), false);
 	Ref<OggPacketSequencePlayback> sequence_playback = p_sequence->instantiate_playback();
-	ERR_FAIL_COND_V(sequence_playback.is_null(), Ref<AudioStreamPlayback>());
+	ERR_FAIL_COND_V(sequence_playback.is_null(), false);
 
 	ogg_stream_state stream;
-	ERR_FAIL_COND_V(ogg_stream_init(&stream, 1) != 0, Ref<AudioStreamPlayback>());
-	Vector<uint8_t> ogg_data;
+	ERR_FAIL_COND_V(ogg_stream_init(&stream, 1) != 0, false);
+	auto append_page = [&r_data](const ogg_page &p_page) {
+		const int64_t old_size = r_data.size();
+		const int64_t added = int64_t(p_page.header_len) + p_page.body_len;
+		if (added < 0 || added > INT32_MAX - old_size || r_data.resize(old_size + added) != OK) {
+			return false;
+		}
+		memcpy(r_data.ptrw() + old_size, p_page.header, p_page.header_len);
+		memcpy(r_data.ptrw() + old_size + p_page.header_len, p_page.body, p_page.body_len);
+		return true;
+	};
 	ogg_packet *packet = nullptr;
 	while (sequence_playback->next_ogg_packet(&packet)) {
 		if (ogg_stream_packetin(&stream, packet) != 0) {
 			ogg_stream_clear(&stream);
-			return Ref<AudioStreamPlayback>();
+			r_data.clear();
+			return false;
 		}
-		ogg_page page;
-		while (ogg_stream_pageout(&stream, &page) > 0) {
-			int old_size = ogg_data.size();
-			ogg_data.resize(old_size + page.header_len + page.body_len);
-			memcpy(ogg_data.ptrw() + old_size, page.header, page.header_len);
-			memcpy(ogg_data.ptrw() + old_size + page.header_len, page.body, page.body_len);
+		// Saved sequences carry a granule only on the last packet of a page.
+		// Automatic pageout can split that page before its timestamped packet,
+		// producing completed packets with an unknown granule position.
+		if (packet->granulepos >= 0) {
+			ogg_page page;
+			while (ogg_stream_flush(&stream, &page) > 0) {
+				if (!append_page(page)) {
+					ogg_stream_clear(&stream);
+					r_data.clear();
+					return false;
+				}
+			}
 		}
 	}
 	ogg_page page;
 	while (ogg_stream_flush(&stream, &page) > 0) {
-		int old_size = ogg_data.size();
-		ogg_data.resize(old_size + page.header_len + page.body_len);
-		memcpy(ogg_data.ptrw() + old_size, page.header, page.header_len);
-		memcpy(ogg_data.ptrw() + old_size + page.header_len, page.body, page.body_len);
+		if (!append_page(page)) {
+			ogg_stream_clear(&stream);
+			r_data.clear();
+			return false;
+		}
 	}
 	ogg_stream_clear(&stream);
+	return !r_data.is_empty();
+}
+
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPacketSequence> &p_sequence, const Ref<AudioStream> &p_loop_stream) {
+	Vector<uint8_t> ogg_data;
+	if (!ffmpeg_ogg_packet_sequence_to_buffer(p_sequence, ogg_data)) {
+		return Ref<AudioStreamPlayback>();
+	}
 	return ffmpeg_audio_playback_from_buffer(ogg_data, nullptr, String(), p_loop_stream);
 }
 

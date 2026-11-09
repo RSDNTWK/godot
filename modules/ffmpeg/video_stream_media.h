@@ -75,6 +75,7 @@ Ref<VideoStreamPlayback> ffmpeg_open_video_on_worker(const String &p_path, const
 bool ffmpeg_start_video_read_ahead(const Ref<VideoStreamPlayback> &p_playback, String *r_error = nullptr, bool p_after_finite_seek = false);
 bool ffmpeg_seek_video_on_worker(const Ref<VideoStreamPlayback> &p_playback, double p_position);
 bool ffmpeg_can_reuse_video_seek(const Ref<VideoStreamPlayback> &p_playback);
+bool ffmpeg_ogg_packet_sequence_to_buffer(const Ref<OggPacketSequence> &p_sequence, Vector<uint8_t> &r_data);
 Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPacketSequence> &p_sequence, const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>());
 bool ffmpeg_probe_audio_buffer(const Vector<uint8_t> &p_data, FFmpegAudioMetadata &r_metadata);
 
