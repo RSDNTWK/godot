@@ -187,6 +187,7 @@ const GodotMediaPlayerLibrary = {
 		},
 		youtube: function (r, id) {
 			r.portal = true;
+			r.youtubeId = id;
 			const iframe = document.createElement('iframe');
 			iframe.setAttribute('credentialless', '');
 			iframe.referrerPolicy = 'strict-origin-when-cross-origin';
@@ -226,19 +227,31 @@ const GodotMediaPlayerLibrary = {
 			let position = 0, duration = 0, ranges = [], width = 0, height = 0, title = r.title;
 			let canSeek = false, seekLoop = false, live = r.live, dvr = false;
 			if (r.yt && r.apiReady) {
-				position = r.yt['getCurrentTime']() || 0; duration = r.yt['getDuration']() || 0;
+				position = r.yt['getCurrentTime']() || 0;
+				// Cues briefly clear metadata for the same video. Preserve its known range.
+				const reportedDuration = r.yt['getDuration']();
+				if (Number.isFinite(reportedDuration) && reportedDuration > 0) r.youtubeDuration = reportedDuration;
+				duration = r.youtubeDuration || 0;
 				// The documented iframe API has no advertised DVR TimeRanges.
 				// A finite playlist can explicitly identify its timeline. Unknown
 				// timelines never claim an invented live rewind window.
-				const data = r.yt['getVideoData'] ? r.yt['getVideoData']() : {};
+				const data = (r.yt['getVideoData'] ? r.yt['getVideoData']() : {}) || {};
 				title = GodotMedia.title(data['title'] || title);
+				r.title = title;
 				if (typeof data['isLive'] === 'boolean' && !r.options['timeline_mode']) { live = r.live = data['isLive']; r.liveKnown = true; }
 				canSeek = r.liveKnown && !live && duration > 0;
 				if (duration > 0 && !r.ready) { r.ready = true; clearTimeout(r.timer); }
 				seekLoop = canSeek;
 				if (canSeek) ranges.push({'start': 0, 'end': duration});
 				width = 16; height = 9;
-				if (r.seeking && Math.abs(position - r.seeking.target) < 0.5 && r.yt['getPlayerState']() !== 3) {
+				const state = r.yt['getPlayerState']();
+				const distance = r.seeking ? Math.abs(position - r.seeking.target) : Infinity;
+				// Cued preparation reports its requested start time without decoding
+				// or starting playback. Normal seeks retain their existing tolerance.
+				const seek_complete = r.seeking && (r.seeking.cued
+					? (state === 5 && distance < 0.001) || ([0, 1, 2].includes(state) && distance < 0.5)
+					: state !== 3 && distance < 0.5);
+				if (seek_complete) {
 					GodotMediaPlayer.push(r, {'type': 'seek', 'request': r.seeking.id, 'position': position}); r.seeking = null;
 				}
 			} else if (r.element) {
@@ -306,12 +319,28 @@ const GodotMediaPlayerLibrary = {
 		if (!r) return;
 		const action = GodotRuntime.parseString(command);
 		try {
-			if (action === 'play') { r.wantPlay = true; GodotMediaPlayer.play(r); }
+			if (action === 'play') {
+				// A new play intent must report a fresh browser refusal after a pause.
+				if (!r.wantPlay) r.lastError = '';
+				r.wantPlay = true;
+				GodotMediaPlayer.play(r);
+			}
 			else if (action === 'pause') { r.wantPlay = false; if (r.yt && r.apiReady) r.yt['pauseVideo'](); else if (r.element) r.element.pause(); }
 			else if (action === 'volume') { r.volume = Math.min(1, Math.max(0, value)); if (r.yt && r.apiReady) r.yt['setVolume'](r.volume * 100); else if (r.element) r.element.volume = r.volume; }
 			else if (action === 'seek') {
 				r.seeking = {id: request, target: value, deadline: performance.now() + 15000};
-				if (r.yt && r.ready) { r.yt['seekTo'](value, true); if (r.wantPlay) GodotMediaPlayer.play(r); }
+				if (r.yt && r.ready) {
+					const state = r.yt['getPlayerState']();
+					if (!r.wantPlay && (state === -1 || state === 5)) {
+						// seekTo during canceled startup can leave an unbuffered iframe
+						// unstarted. Prepare the paused start time without forcing play.
+						r.seeking.cued = true;
+						r.yt['cueVideoById']({'videoId': r.youtubeId, 'startSeconds': value});
+					} else {
+						r.yt['seekTo'](value, true);
+						if (r.wantPlay) GodotMediaPlayer.play(r);
+					}
+				}
 				else if (r.element) {
 					if (Math.abs(r.element.currentTime - value) < 0.001 && !r.element.seeking) { GodotMediaPlayer.push(r, {'type': 'seek', 'request': request, 'position': value}); r.seeking = null; }
 					else r.element.currentTime = value;
