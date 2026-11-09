@@ -528,7 +528,7 @@ struct AudioSink {
 	}
 };
 
-static Vector<uint8_t> packet_test_wave(int p_rate);
+static Vector<uint8_t> packet_test_wave(int p_rate, int p_frames = 2048);
 
 struct LookaheadSink {
 	Vector<float> samples;
@@ -1791,9 +1791,9 @@ TEST_CASE("[NativeStreaming][PacketReadAhead] Empty reads stay nonblocking and c
 	CHECK(OS::get_singleton()->get_ticks_usec() - start < 25000);
 }
 
-static Vector<uint8_t> packet_test_wave(int p_rate) {
+static Vector<uint8_t> packet_test_wave(int p_rate, int p_frames) {
 	Vector<uint8_t> wave;
-	wave.resize(44 + 2 * 1024 * 4);
+	wave.resize(44 + p_frames * 4);
 	uint8_t *data = wave.ptrw();
 	memset(data, 0x20, wave.size());
 	auto put16 = [data](int at, uint16_t value) {
@@ -1829,6 +1829,93 @@ static void preparation_frame() {
 	SceneTree::get_singleton()->emit_signal(SNAME("process_frame"));
 	MessageQueue::get_singleton()->flush();
 	OS::get_singleton()->delay_usec(1000);
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][AudioShutdown] Finishing audio releases stopped playback without another mix") {
+	ObjectID wave_id;
+	ObjectID playback_id;
+	{
+		ManualAudioDriver audio;
+		Ref<AudioStreamWAV> wave;
+		wave.instantiate();
+		wave->set_format(AudioStreamWAV::FORMAT_16_BITS);
+		wave->set_mix_rate(48000);
+		wave->set_data(packet_test_wave(48000, 96000).slice(44));
+		wave_id = wave->get_instance_id();
+		AudioStreamPlayer *player = memnew(AudioStreamPlayer);
+		SceneTree::get_singleton()->get_root()->add_child(player);
+		player->set_stream(wave);
+		player->play();
+		Ref<AudioStreamPlayback> playback = player->get_stream_playback();
+		REQUIRE(playback.is_valid());
+		playback_id = playback->get_instance_id();
+		int32_t output[512] = {};
+		audio.driver->mix_audio(256, output);
+		AudioServer::get_singleton()->update();
+		player->set_stream_paused(true);
+		player->stop();
+		memdelete(player);
+		playback.unref();
+		wave.unref();
+		// The driver owns the last references until its next mix, or finish().
+		CHECK(ObjectDB::get_instance(wave_id) != nullptr);
+		CHECK(ObjectDB::get_instance(playback_id) != nullptr);
+		// ManualAudioDriver finishes and destroys the server on scope exit.
+		// Deliberately do not mix or update again to retire the playback.
+	}
+	CHECK(ObjectDB::get_instance(wave_id) == nullptr);
+	CHECK(ObjectDB::get_instance(playback_id) == nullptr);
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][PausePosition] Pausing refreshes a snapshot that missed audio mixing during a UI stall") {
+	ManualAudioDriver audio;
+	Ref<FileAccess> file = FileAccess::create_temp(FileAccess::READ_WRITE, "godot-pause-position", "wav");
+	REQUIRE(file.is_valid());
+	file->store_buffer(packet_test_wave(48000, 96000));
+	file->flush();
+	MediaPreparationOwner owner;
+	MediaStreamPlayer *player = owner.player;
+	SceneTree::get_singleton()->get_root()->add_child(player);
+	Dictionary options;
+	options["prepare_pcm"] = true;
+	options["autoplay"] = true;
+	options["allow_browser_fallback"] = false;
+	REQUIRE(player->open(file->get_path_absolute(), options) == OK);
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+	while (player->is_preparing() && OS::get_singleton()->get_ticks_usec() < deadline) {
+		preparation_frame();
+	}
+	REQUIRE(bool(player->get_snapshot()["ready"]));
+	player->set_volume_linear(0.37);
+	const int64_t generation = player->get_generation();
+	const double cached = player->get_snapshot()["position"];
+	AudioStreamPlayer *stream_player = nullptr;
+	for (int i = 0; i < player->get_child_count(true); i++) {
+		if (AudioStreamPlayer *child = Object::cast_to<AudioStreamPlayer>(player->get_child(i, true))) {
+			stream_player = child;
+		}
+	}
+	REQUIRE(stream_player);
+	// Mix real audio without a controller process notification, as happens
+	// while the main thread is stalled. No sockets or wall-clock sleep needed.
+	int32_t output[512] = {};
+	for (int i = 0; i < 48; i++) {
+		audio.driver->mix_audio(256, output);
+		AudioServer::get_singleton()->update();
+	}
+	const double actual = stream_player->get_playback_position();
+	REQUIRE(actual > cached + 0.08);
+	CHECK(double(player->get_snapshot()["position"]) == cached);
+	player->set_paused(true);
+	CHECK(Math::abs(double(player->get_snapshot()["position"]) - actual) < 0.002);
+	CHECK(player->is_paused());
+	CHECK(player->get_generation() == generation);
+	CHECK(Math::abs(player->get_volume_linear() - 0.37) < 0.001);
+	player->stop();
+	for (int i = 0; i < 4; i++) {
+		audio.driver->mix_audio(256, output);
+		AudioServer::get_singleton()->update();
+	}
 }
 
 TEST_CASE("[SceneTree][NativeStreaming][BackendRetirement] Stopped native playback retains an ownership fence until its last reference retires") {

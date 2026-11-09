@@ -1692,6 +1692,14 @@ void AudioServer::finish() {
 		AudioDriverManager::get_driver(i)->finish();
 	}
 
+	// No driver can mix again after finish(), so stopped or paused playbacks
+	// cannot reach their deferred deletion on another audio callback. Release
+	// the remaining list entries while the server and its buses still exist.
+	for (AudioStreamPlaybackListNode *playback : playback_list) {
+		_delete_stream_playback_list_node(playback);
+	}
+	_cleanup_lists();
+
 	for (int i = 0; i < buses.size(); i++) {
 		memdelete(buses[i]);
 	}

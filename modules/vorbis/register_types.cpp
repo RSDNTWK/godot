@@ -36,7 +36,7 @@
 #include "core/object/class_db.h"
 #include "modules/modules_enabled.gen.h"
 
-#if defined(TOOLS_ENABLED) && !defined(MODULE_FFMPEG_ENABLED)
+#ifdef TOOLS_ENABLED
 #include "resource_importer_ogg_vorbis.h"
 
 #include "editor/editor_node.h"
@@ -56,7 +56,7 @@ void initialize_vorbis_module(ModuleInitializationLevel p_level) {
 #endif
 	}
 
-#if defined(TOOLS_ENABLED) && !defined(MODULE_FFMPEG_ENABLED)
+#ifdef TOOLS_ENABLED
 	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
 		GDREGISTER_CLASS(ResourceImporterOggVorbis);
 

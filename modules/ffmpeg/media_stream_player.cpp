@@ -553,6 +553,18 @@ void MediaStreamPlayer::_apply_pause() {
 	const bool effective = paused || !can_process();
 	audio->set_stream_paused(effective);
 	video->set_paused(effective);
+#ifndef WEB_ENABLED
+	// A UI stall can leave the last frame's snapshot behind an audio worker.
+	// Publish its current position at the pause boundary rather than exposing
+	// that stale position until the next poll. Pending seeks own their position.
+	if (effective && ready_state && !seek_pending) {
+		if (video->get_stream().is_valid()) {
+			position = video->get_stream_position();
+		} else if (audio->get_stream().is_valid()) {
+			position = audio->get_playback_position();
+		}
+	}
+#endif
 #ifdef WEB_ENABLED
 	if (web_handle) {
 		godot_web_media_command(web_handle, effective ? "pause" : "play", 0, 0);
