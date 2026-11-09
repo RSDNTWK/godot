@@ -56,7 +56,7 @@ inline bool https_url(const String &p_url) {
 	}
 	String scheme, host, path, fragment;
 	int port;
-	return p_url.parse_url(scheme, host, port, path, fragment) == OK && !host.is_empty() && (port == 0 || port == 443) && fragment.is_empty();
+	return p_url.parse_url(scheme, host, port, path, fragment) == OK && !host.is_empty() && fragment.is_empty();
 }
 inline bool youtube_url(const String &p_url) {
 	String scheme, host, path, fragment;

@@ -150,7 +150,13 @@ Error String::parse_url(String &r_scheme, String &r_host, int &r_port, String &r
 		if (!base.is_valid_int()) {
 			return ERR_INVALID_PARAMETER;
 		}
-		r_port = base.to_int();
+		const int64_t parsed_port = base.to_int();
+		// Validate before narrowing: oversized values must not wrap into a
+		// usable port (for example, 4294967297 becoming port 1).
+		if (parsed_port < INT32_MIN || parsed_port > INT32_MAX) {
+			return ERR_INVALID_PARAMETER;
+		}
+		r_port = int(parsed_port);
 		if (r_port < 1 || r_port > 65535) {
 			return ERR_INVALID_PARAMETER;
 		}

@@ -12,7 +12,8 @@
 		Available on threaded native Windows, Linux/BSD and Android builds with the media-stream module, and both threaded and non-threaded Web builds with FFmpeg. Web decoding runs in a separate dedicated worker and requires no native MediaHTTP module or shared memory. It transiently buffers at most 64 MiB of encoded input, accepts only finite Content-Length responses without redirects, denies secondary decoder requests, and terminates its worker on cancellation or deadline. Each worker's WASM heap has a 512 MiB ceiling; at most four workers may be active. These caps are additional to the requested PCM payload limit and do not describe total browser memory. Only Accept and Accept-Language request headers are accepted on Web. Browser CORS, TLS, networking and restricted-header rules apply; native DNS/IP pinning is not available on Web. No persistent encoded or decoded media cache is created.
 		Use a browser playback fallback when CORS prevents decoding but the source still permits media embedding. Decoding failure must not be treated as proof that browser playback is unavailable. Live and adaptive manifests require streaming. YouTube service restrictions still apply, and successful local or direct-media decoding does not qualify original YouTube URLs. This API does not migrate any project's existing Web callers.
 	</description>
-	<tutorials />
+	<tutorials>
+	</tutorials>
 	<methods>
 		<method name="get_capabilities" qualifiers="static">
 			<return type="Dictionary" />

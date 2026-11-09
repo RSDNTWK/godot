@@ -33,6 +33,7 @@
 #include "core/config/engine.h"
 #include "core/io/resource_loader.h"
 #include "core/object/script_language.h"
+#include "core/os/mutex.h"
 #include "core/templates/sort_array.h"
 #include "core/version.h"
 
@@ -1479,7 +1480,10 @@ void ClassDB::add_property(const StringName &p_class, const PropertyInfo &p_pinf
 	type->property_setget[p_pinfo.name] = psg;
 }
 
+static Mutex default_values_mutex;
+
 void ClassDB::set_property_default_value(const StringName &p_class, const StringName &p_name, const Variant &p_default) {
+	MutexLock lock(default_values_mutex);
 	if (!default_values.has(p_class)) {
 		default_values[p_class] = HashMap<StringName, Variant>();
 	}
@@ -2170,11 +2174,16 @@ HashMap<StringName, HashMap<StringName, Variant>> ClassDB::default_values;
 HashSet<StringName> ClassDB::default_values_cached;
 
 Variant ClassDB::class_get_default_property_value(const StringName &p_class, const StringName &p_property, bool *r_valid) {
+	HashMap<StringName, Variant> values;
+	MutexLock lock(default_values_mutex);
 	if (!default_values_cached.has(p_class)) {
-		if (!default_values.has(p_class)) {
-			default_values[p_class] = HashMap<StringName, Variant>();
+		if (const HashMap<StringName, Variant> *existing = default_values.getptr(p_class)) {
+			values = *existing;
 		}
 
+		// Constructors and property getters can call back into ClassDB. Build a
+		// private snapshot without holding the cache lock or any map pointers.
+		lock.temp_unlock();
 		Object *c = nullptr;
 		bool cleanup_c = false;
 
@@ -2191,9 +2200,9 @@ Variant ClassDB::class_get_default_property_value(const StringName &p_class, con
 			c->get_property_list(&plist);
 			for (const PropertyInfo &E : plist) {
 				if (E.usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)) {
-					if (!default_values[p_class].has(E.name)) {
+					if (!values.has(E.name)) {
 						Variant v = c->get(E.name);
-						default_values[p_class][E.name] = v;
+						values[E.name] = v;
 					}
 				}
 			}
@@ -2203,7 +2212,18 @@ Variant ClassDB::class_get_default_property_value(const StringName &p_class, con
 			}
 		}
 
-		default_values_cached.insert(p_class);
+		lock.temp_relock();
+		// Another thread may have completed the same class while we built it.
+		// Explicit defaults registered in the meantime remain authoritative.
+		if (!default_values_cached.has(p_class)) {
+			HashMap<StringName, Variant> &cached = default_values[p_class];
+			for (const KeyValue<StringName, Variant> &E : values) {
+				if (!cached.has(E.key)) {
+					cached[E.key] = E.value;
+				}
+			}
+			default_values_cached.insert(p_class);
+		}
 	}
 
 	if (!default_values.has(p_class)) {
@@ -2225,6 +2245,7 @@ Variant ClassDB::class_get_default_property_value(const StringName &p_class, con
 	}
 
 	Variant var = default_values[p_class][p_property];
+	lock.temp_unlock();
 
 #ifdef DEBUG_ENABLED
 	// Some properties may have an instantiated Object as default value,
@@ -2300,8 +2321,11 @@ void ClassDB::unregister_extension_class(const StringName &p_class, bool p_free_
 		}
 	}
 	classes.erase(p_class);
-	default_values_cached.erase(p_class);
-	default_values.erase(p_class);
+	{
+		MutexLock lock(default_values_mutex);
+		default_values_cached.erase(p_class);
+		default_values.erase(p_class);
+	}
 #ifdef TOOLS_ENABLED
 	placeholder_extensions.erase(p_class);
 #endif
@@ -2336,6 +2360,7 @@ Object *ClassDB::_instantiate_allow_unexposed(const StringName &p_class) {
 }
 
 void ClassDB::cleanup_defaults() {
+	MutexLock lock(default_values_mutex);
 	default_values.clear();
 	default_values_cached.clear();
 }

@@ -62,6 +62,8 @@ void MediaStreamPlayer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_loop_range", "begin", "end"), &MediaStreamPlayer::set_loop_range);
 	ClassDB::bind_method(D_METHOD("clear_loop"), &MediaStreamPlayer::clear_loop);
 	ClassDB::bind_method(D_METHOD("get_snapshot"), &MediaStreamPlayer::get_snapshot);
+	ClassDB::bind_method(D_METHOD("is_preparing"), &MediaStreamPlayer::is_preparing);
+	ClassDB::bind_method(D_METHOD("get_preparation_state"), &MediaStreamPlayer::get_preparation_state);
 	ClassDB::bind_method(D_METHOD("get_capabilities"), &MediaStreamPlayer::get_capabilities);
 	ClassDB::bind_method(D_METHOD("get_seekable_ranges"), &MediaStreamPlayer::get_seekable_ranges);
 	ClassDB::bind_method(D_METHOD("get_generation"), &MediaStreamPlayer::get_generation);
@@ -150,7 +152,16 @@ void MediaStreamPlayer::_ranges(const Array &p_ranges) {
 	_event(SNAME("seekable_ranges_changed"), event);
 }
 
+void MediaStreamPlayer::_collect_retired_preparations() {
+	for (int i = retiring_preparations.size() - 1; i >= 0; i--) {
+		if (!retiring_preparations[i].decoder->is_decoding()) {
+			retiring_preparations.remove_at(i);
+		}
+	}
+}
+
 void MediaStreamPlayer::_reset() {
+	_collect_retired_preparations();
 #ifdef WEB_ENABLED
 	if (web_handle) {
 		godot_web_media_close(web_handle);
@@ -161,8 +172,16 @@ void MediaStreamPlayer::_reset() {
 	_portal(false);
 	if (decoder.is_valid()) {
 		decoder->cancel();
+		if (decoder->is_decoding()) {
+			RetiringPreparation retired;
+			retired.decoder = decoder;
+			retired.generation = decoder_generation;
+			retired.source = source;
+			retiring_preparations.push_back(retired);
+		}
 		decoder.unref();
 	}
+	decoder_generation = 0;
 	_native_unbind();
 	audio->stop();
 	audio->set_stream(Ref<AudioStream>());
@@ -202,6 +221,11 @@ Error MediaStreamPlayer::open(const String &p_source, const Dictionary &p_option
 	if (bool(p_options.get("prepare_pcm", false)) && bool(p_options.get("video", false))) {
 		return ERR_INVALID_PARAMETER;
 	}
+	// A canceled request can still own a worker/output until its frame collector
+	// retires it. Reject admission without replacing the accepted generation.
+	if (bool(p_options.get("prepare_pcm", false)) && is_preparing()) {
+		return ERR_BUSY;
+	}
 	++generation;
 	_reset();
 	source = p_source;
@@ -214,6 +238,7 @@ Error MediaStreamPlayer::open(const String &p_source, const Dictionary &p_option
 	set_process_internal(true);
 	if (bool(options.get("prepare_pcm", false))) {
 		decoder.instantiate();
+		decoder_generation = generation;
 		decoder->connect(SNAME("completed"), callable_mp(this, &MediaStreamPlayer::_pcm_completed).bind(generation));
 		const Error err = decoder->decode(source, options.get("mix_rate", 0), options.get("max_pcm_bytes", 128 * 1024 * 1024), options.get("timeout_msec", 60000), options.get("http_headers", Dictionary()));
 		if (err == OK) {
@@ -221,6 +246,7 @@ Error MediaStreamPlayer::open(const String &p_source, const Dictionary &p_option
 			return OK;
 		}
 		decoder.unref();
+		decoder_generation = 0;
 		if (!bool(options.get("allow_browser_fallback", true))) {
 			opened = false;
 			return err;
@@ -238,6 +264,7 @@ void MediaStreamPlayer::_pcm_completed(int p_error, const Dictionary &p_result, 
 		return;
 	}
 	decoder.unref();
+	decoder_generation = 0;
 	if (p_error != OK) {
 #ifdef WEB_ENABLED
 		if (bool(options.get("allow_browser_fallback", true)) && MediaSourcePolicy::browser_url(source)) {
@@ -523,7 +550,7 @@ void MediaStreamPlayer::stop() {
 	_reset();
 	source = String();
 	options.clear();
-	set_process_internal(false);
+	set_process_internal(!retiring_preparations.is_empty());
 }
 Error MediaStreamPlayer::seek(double p_seconds) {
 	if (!ready_state) {
@@ -553,7 +580,13 @@ Error MediaStreamPlayer::seek(double p_seconds) {
 		}
 		video->set_stream_position(p_seconds);
 	} else {
-		if (audio->is_playing()) {
+		Ref<AudioStreamPlayback> playback = bound_playback;
+		if (pcm.is_null() && audio->has_stream_playback() && playback.is_valid() && playback->is_playing()) {
+			// Remote playback owns a worker and can publish a seek command in
+			// place. AudioStreamPlayer::seek() recreates unpaused playback,
+			// discarding the already resolved source and open demuxer.
+			playback->seek(p_seconds);
+		} else if (audio->is_playing()) {
 			audio->seek(p_seconds);
 		} else {
 			audio->play(p_seconds);
@@ -631,6 +664,48 @@ void MediaStreamPlayer::set_volume_linear(float p_volume) {
 #endif
 }
 
+bool MediaStreamPlayer::is_preparing() const {
+	if (decoder.is_valid() && decoder->is_decoding()) {
+		return true;
+	}
+	for (const RetiringPreparation &retired : retiring_preparations) {
+		if (retired.decoder->is_decoding()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+Dictionary MediaStreamPlayer::get_preparation_state() const {
+	auto identity = [](const Ref<AudioStreamPCMDecoder> &p_decoder, int64_t p_generation, const String &p_source) {
+		Dictionary request;
+		request["decoder_instance_id"] = int64_t(uint64_t(p_decoder->get_instance_id()));
+		request["request_id"] = p_decoder->get_request_id();
+		request["generation"] = p_generation;
+		request["source"] = p_source;
+		return request;
+	};
+	Dictionary active;
+	if (decoder.is_valid() && decoder->is_decoding()) {
+		active = identity(decoder, decoder_generation, source);
+	}
+	Array retiring;
+	for (const RetiringPreparation &retired : retiring_preparations) {
+		if (retired.decoder->is_decoding()) {
+			retiring.push_back(identity(retired.decoder, retired.generation, retired.source));
+		}
+	}
+	Dictionary state;
+	state["playback_instance_id"] = int64_t(uint64_t(get_instance_id()));
+	state["generation"] = generation;
+	state["busy"] = !active.is_empty() || !retiring.is_empty();
+	state["active_count"] = active.is_empty() ? 0 : 1;
+	state["retiring_count"] = retiring.size();
+	state["active"] = active;
+	state["retiring"] = retiring;
+	return state;
+}
+
 Dictionary MediaStreamPlayer::get_snapshot() const {
 	Dictionary state;
 	state["playback_instance_id"] = int64_t(uint64_t(get_instance_id()));
@@ -638,6 +713,7 @@ Dictionary MediaStreamPlayer::get_snapshot() const {
 	state["source"] = source;
 	state["ready"] = ready_state;
 	state["buffering"] = buffering;
+	state["preparation"] = get_preparation_state();
 	state["paused"] = paused;
 	state["position"] = position;
 	state["duration"] = duration;
@@ -838,7 +914,10 @@ void MediaStreamPlayer::_poll() {
 			if (rewind || (!live && duration > 0)) {
 				Dictionary range;
 				range["start"] = rewind ? double(dvr["start"]) : 0.0;
-				range["end"] = rewind ? double(dvr["end"]) : duration;
+				// Reopening DVR inputs needs the backend's safe live headroom.
+				// Do not advertise the newer manifest tail as precisely seekable:
+				// requests there are necessarily clamped to live_position.
+				range["end"] = rewind ? double(dvr["live_position"]) : duration;
 				if (rewind) {
 					range["timeline_origin_utc"] = dvr["timeline_origin_utc"];
 				}
@@ -878,8 +957,15 @@ void MediaStreamPlayer::_notification(int p_what) {
 		_update_web_layout();
 	}
 #endif
-	if (p_what == NOTIFICATION_INTERNAL_PROCESS && opened) {
-		_poll();
+	if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
+		_collect_retired_preparations();
+		if (opened) {
+			_poll();
+		} else if (retiring_preparations.is_empty()) {
+			set_process_internal(false);
+		}
+	} else if (p_what == NOTIFICATION_ENTER_TREE && is_preparing()) {
+		set_process_internal(true);
 	} else if (p_what == NOTIFICATION_EXIT_TREE) {
 		stop();
 	} else if (p_what == NOTIFICATION_DRAW) {

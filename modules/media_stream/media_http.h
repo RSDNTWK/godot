@@ -54,8 +54,9 @@ class MediaHTTP {
 	uint64_t deadline = 0;
 	uint64_t absolute_deadline = 0;
 	int response_status = 0;
+	int64_t range_chunk_bytes = 0;
 	bool interrupted() const;
-	Error connect(const String &p_host);
+	Error connect(const String &p_host, int p_port);
 	Error open_internal(const String &p_url, const Dictionary &p_headers, int64_t p_offset, const String &p_post, const String &p_if_range, uint64_t p_deadline);
 	Error resume();
 
@@ -64,6 +65,9 @@ public:
 	static bool public_address(const IPAddress &p_address);
 	static bool valid_url(const String &p_url);
 	static String resolve_url(const String &p_base, const String &p_target);
+	// Optional bounded ranges for media CDNs which throttle open-ended GETs.
+	// Zero preserves ordinary request behavior. Redirect/entity validation stays.
+	void set_range_chunk_size(int64_t p_bytes);
 	Error open(const String &p_url, const Dictionary &p_headers = Dictionary(), int64_t p_offset = 0, const String &p_post = String());
 	int read(uint8_t *p_buffer, int p_size);
 	Error seek(int64_t p_offset);

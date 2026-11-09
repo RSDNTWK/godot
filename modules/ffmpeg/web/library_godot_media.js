@@ -59,7 +59,7 @@ const GodotMedia = {
 			const r = {worker, state: 0, error: 0, message: '', data: null, rate, inputReady: true, frames: 0, timer: null};
 			GodotMedia.requests.set(id, r);
 			r.timer = setTimeout(function () { GodotMedia.finish(id, 24, 'PCM preparation timed out.'); }, timeout);
-			worker.onerror = function (event) { GodotMedia.finish(id, 30, event.message || 'Dedicated decoder worker failed.'); };
+			worker.onerror = function (event) { GodotMedia.finish(id, 1, event.message || 'Dedicated decoder worker failed.'); };
 			worker.onmessage = function (event) {
 				if (GodotMedia.requests.get(id) !== r || r.state !== 0) return;
 				const value = event.data;
@@ -73,7 +73,12 @@ const GodotMedia = {
 			};
 			worker.postMessage({'type': 'start', 'url': GodotRuntime.parseString(url), 'rate': rate, 'limit': limit, 'timeout': timeout, 'headers': JSON.parse(GodotRuntime.parseString(headers)), 'decoderURL': GodotConfig.locate_file('godot.media.decoder.js')});
 			return id;
-		} catch (error) { GodotMedia.requests.delete(id); return 0; }
+		} catch (error) {
+			const r = GodotMedia.requests.get(id);
+			if (r) { r.worker.terminate(); clearTimeout(r.timer); }
+			GodotMedia.requests.delete(id);
+			return 0;
+		}
 	},
 	godot_web_pcm_status__proxy: 'sync',
 	godot_web_pcm_status__sig: 'iiii',
@@ -89,10 +94,15 @@ const GodotMedia = {
 	godot_web_pcm_input: function (id, pointer, size, final) {
 		const r = GodotMedia.requests.get(id);
 		if (!r || r.state !== 0 || !r.inputReady || size < 0 || size > 262144) return 0;
-		const data = HEAPU8.slice(pointer, pointer + size);
-		r.inputReady = false;
-		r.worker.postMessage({'type': 'input', 'data': data.buffer, 'final': !!final}, [data.buffer]);
-		return 1;
+		if (pointer < 0 || pointer + size > HEAPU8.byteLength) { GodotMedia.finish(id, 30, 'Invalid encoded input buffer.'); return 0; }
+		let data;
+		try { data = HEAPU8.slice(pointer, pointer + size); }
+		catch (error) { GodotMedia.finish(id, error instanceof RangeError ? 6 : 1, 'Could not allocate the encoded input transfer buffer.'); return 0; }
+		try {
+			r.inputReady = false;
+			r.worker.postMessage({'type': 'input', 'data': data.buffer, 'final': !!final}, [data.buffer]);
+			return 1;
+		} catch (error) { GodotMedia.finish(id, 1, 'Could not submit encoded input to the decoder worker.'); return 0; }
 	},
 	godot_web_pcm_read__proxy: 'sync',
 	godot_web_pcm_read__sig: 'iiiii',

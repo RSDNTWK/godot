@@ -37,6 +37,7 @@
 #include "ffmpeg_dvr.h"
 #include "ffmpeg_frame_queue.h"
 #include "ffmpeg_media_metadata.h"
+#include "ffmpeg_quality_lookup.h"
 #include "ffmpeg_stream_events.h"
 #ifdef FFMPEG_TESTS_ENABLED
 #include "ffmpeg_file_io.h"
@@ -112,6 +113,126 @@ bool resolve_source(const String &p_source, bool p_audio_only, const SafeFlag &p
 	}
 	return true;
 }
+bool resolve_quality(void *, const String &p_source, const SafeFlag &p_cancel, int p_limit, FFmpegQualityLookup::Result &r_result) {
+	return resolve_source(p_source, false, p_cancel, r_result.video, r_result.video_headers, r_result.audio, r_result.audio_headers, r_result.message, &r_result.dvr_supported, &r_result.metadata, p_limit);
+}
+
+bool video_horizon_waiting(bool p_finite_video, double p_audio_position, double p_presentable_position, uint64_t p_without_progress_usec) {
+	return p_without_progress_usec >= 100000 && p_audio_position >= p_presentable_position + (p_finite_video ? 0.05 : -0.1);
+}
+
+bool packet_source_starved(bool p_waiting, int p_queued_pcm, bool p_has_audio, bool p_has_clock, int64_t p_accepted_frames, double p_origin, double p_audible_position, int p_mix_rate) {
+	if (!p_waiting || p_queued_pcm > 0) {
+		return false;
+	}
+	if (!p_has_audio || !p_has_clock || p_mix_rate <= 0 || p_accepted_frames < 0 || !Math::is_finite(p_origin) || !Math::is_finite(p_audible_position) || p_audible_position < p_origin) {
+		return true;
+	}
+	// Accepted real source frames include PCM in the frontend/device queues.
+	// The audible clock already accounts for output latency. Allow one source
+	// frame for timestamp quantization, without inventing a time-based reserve.
+	return double(p_accepted_frames) - (p_audible_position - p_origin) * p_mix_rate <= 1.0;
+}
+
+#if (defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))) || defined(FFMPEG_TESTS_ENABLED)
+struct StartupFrames {
+	Ref<Image> images[4];
+	double positions[4] = {};
+	int count = 0;
+	int sampled_frames = 0;
+	uint64_t serial = 0;
+	uint64_t work_usec = 0;
+	double media_seconds = 0.0;
+	bool measured = false;
+	bool too_slow = false;
+};
+
+// Run a bounded decoding trial before readiness. Twelve warmup frames drain
+// initial codec output, then twenty-four intervals measure feeding/conversion.
+// Only four diagnostic images are retained. The caller reopens after a trial;
+// no trial images/PCM are played and the consumed audio clock never advances.
+Error prepare_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double p_fps, const SafeFlag &p_cancel,
+		VideoStreamPlayback::AudioPlaybackPositionCallback p_restore_clock, void *p_restore_userdata, StartupFrames &r_frames) {
+	if (p_cancel.is_set()) {
+		return ERR_SKIP;
+	}
+	if (!Math::is_finite(p_fps) || p_fps <= 0.0 || p_fps > 60.0 || p_playback->get_channels() <= 0 ||
+			!bool(p_playback->get(SNAME("_ffmpeg_async_frames"))) || (p_playback->get_length() > 0.0 && p_playback->get_length() < 1.0)) {
+		return OK;
+	}
+	struct ClockGuard {
+		Ref<VideoStreamPlayback> playback;
+		VideoStreamPlayback::AudioPlaybackPositionCallback restore = nullptr;
+		void *userdata = nullptr;
+		double position = 0.0;
+		static double read(void *p_self) { return static_cast<ClockGuard *>(p_self)->position; }
+		~ClockGuard() { playback->set_audio_playback_position_callback(restore, userdata); }
+	} clock{ p_playback, p_restore_clock, p_restore_userdata, p_playback->get_playback_position() };
+	p_playback->set_audio_playback_position_callback(ClockGuard::read, &clock);
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 5000000;
+	double previous_position = clock.position;
+	double measured_origin = clock.position;
+	constexpr int warmup_frames = 12;
+	constexpr int measured_intervals = 24;
+	for (int index = 0; index < warmup_frames + measured_intervals; index++) {
+		const uint64_t started = OS::get_singleton()->get_ticks_usec();
+		if (index > 0) {
+			clock.position = previous_position + 1.0 / p_fps;
+		}
+		while (uint64_t(int64_t(p_playback->get(SNAME("_ffmpeg_presented_frames")))) == r_frames.serial) {
+			if (p_cancel.is_set()) {
+				return ERR_SKIP;
+			}
+			if (OS::get_singleton()->get_ticks_usec() >= deadline) {
+				return ERR_TIMEOUT;
+			}
+			p_playback->update(0.0);
+			if (p_cancel.is_set()) {
+				return ERR_SKIP;
+			}
+			const Error error = Error(int(p_playback->get(SNAME("stream_error"))));
+			if (error != OK) {
+				return error;
+			}
+			if (bool(p_playback->get(SNAME("_ffmpeg_packet_waiting"))) || !p_playback->is_playing()) {
+				return OK; // Network waits and short tails are not CPU evidence.
+			}
+			if (uint64_t(int64_t(p_playback->get(SNAME("_ffmpeg_presented_frames")))) == r_frames.serial) {
+				// Sparse timestamps can already have a future decoded frame.
+				clock.position = MAX(clock.position, double(p_playback->get(SNAME("_ffmpeg_presentable_position"))));
+				OS::get_singleton()->delay_usec(1000);
+			}
+		}
+		Ref<Image> image = p_playback->get(SNAME("_ffmpeg_cpu_frame"));
+		const double frame_position = p_playback->get_playback_position();
+		if (image.is_null() || image->is_empty() || image->get_width() > 1920 || image->get_height() > 1080 || !Math::is_finite(frame_position)) {
+			return ERR_INVALID_DATA;
+		}
+		if (index < 4) {
+			r_frames.images[index] = image;
+			r_frames.positions[index] = frame_position;
+			r_frames.count++;
+		}
+		previous_position = frame_position;
+		r_frames.serial = int64_t(p_playback->get(SNAME("_ffmpeg_presented_frames")));
+		r_frames.sampled_frames++;
+		if (index == warmup_frames - 1) {
+			measured_origin = frame_position;
+		} else if (index >= warmup_frames) {
+			r_frames.work_usec += OS::get_singleton()->get_ticks_usec() - started;
+		}
+	}
+	if (p_cancel.is_set()) {
+		return ERR_SKIP;
+	}
+	r_frames.media_seconds = previous_position - measured_origin;
+	r_frames.measured = r_frames.media_seconds > 0.0 && r_frames.media_seconds <= 3.0;
+	// This worker-only trial excludes frontend rendering/audio scheduling.
+	// Leave 30% of each source interval for those tasks and sustained jitter.
+	r_frames.too_slow = r_frames.measured && r_frames.work_usec > r_frames.media_seconds * 700000.0;
+	return OK;
+}
+#endif
 } // namespace
 
 // Decoder ownership stays on the worker. The audio callback only consumes a
@@ -134,6 +255,7 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 	double position = 0;
 	bool prepare_requested = true;
 	bool seek_requested = false;
+	bool reusable_seek = false;
 	FFMPEG_STREAM_EVENTS(FFmpegAsyncAudio, )
 
 	static void run(void *p_self) { static_cast<FFmpegAsyncAudio *>(p_self)->decode(); }
@@ -172,7 +294,10 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 				continue;
 			}
 			if (current != requested) {
-				playback.unref();
+				const bool reuse = playback.is_valid() && seeking && bool(playback->get_parameter(SNAME("_ffmpeg_reusable_seek")));
+				if (!reuse) {
+					playback.unref();
+				}
 				{
 					MutexLock lock(mutex);
 					if (generation != requested || quit.is_set()) {
@@ -180,12 +305,19 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 					}
 					interrupt.clear();
 				}
-				double duration = 0;
+				if (reuse) {
+					playback->set_parameter(SNAME("_ffmpeg_prepare_reuse_seek"), true);
+					playback->start(from);
+					if (int(playback->get_parameter(SNAME("stream_error"))) != OK) {
+						playback.unref();
+					}
+				}
+				double duration = playback.is_valid() ? owner->get_length() : 0;
 				String unused_audio;
 				Dictionary unused_headers;
 				String message;
 				Ref<FFmpegDVRWindow> window;
-				if (!resolved_url.is_empty() || resolve_source(path, true, interrupt, resolved_url, resolved_headers, unused_audio, unused_headers, message, &dvr_supported, &resolved_metadata)) {
+				if (playback.is_null() && (!resolved_url.is_empty() || resolve_source(path, true, interrupt, resolved_url, resolved_headers, unused_audio, unused_headers, message, &dvr_supported, &resolved_metadata))) {
 					publish_metadata(requested, resolved_metadata);
 					if (dvr.enabled && dvr_supported) {
 						window.instantiate();
@@ -223,6 +355,7 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 							duration = double(window->snapshot()["end_utc"]) - dvr.anchor;
 						}
 						owner->publish_remote_length(duration);
+						reusable_seek = bool(playback->get_parameter(SNAME("_ffmpeg_reusable_seek")));
 						set_metadata_locked(current, opened_metadata);
 						events.ready = true;
 					}
@@ -338,7 +471,9 @@ public:
 			events.error = OK;
 			generation++;
 			post_event(generation, 1);
-			interrupt.set();
+			if (!reusable_seek) {
+				interrupt.set();
+			}
 		}
 		// The callback also owns interpolation history and its read cursor.
 		// Release the command mutex first: resampling calls _mix_internal().
@@ -348,6 +483,7 @@ public:
 	void stop() override {
 		MutexLock lock(mutex);
 		playing = false;
+		reusable_seek = false;
 		prepare_requested = false;
 		events.ready = false;
 		events.buffering = false;
@@ -428,12 +564,16 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 #ifdef DEV_ENABLED
 	bool debug_state_requested = false;
 	Dictionary debug_state;
+	Dictionary buffering_debug;
 #endif
 	double presentable_position = 0;
+	double published_video_position = 0;
+	bool published_video_position_valid = false;
 	int64_t frontend_frames_accepted = 0;
 	uint64_t presentable_progress_usec = 0;
 	bool prepare_requested = true;
 	bool seek_requested = false;
+	bool reusable_seek = false;
 	uint64_t progress_usec = 0;
 	FFMPEG_STREAM_EVENTS(FFmpegAsyncVideo, override)
 
@@ -443,6 +583,37 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 		MutexLock lock(self->mutex);
 		return self->audio_clock_available ? self->audio_position - self->dvr.offset : -1.0;
 	}
+	// Caller holds mutex. Read the driver rate before taking that lock.
+	bool source_starved_locked(int p_mix_rate) const {
+		return packet_source_starved(packet_waiting, pcm.data_left(), has_audio_track, audio_clock_available, frontend_frames_accepted, requested_position, audio_position, p_mix_rate);
+	}
+#ifdef DEV_ENABLED
+	// Caller holds mutex. Capture the assertion itself, independently of worker
+	// snapshots, which cannot be collected while the worker is blocked.
+	void capture_buffering_debug(const char *p_reason, int p_mix_rate) {
+		const uint64_t now = OS::get_singleton()->get_ticks_usec();
+		buffering_debug.clear();
+		buffering_debug["reason"] = p_reason;
+		buffering_debug["assertion_usec"] = int64_t(now);
+		buffering_debug["generation"] = int64_t(generation);
+		buffering_debug["worker_age_usec"] = int64_t(now - progress_usec);
+		buffering_debug["video_age_usec"] = int64_t(now - presentable_progress_usec);
+		buffering_debug["pcm_frames"] = pcm.data_left();
+		buffering_debug["accepted_frames"] = frontend_frames_accepted;
+		buffering_debug["mix_rate"] = p_mix_rate;
+		buffering_debug["origin"] = requested_position;
+		buffering_debug["audio_clock"] = audio_position;
+		buffering_debug["has_audio_clock"] = audio_clock_available;
+		buffering_debug["presentable"] = presentable_position;
+		buffering_debug["published_position"] = published_video_position;
+		buffering_debug["published_position_valid"] = published_video_position_valid;
+		buffering_debug["displayed"] = displayed_position;
+		buffering_debug["frame_clock"] = frame_clock;
+		buffering_debug["queued_images"] = video_frames.size();
+		buffering_debug["packet_waiting"] = packet_waiting;
+		buffering_debug["video_waiting"] = live_audio_waiting;
+	}
+#endif
 	static int capture(void *p_self, const float *p_samples, int p_frames) {
 		FFmpegAsyncVideo *self = static_cast<FFmpegAsyncVideo *>(p_self);
 		AudioFrame buffer[1024];
@@ -473,6 +644,19 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 		const Error result = video_frames.push(image, image_position);
 		if (result == OK) {
 			r_serial = serial;
+			// The frontend may consume this image before the worker's batch
+			// finishes. Extend the audio horizon at the same publication point;
+			// a batch-end-only ledger can lag behind the displayed image.
+			presentable_position = MAX(presentable_position, image_position);
+			// A decoded AVFrame can advertise this PTS before conversion. Its
+			// later CPU-image publication is fresh progress even when the numeric
+			// horizon already includes it. Repeated/backward PTS are not progress.
+			if (!published_video_position_valid || image_position > published_video_position) {
+				published_video_position = image_position;
+				published_video_position_valid = true;
+				presentable_progress_usec = OS::get_singleton()->get_ticks_usec();
+				live_audio_waiting = false;
+			}
 		}
 		return result;
 	}
@@ -485,6 +669,12 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 		Dictionary resolved_metadata;
 		bool dvr_supported = false;
 		Dictionary quality_backup;
+#if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
+		bool initial_quality_checked = false;
+		Dictionary startup_metadata;
+#endif
+		FFmpegQualityLookup quality_lookup;
+		uint64_t quality_generation = 0;
 		uint64_t captured_frame_serial = 0;
 		uint64_t current = UINT64_MAX;
 		while (!quit.is_set()) {
@@ -517,6 +707,43 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				debug_state_requested = false;
 #endif
 			}
+			if (quality_lookup.is_running() && (!active || is_paused)) {
+				quality_lookup.cancel_and_wait();
+			}
+			// A same-source seek does not invalidate format selection. Let the
+			// lookup finish across correction seeks, but never hand off while a
+			// newer seek is still being prepared. Track selection independently
+			// from the seek/event generation so corrections cannot starve lookup.
+			if (requested == current && !prepare && quality_lookup.is_ready()) {
+				FFmpegQualityLookup::Result next_quality;
+				if (!quality_lookup.take(next_quality)) {
+					continue;
+				}
+				MutexLock lock(mutex);
+				const int selected_height = stream_metadata.get("video_height", 0);
+				if (generation == current && events.ready && next_quality.generation == quality_generation && next_quality.found && playing && !paused &&
+						int(next_quality.metadata.get("video_height", 0)) > 0 && int(next_quality.metadata["video_height"]) < selected_height) {
+					quality_backup["video"] = resolved_video;
+					quality_backup["audio"] = resolved_audio;
+					quality_backup["video_headers"] = video_headers;
+					quality_backup["audio_headers"] = resolved_audio_headers;
+					quality_backup["metadata"] = resolved_metadata;
+					quality_backup["dvr_supported"] = dvr_supported;
+					quality_backup["limit"] = quality_limit;
+					resolved_video = next_quality.video;
+					resolved_audio = next_quality.audio;
+					video_headers = next_quality.video_headers;
+					resolved_audio_headers = next_quality.audio_headers;
+					resolved_metadata = next_quality.metadata;
+					dvr_supported = next_quality.dvr_supported;
+					quality_limit = next_quality.limit;
+					quality_generation++;
+					// Snapshot the consumed clock after resolution, while the old
+					// decoder has continued running. Only the actual handoff buffers.
+					seek_locked(audio_clock_available ? audio_position : position, false);
+					continue;
+				}
+			}
 #ifdef DEV_ENABLED
 			if (capture_debug_state) {
 				Dictionary snapshot = playback.is_valid() ? Dictionary(playback->get(SNAME("_ffmpeg_debug_state"))) : Dictionary();
@@ -526,6 +753,8 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				snapshot["outer_audio_clock"] = audio_position;
 				snapshot["outer_pcm_frames"] = pcm.data_left();
 				snapshot["outer_presentable"] = presentable_position;
+					snapshot["outer_published_position"] = published_video_position;
+					snapshot["outer_published_position_valid"] = published_video_position_valid;
 				snapshot["outer_live_waiting"] = live_audio_waiting;
 				snapshot["outer_packet_waiting"] = packet_waiting;
 				snapshot["outer_buffering"] = events.buffering;
@@ -552,13 +781,21 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				continue;
 			}
 			if (current != requested) {
-				playback.unref();
+				const bool reuse_requested = playback.is_valid() && seeking && !bool(resolved_metadata.get("is_live", false)) && quality_backup.is_empty();
+				if (!reuse_requested) {
+					playback.unref();
+				}
 				{
 					MutexLock lock(mutex);
 					if (generation != requested || quit.is_set()) {
 						continue;
 					}
 					interrupt.clear();
+				}
+				decoding_generation = requested;
+				const bool reused = reuse_requested && ffmpeg_seek_video_on_worker(playback, from);
+				if (reuse_requested && !reused) {
+					playback.unref();
 				}
 				bool resolved = !resolved_video.is_empty();
 				String message;
@@ -591,7 +828,7 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 						playback = test_factory(test_userdata);
 					} else
 #endif
-					{
+							if (!reused) {
 						playback = ffmpeg_open_video_on_worker(resolved_video, video_headers, &interrupt, resolved_audio, resolved_audio_headers, &message, window.ptr());
 					}
 				}
@@ -602,8 +839,10 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				if (playback.is_valid()) {
 					playback->set_mix_callback(capture, this);
 					playback->set_audio_playback_position_callback(read_audio_clock, this);
-					playback->play();
-					if (from > 0 && !dvr_open) {
+					if (!reused) {
+						playback->play();
+					}
+					if (!reused && from > 0 && !dvr_open) {
 						playback->seek(from);
 					}
 					if (int(playback->get(SNAME("stream_error"))) == OK) {
@@ -611,7 +850,7 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 						if (!test_factory)
 #endif
 						{
-							read_ahead_ready = ffmpeg_start_video_read_ahead(playback, &message);
+							read_ahead_ready = ffmpeg_start_video_read_ahead(playback, &message, reused);
 						}
 					}
 				}
@@ -621,10 +860,58 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 					failed = true;
 					message = "Selected video exceeds the configured 1080p60 quality ceiling.";
 				}
+#if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
+				StartupFrames startup_frames;
+				if (!failed && adaptive_quality && !initial_quality_checked) {
+					const Error preparation = prepare_startup_frames(playback, opened_metadata.get("video_fps", 0.0), interrupt, read_audio_clock, this, startup_frames);
+					if (preparation != OK) {
+						failed = true;
+						message = preparation == ERR_TIMEOUT ? "Selected video exceeds the bounded initial decoding deadline." :
+								vformat("Could not prepare initial video frames (error %d).", int(preparation));
+					} else if (startup_frames.too_slow) {
+						failed = true;
+						message = "Selected video exceeds the measured startup decoding budget.";
+					}
+					opened_metadata["startup_probe_frames"] = startup_frames.sampled_frames;
+					opened_metadata["startup_probe_work_usec"] = int64_t(startup_frames.work_usec);
+					opened_metadata["startup_probe_media_seconds"] = startup_frames.media_seconds;
+					opened_metadata["startup_probe_measured"] = startup_frames.measured;
+					if (!failed && startup_frames.sampled_frames > 0 && !interrupt.is_set()) {
+						// A bounded trial can decode ahead of the initial image. Reopen
+						// the same validated selection before readiness; no trial PCM or
+						// images are played, and the source begins at its proper origin.
+						startup_metadata["startup_probe_frames"] = startup_frames.sampled_frames;
+						startup_metadata["startup_probe_work_usec"] = int64_t(startup_frames.work_usec);
+						startup_metadata["startup_probe_media_seconds"] = startup_frames.media_seconds;
+						startup_metadata["startup_probe_measured"] = startup_frames.measured;
+						initial_quality_checked = true;
+						playback.unref();
+						{
+							MutexLock lock(mutex);
+							pcm.clear();
+							video_frames.clear();
+						}
+						current = UINT64_MAX;
+						continue;
+					}
+				}
+				if (initial_quality_checked) {
+					opened_metadata.merge(startup_metadata, true);
+				}
+#endif
 				if (failed && adaptive_quality && quality_backup.is_empty() && !interrupt.is_set() && (message.begins_with("Timed out buffering remote") || message.begins_with("Selected video exceeds"))) {
 					const int lower = FFmpegAdaptiveQuality::lower_height(int(resolved_metadata.get("video_height", 0)));
 					if (lower > 0) {
+#if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
+						initial_quality_checked = false;
+						startup_metadata.clear();
+#endif
 						playback.unref();
+						{
+							MutexLock lock(mutex);
+							pcm.clear();
+							video_frames.clear();
+						}
 						resolved_video = String();
 						resolved_audio = String();
 						quality_limit = lower;
@@ -685,19 +972,24 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 						pending_delta = 0;
 						delta = 0;
 						length = playback->get_length();
+						reusable_seek = ffmpeg_can_reuse_video_seek(playback);
 						cpu_frames = bool(playback->get(SNAME("_ffmpeg_async_frames")));
 						has_audio_track = playback->get_channels() > 0;
 						audio_track_active = has_audio_track;
 						captured_frame_serial = 0;
+						published_video_position_valid = false;
 						needs_prepared_frame = true;
 						// Live opening and seek preroll can already have a CPU image.
 						// Queue it before readiness is observable on the frontend.
 						if (cpu_frames) {
 							Ref<Image> prepared = playback->get(SNAME("_ffmpeg_cpu_frame"));
-							if (prepared.is_valid()) {
-								const Error queued = video_frames.push(prepared, playback->get_playback_position() + dvr.offset);
+							if (prepared.is_valid() && video_frames.size() == 0) {
+								const double prepared_position = playback->get_playback_position() + dvr.offset;
+								const Error queued = video_frames.push(prepared, prepared_position);
 								if (queued == OK) {
 									captured_frame_serial = int64_t(playback->get(SNAME("_ffmpeg_presented_frames")));
+									published_video_position = prepared_position;
+									published_video_position_valid = true;
 								} else {
 									failed = true;
 									playing = false;
@@ -712,10 +1004,16 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 						texture = cpu_frames ? Ref<Texture2D>(presentation_texture) : playback->get_texture();
 						live_hls = bool(playback->get(SNAME("_ffmpeg_live_hls")));
 						presentable_position = double(playback->get(SNAME("_ffmpeg_presentable_position"))) + dvr.offset;
+						if (published_video_position_valid) {
+							presentable_position = MAX(presentable_position, published_video_position);
+						}
 						presentable_progress_usec = OS::get_singleton()->get_ticks_usec();
 						progress_usec = OS::get_singleton()->get_ticks_usec();
 						quality.opened(progress_usec);
 						quality_backup.clear();
+#if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
+						initial_quality_checked = !failed;
+#endif
 					}
 				}
 				if (!failed) {
@@ -767,6 +1065,7 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 			bool buffered = false;
 			bool failed = frame_error;
 			bool ended = frame_error;
+			const int source_mix_rate = get_mix_rate();
 			{
 				MutexLock lock(mutex);
 				if (generation == current) {
@@ -789,7 +1088,7 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 					audio_track_active = bool(playback->get(SNAME("_ffmpeg_audio_active")));
 					length = playback->get_length();
 					progress_usec = OS::get_singleton()->get_ticks_usec();
-					const bool source_starved = packet_waiting && pcm.data_left() == 0;
+					const bool source_starved = source_starved_locked(source_mix_rate);
 					buffered = events.buffering && !live_audio_waiting && !source_starved;
 					if (!live_audio_waiting && !source_starved) {
 						events.buffering = false;
@@ -848,6 +1147,9 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 					// rather than seeking a nonseekable rendition after closing it.
 					suspended = suspended || (live_hls && dvr.anchor < 0);
 					starved = pcm.data_left() < 1024 && (packet_waiting || audio_backlog > 0.25);
+					// Finite A/V backpressure can fill the PCM queue while video
+					// falls behind requested time. That is decoder pressure too.
+					starved = starved || (!live_hls && has_audio_track && audio_backlog > 0.25);
 					selected_height = stream_metadata.get("video_height", 0);
 					selected_fps = stream_metadata.get("video_fps", 0.0);
 					observed_frontend = frontend_updates;
@@ -857,56 +1159,15 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				const bool late = double(playback->get(SNAME("_ffmpeg_video_lateness"))) > 0.25;
 				const uint64_t presented_frames = cpu_frames ? observed_uploads : uint64_t(int64_t(playback->get(SNAME("_ffmpeg_presented_frames"))));
 				const int lower = quality.observe(OS::get_singleton()->get_ticks_usec(), selected_height, late || starved, suspended, presented_frames, mixed_position, selected_fps, observed_frontend, expected_clock);
-				if (lower > 0) {
-					{
-						MutexLock lock(mutex);
-						if (generation != current || paused || !playing) {
-							continue;
-						}
-						events.buffering = true;
-					}
-					post_event(current, 1);
-					String next_video, next_audio, message;
-					Dictionary next_headers, next_audio_headers, next_metadata;
-					bool next_dvr = false;
-					// Resolve on this worker while the frontend drains bounded PCM.
-					// A failed lookup leaves the working decoder and selection intact.
-					const bool found = resolve_source(path, false, interrupt, next_video, next_headers, next_audio, next_audio_headers, message, &next_dvr, &next_metadata, lower);
-					uint64_t changed_generation = current;
-					{
-						MutexLock lock(mutex);
-						if (generation != current || quit.is_set()) {
-							continue;
-						}
-						if (found && !paused && int(next_metadata.get("video_height", 0)) > 0 && int(next_metadata["video_height"]) < selected_height) {
-							quality_backup["video"] = resolved_video;
-							quality_backup["audio"] = resolved_audio;
-							quality_backup["video_headers"] = video_headers;
-							quality_backup["audio_headers"] = resolved_audio_headers;
-							quality_backup["metadata"] = resolved_metadata;
-							quality_backup["dvr_supported"] = dvr_supported;
-							quality_backup["limit"] = quality_limit;
-							resolved_video = next_video;
-							resolved_audio = next_audio;
-							video_headers = next_headers;
-							resolved_audio_headers = next_audio_headers;
-							resolved_metadata = next_metadata;
-							dvr_supported = next_dvr;
-							quality_limit = lower;
-							// The consumed audio clock owns the handoff position.
-							seek_locked(audio_clock_available ? audio_position : position, false);
-							changed_generation = generation;
-						} else {
-							events.buffering = false;
-							progress_usec = OS::get_singleton()->get_ticks_usec();
-							pending_delta = 0;
-						}
-					}
-					post_event(changed_generation, 1);
+				if (lower > 0 && !quality_lookup.is_running()) {
+					// URL extraction can take seconds. Keep decoding this selection
+					// until one bounded background lookup supplies a valid replacement.
+					quality_lookup.start(path, quality_generation, lower, resolve_quality);
 				}
 			}
 			OS::get_singleton()->delay_usec(2000);
 		}
+		quality_lookup.cancel_and_wait();
 		playback.unref();
 	}
 
@@ -947,6 +1208,11 @@ public:
 			r_result = debug_state.duplicate();
 			return true;
 		}
+		if (p_name == SNAME("_ffmpeg_buffering_debug")) {
+			MutexLock lock(mutex);
+			r_result = buffering_debug.duplicate();
+			return true;
+		}
 #endif
 		return false;
 	}
@@ -966,8 +1232,9 @@ public:
 		return worker.is_started();
 	}
 	void update(double p_delta) override {
-		bool limit_live_audio = false;
+		bool limit_video_audio = false;
 		Ref<FFmpegAsyncVideo> keep_alive(this);
+		const int mix_rate = get_mix_rate();
 		double output_latency = -1.0;
 		Ref<Image> next_image;
 		double next_image_position = 0.0;
@@ -980,7 +1247,7 @@ public:
 			if (!events.ready || (paused && !prepared_image)) {
 				return;
 			}
-			limit_live_audio = live_hls && audio_clock_available;
+			limit_video_audio = audio_clock_available && (live_hls || (cpu_frames && has_audio_track && length > 0.0));
 			frontend_updates++;
 			if (events.ready) {
 				frontend_timeline += paused ? 0.0 : MAX(p_delta, 0.0);
@@ -1006,10 +1273,16 @@ public:
 					pending_delta += MAX(p_delta, 0.0);
 				}
 				if (events.ready && !events.buffering && OS::get_singleton()->get_ticks_usec() - progress_usec > 250000) {
+#ifdef DEV_ENABLED
+					capture_buffering_debug("worker_timeout", mix_rate);
+#endif
 					events.buffering = true;
 					post_event(generation, 1);
 				}
-				if (events.ready && packet_waiting && pcm.data_left() == 0 && !events.buffering) {
+				if (events.ready && source_starved_locked(mix_rate) && !events.buffering) {
+#ifdef DEV_ENABLED
+					capture_buffering_debug("source_starved", mix_rate);
+#endif
 					events.buffering = true;
 					post_event(generation, 1);
 				}
@@ -1047,12 +1320,11 @@ public:
 			}
 		}
 		if (output_latency < 0.0) {
-			output_latency = limit_live_audio ? AudioServer::get_singleton()->get_output_latency() : 0.0;
+			output_latency = limit_video_audio ? AudioServer::get_singleton()->get_output_latency() : 0.0;
 		}
 		if (!Math::is_finite(output_latency) || output_latency < 0.0) {
 			output_latency = 0.0;
 		}
-		const int mix_rate = get_mix_rate();
 		AudioFrame samples[1024];
 		float interleaved[2048];
 		for (int batch = 0; batch < 16; batch++) {
@@ -1062,10 +1334,12 @@ public:
 				MutexLock lock(mutex);
 				current = generation;
 				count = pcm.read(samples, 1024, false);
-				if (live_hls && audio_clock_available) {
+				const bool finite_video = cpu_frames && has_audio_track && length > 0.0 && !live_hls;
+				if (audio_clock_available && (live_hls || (finite_video && playing))) {
 					// Samples accepted by the frontend include device output latency.
 					// Keep the audible clock within 100ms of a decoded/queued frame,
-					// holding PCM during a slow live video segment fetch.
+					// holding PCM during slow video fetching or conversion. Finite
+					// sources release this bound at EOF so their audio tail drains.
 					const double allowance_seconds = CLAMP(presentable_position - requested_position + 0.1 + output_latency, 0.0, double(INT32_MAX));
 					const int64_t budget = MAX(int64_t(0), int64_t(allowance_seconds * mix_rate) - frontend_frames_accepted);
 					count = int(MIN(int64_t(count), budget));
@@ -1075,9 +1349,16 @@ public:
 						// delivered, then discard only PCM beyond that final horizon.
 						pcm.clear();
 					}
-					if (budget == 0 && events.ready && playing && audio_position >= presentable_position - 0.1 && OS::get_singleton()->get_ticks_usec() - presentable_progress_usec >= 100000 && !live_audio_waiting) {
+					// Hold bounded PCM immediately, but a normal frame handoff is
+					// not a buffering transition. Both finite and live sources must
+					// have stopped extending their video horizon for at least 100 ms.
+					const bool video_wait = video_horizon_waiting(finite_video, audio_position, presentable_position, OS::get_singleton()->get_ticks_usec() - presentable_progress_usec);
+					if (budget == 0 && events.ready && playing && video_wait && !live_audio_waiting) {
 						live_audio_waiting = true;
 						if (!events.buffering) {
+#ifdef DEV_ENABLED
+							capture_buffering_debug("video_horizon", mix_rate);
+#endif
 							events.buffering = true;
 							post_event(current, 1);
 						}
@@ -1115,7 +1396,9 @@ public:
 		seek(0);
 		MutexLock lock(mutex);
 		playing = false;
+		reusable_seek = false;
 		prepare_requested = false;
+		interrupt.set();
 		events.buffering = false;
 		post_event(generation, 1);
 	}
@@ -1138,6 +1421,8 @@ public:
 		position = requested_position;
 		displayed_position = frame_clock = requested_position;
 		video_frames.clear();
+		published_video_position = requested_position;
+		published_video_position_valid = false;
 		needs_prepared_frame = true;
 		audio_position = requested_position;
 		live_hls = false;
@@ -1155,7 +1440,9 @@ public:
 		events.error = OK;
 		generation++;
 		post_event(generation, 1);
-		interrupt.set();
+		if (!reusable_seek) {
+			interrupt.set();
+		}
 	}
 	bool is_playing() const override {
 		MutexLock lock(mutex);
@@ -1255,6 +1542,36 @@ void register_ffmpeg_async_playback_types() {
 #endif
 }
 #ifdef FFMPEG_TESTS_ENABLED
+bool ffmpeg_test_packet_source_starved(bool p_waiting, int p_queued_pcm, int64_t p_accepted_frames, double p_origin, double p_audible_position, int p_mix_rate, bool p_has_clock, bool p_has_audio) {
+	return packet_source_starved(p_waiting, p_queued_pcm, p_has_audio, p_has_clock, p_accepted_frames, p_origin, p_audible_position, p_mix_rate);
+}
+
+bool ffmpeg_test_video_horizon_waiting(bool p_finite_video, double p_audio_position, double p_presentable_position, uint64_t p_without_progress_usec) {
+	return video_horizon_waiting(p_finite_video, p_audio_position, p_presentable_position, p_without_progress_usec);
+}
+
+Dictionary ffmpeg_test_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double p_fps, const SafeFlag &p_cancel,
+		VideoStreamPlayback::AudioPlaybackPositionCallback p_restore_clock, void *p_restore_userdata) {
+	StartupFrames frames;
+	const Error error = prepare_startup_frames(p_playback, p_fps, p_cancel, p_restore_clock, p_restore_userdata, frames);
+	Dictionary result;
+	result["error"] = int(error);
+	result["measured"] = frames.measured;
+	result["too_slow"] = frames.too_slow;
+	result["work_usec"] = int64_t(frames.work_usec);
+	result["sampled_frames"] = frames.sampled_frames;
+	result["media_seconds"] = frames.media_seconds;
+	Array images;
+	Array positions;
+	for (int index = 0; index < frames.count; index++) {
+		images.append(frames.images[index]);
+		positions.append(frames.positions[index]);
+	}
+	result["images"] = images;
+	result["positions"] = positions;
+	return result;
+}
+
 Ref<VideoStreamPlayback> ffmpeg_test_async_video(FFmpegTestVideoFactory p_factory, void *p_userdata) {
 	ERR_FAIL_NULL_V(p_factory, Ref<VideoStreamPlayback>());
 	Ref<FFmpegAsyncVideo> playback;

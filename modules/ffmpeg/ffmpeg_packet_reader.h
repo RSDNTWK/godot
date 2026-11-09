@@ -61,6 +61,7 @@ class FFmpegPacketReader {
 
 	Thread worker;
 	SafeFlag stop_requested;
+	SafeFlag io_stop_requested;
 	const SafeFlag *external_cancel = nullptr;
 	AVFormatContext *format = nullptr;
 	int selected_stream = -1;
@@ -93,14 +94,16 @@ public:
 	// The flag address is stable even before the HTTP input opens. reset() only
 	// clears it AFTER joining the old producer; pass it to every child transport.
 	void reset();
-	const SafeFlag *get_stop_flag() const { return &stop_requested; }
+	const SafeFlag *get_stop_flag() const { return &io_stop_requested; }
 	Error start(AVFormatContext *p_format, int p_selected_stream, const SafeFlag *p_external_cancel);
 	bool is_started() const { return worker.is_started(); }
 	// Nonblocking: packet, EAGAIN while empty/running, then EOF/error after drain.
 	int read(AVPacket *r_packet);
 	bool has_prefill(double p_seconds = 6.0) const;
 	int get_terminal_error() const;
-	void stop();
+	// A finite seek can finish the current bounded read instead of aborting a
+	// partially parsed container packet. Destruction/cancellation still abort IO.
+	void stop(bool p_interrupt_io = true);
 
 	using TestReadCallback = ReadCallback;
 	// Synthetic inputs exercise the identical producer, bounds, and queue path.

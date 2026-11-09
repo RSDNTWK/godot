@@ -27,6 +27,10 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+#include "ffmpeg_frame_scaler.h"
+#endif
+
 class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	GDCLASS(VideoStreamPlaybackFFmpeg, VideoStreamPlayback);
 
@@ -44,24 +48,33 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	AVFrame *frame = nullptr;
 	AVFrame *queued_frame = nullptr;
 	AVFrame *presentation_frame = nullptr;
+	AVFrame *late_frame = nullptr;
 	AVFrame *software_frame = nullptr;
 	AVFrame *rgba_frame = nullptr;
 	AVBufferRef *hardware_device = nullptr;
 	SwsContext *scale = nullptr;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+	FFmpegFrameScaler threaded_scale;
+#endif
 	int video_stream = -1;
 	bool playing = false;
 	bool paused = false;
 	double position = 0.0;
+	double decoded_position = 0.0;
+	double late_frame_position = 0.0;
+	int late_frame_skips = 0;
 	double length = 0.0;
 	Dictionary stream_metadata;
 	double playback_clock = 0.0;
 	double audio_frames_due = 0.0;
+	bool audio_prefill_started = false;
 	double audio_position = 0.0;
 	bool audio_clock_available = false;
 	AudioPlaybackPositionCallback audio_clock_callback = nullptr;
 	void *audio_clock_userdata = nullptr;
 	bool seek_preroll = false;
 	double seek_target = 0.0;
+	uint64_t forward_seek_count = 0;
 	bool live_start_prepared = false;
 	bool preparing_live_start = false;
 	Vector<float> pending_audio;
@@ -111,7 +124,6 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	bool test_hardware_failure = false;
 	int test_delay_above_height = 0;
 	uint64_t test_video_delay_usec = 0;
-	double debug_last_frame_position = 0.0;
 	int64_t debug_negative_frames = 0;
 	int64_t debug_decoded_frames = 0;
 	int64_t debug_late_discards = 0;
@@ -137,8 +149,22 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		return false;
 	}
 
+	bool _audio_is_active() const {
+		if (audio_playback.is_null()) {
+			return false;
+		}
+		if (audio_playback->is_playing()) {
+			return true;
+		}
+		// Prefetch can reach decoder EOF before the frontend consumes its tail.
+		// Use the cached consumed clock here: this property can be queried while
+		// the outer command mutex is held, so it must not call back into it.
+		return audio_prefill_started && audio_clock_available &&
+				audio_position + 1.0 / AudioServer::get_singleton()->get_mix_rate() < audio_playback->get_playback_position();
+	}
+
 	double _get_target_clock() const {
-		if (network_cancel && audio_playback.is_valid() && audio_playback->is_playing() && !seek_preroll) {
+		if (network_cancel && _audio_is_active() && !seek_preroll) {
 			const double current = audio_clock_callback ? audio_clock_callback(audio_clock_userdata) : (audio_clock_available ? audio_position : -1.0);
 			if (Math::is_finite(current) && current >= 0.0) {
 				return current;
@@ -184,9 +210,9 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		candidate->thread_count = 1;
 #endif
 		if (p_device) {
-			// Keep room for the caller's current, queued and presentation
-			// references in addition to the decoder's own reference pictures.
-			candidate->extra_hw_frames = 3;
+			// Finite async catch-up can retain one final skipped image in
+			// addition to current, queued and presentation references.
+			candidate->extra_hw_frames = network_cancel && async_frames && !live_hls ? 4 : 3;
 			candidate->hw_device_ctx = av_buffer_ref(p_device);
 			if (!candidate->hw_device_ctx) {
 				avcodec_free_context(&candidate);
@@ -303,6 +329,8 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		av_frame_unref(frame);
 		av_frame_unref(queued_frame);
 		av_frame_unref(presentation_frame);
+		av_frame_unref(late_frame);
+		late_frame_skips = 0;
 		av_frame_unref(software_frame);
 		av_packet_unref(packet);
 		avcodec_free_context(&codec);
@@ -343,7 +371,14 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 			return;
 		}
 		audio_frames_due += MAX(p_delta, 0.0) * AudioServer::get_singleton()->get_mix_rate();
-		if (live_hls) {
+		if (network_cancel && async_frames && !live_hls && length > 0.0 && !audio_prefill_started) {
+			// Producing only elapsed worker time leaves the frontend with no
+			// reserve for a slow video frame. Seed a bounded amount of real PCM;
+			// the consumed-sample callback still owns the presentation clock.
+			audio_frames_due += AudioServer::get_singleton()->get_mix_rate() * 0.2;
+			audio_prefill_started = true;
+		}
+		if (live_hls || (network_cancel && async_frames && length > 0.0)) {
 			// Rejected PCM remains queued. Retain at most one second of
 			// production credit instead of accumulating stalled wall time.
 			audio_frames_due = MIN(audio_frames_due, double(AudioServer::get_singleton()->get_mix_rate()));
@@ -397,6 +432,9 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 			sws_freeContext(scale);
 			scale = nullptr;
 		}
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		threaded_scale.reset();
+#endif
 		if (codec) {
 			avcodec_free_context(&codec);
 		}
@@ -417,6 +455,9 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		if (presentation_frame) {
 			av_frame_free(&presentation_frame);
 		}
+		if (late_frame) {
+			av_frame_free(&late_frame);
+		}
 		if (software_frame) {
 			av_frame_free(&software_frame);
 		}
@@ -432,7 +473,11 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		live_hls = false;
 		playing = false;
 		playback_clock = 0.0;
+		decoded_position = 0.0;
+		late_frame_position = 0.0;
+		late_frame_skips = 0;
 		audio_frames_due = 0.0;
+		audio_prefill_started = false;
 		pending_audio.clear();
 		pending_audio_offset = 0;
 		packet_pending = false;
@@ -464,12 +509,16 @@ public:
 			r_result = async_frames;
 			return true;
 		}
+		if (p_name == SNAME("_ffmpeg_forward_seek_count")) {
+			r_result = int64_t(forward_seek_count);
+			return true;
+		}
 		if (p_name == SNAME("_ffmpeg_cpu_frame")) {
 			r_result = decoded_image;
 			return true;
 		}
 		if (p_name == SNAME("_ffmpeg_audio_active")) {
-			r_result = audio_playback.is_valid() && audio_playback->is_playing();
+			r_result = _audio_is_active();
 			return true;
 		}
 		if (p_name == SNAME("_ffmpeg_metadata")) {
@@ -483,7 +532,7 @@ public:
 			state["target_clock"] = _get_target_clock();
 			state["playback_clock"] = playback_clock;
 			state["origin"] = timestamp_origin;
-			state["last_decoded_position"] = debug_last_frame_position;
+			state["last_decoded_position"] = decoded_position;
 			state["decoded_frames"] = debug_decoded_frames;
 			state["uploaded_frames"] = async_frames ? int64_t(0) : int64_t(presented_frames);
 			state["converted_frames"] = int64_t(presented_frames);
@@ -491,6 +540,9 @@ public:
 			state["late_discards"] = debug_late_discards;
 			state["first_uploaded_position"] = debug_first_presented_position;
 			state["hardware_decoding"] = hardware_decoding;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+			state["conversion_threads"] = threaded_scale.get_threads();
+#endif
 			state["codec"] = codec && codec->codec ? String(codec->codec->name) : String();
 			Dictionary stages;
 			stages["update"] = debug_update_time.snapshot();
@@ -664,9 +716,10 @@ public:
 		frame = av_frame_alloc();
 		queued_frame = av_frame_alloc();
 		presentation_frame = av_frame_alloc();
+		late_frame = av_frame_alloc();
 		software_frame = av_frame_alloc();
 		rgba_frame = av_frame_alloc();
-		if (!packet || !frame || !queued_frame || !presentation_frame || !software_frame || !rgba_frame) {
+		if (!packet || !frame || !queued_frame || !presentation_frame || !late_frame || !software_frame || !rgba_frame) {
 			return _open_failed(r_error, vformat("Could not allocate the video playback frames (error %d).", int(ERR_OUT_OF_MEMORY)));
 		}
 		if (packet && frame && queued_frame) {
@@ -766,26 +819,28 @@ public:
 		return true;
 	}
 
-	bool start_read_ahead(String *r_error) {
+	bool start_read_ahead(String *r_error, bool p_after_finite_seek = false) {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
-		if (!network_cancel || packet_reader.is_started()) {
+		if (!network_cancel) {
 			return true;
 		}
 		const bool audio_read_ahead = audio_playback.is_valid() && bool(audio_playback->get_parameter(SNAME("_ffmpeg_can_read_ahead")));
-		const Error started = packet_reader.start(format, video_stream, network_cancel);
+		const double minimum_prefill = p_after_finite_seek ? 0.5 : 6.0;
+		const Error started = packet_reader.is_started() ? OK : packet_reader.start(format, video_stream, network_cancel);
 		if (started != OK) {
 			return _open_failed(r_error, vformat("Could not start remote video packet read-ahead (error %d).", int(started)));
 		}
 		// Both producers run while the decoder worker waits for initial data.
 		// No decoder, renderer or mixer call owns a network refill afterwards.
 		if (audio_read_ahead) {
-			audio_playback->set_parameter(SNAME("_ffmpeg_start_read_ahead"), true);
+			audio_playback->set_parameter(SNAME("_ffmpeg_start_read_ahead"), minimum_prefill);
 		}
 		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 30000000;
 		while (!network_cancel->is_set()) {
-			const bool video_ready = packet_reader.has_prefill(6.0);
+			const bool video_ready = packet_reader.has_prefill(minimum_prefill);
 			const bool audio_ready = !audio_read_ahead || bool(audio_playback->get_parameter(SNAME("_ffmpeg_read_ahead_ready")));
 			if (video_ready && audio_ready) {
+				print_verbose(vformat("FFmpeg: video/audio packet prefill completed in %d ms.", (OS::get_singleton()->get_ticks_usec() + 30000000 - deadline) / 1000));
 				return true;
 			}
 			if (!video_ready && packet_reader.get_terminal_error() < 0) {
@@ -809,6 +864,7 @@ public:
 		if (!playing || paused || !format || !codec) {
 			return;
 		}
+		const bool preparing_poster = seek_preroll || preparing_live_start;
 #ifdef DEV_ENABLED
 		DebugMeasure update_measure(debug_update_time);
 		if (test_delay_above_height > 0 && codec->height > test_delay_above_height && test_video_delay_usec > 0) {
@@ -995,8 +1051,8 @@ public:
 				return;
 			}
 			frame_position = frame->best_effort_timestamp == AV_NOPTS_VALUE ? position : frame->best_effort_timestamp * av_q2d(video_time_base) - timestamp_origin;
+			decoded_position = frame_position;
 #ifdef DEV_ENABLED
-			debug_last_frame_position = frame_position;
 			debug_decoded_frames++;
 #endif
 			target_clock = _get_target_clock() + lead;
@@ -1043,7 +1099,37 @@ public:
 			frame_position = frame->best_effort_timestamp == AV_NOPTS_VALUE ? position : frame->best_effort_timestamp * av_q2d(video_time_base) - timestamp_origin;
 			frame_ready = true;
 		}
+		if (!frame_ready && !playing && stream_error == OK && late_frame->format >= 0) {
+			// EOF can follow fewer than a full catch-up burst. Preserve the
+			// true final decoded image rather than leaving an older texture.
+			av_frame_unref(frame);
+			av_frame_move_ref(frame, late_frame);
+			frame_position = late_frame_position;
+			frame_ready = true;
+		}
 		if (!frame_ready) {
+			return;
+		}
+		if (network_cancel && !_valid_remote_video_size(frame->width, frame->height)) {
+			stream_error = ERR_INVALID_DATA;
+			playing = false;
+			return;
+		}
+		if (network_cancel && async_frames && !live_hls && length > 0.0 && playing && !preparing_poster &&
+				frame_position < _get_target_clock() - 0.2 && frame_position - position < 0.1 - 0.000001 && late_frame_skips < 8) {
+			// The frontend can discard queued images, but that happens after
+			// expensive conversion. Preserve decoder reference frames while
+			// skipping conversion of images already behind consumed audio.
+			// Bound both skipped-frame count and source-time image spacing:
+			// a continuously late decoder must still publish real images.
+			// A seek's prepared poster must still represent its exact target.
+#ifdef DEV_ENABLED
+			debug_late_discards++;
+#endif
+			av_frame_unref(late_frame);
+			av_frame_move_ref(late_frame, frame);
+			late_frame_position = frame_position;
+			late_frame_skips++;
 			return;
 		}
 #ifdef DEV_ENABLED
@@ -1108,11 +1194,25 @@ public:
 			playing = false;
 			return;
 		}
-		scale = sws_getCachedContext(scale, width, height, static_cast<AVPixelFormat>(display_frame->format), width, height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-		if (!scale) {
-			stream_error = ERR_OUT_OF_MEMORY;
-			playing = false;
-			return;
+		bool frame_scaled = false;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		if (network_cancel && display_frame->format == AV_PIX_FMT_NV12 && pixels >= 262144) {
+			const int converted = threaded_scale.convert(display_frame, rgba_frame);
+			if (converted < 0) {
+				stream_error = converted == AVERROR(ENOMEM) ? ERR_OUT_OF_MEMORY : ERR_INVALID_DATA;
+				playing = false;
+				return;
+			}
+			frame_scaled = true;
+		}
+#endif
+		if (!frame_scaled) {
+			scale = sws_getCachedContext(scale, width, height, static_cast<AVPixelFormat>(display_frame->format), width, height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+			if (!scale) {
+				stream_error = ERR_OUT_OF_MEMORY;
+				playing = false;
+				return;
+			}
 		}
 		Vector<uint8_t> data;
 		if (data.resize(int(pixels * 4)) != OK) {
@@ -1120,7 +1220,7 @@ public:
 			playing = false;
 			return;
 		}
-		if (sws_scale(scale, display_frame->data, display_frame->linesize, 0, height, rgba_frame->data, rgba_frame->linesize) != height) {
+		if (!frame_scaled && sws_scale(scale, display_frame->data, display_frame->linesize, 0, height, rgba_frame->data, rgba_frame->linesize) != height) {
 			stream_error = ERR_INVALID_DATA;
 			playing = false;
 			return;
@@ -1143,6 +1243,8 @@ public:
 		}
 		position = frame_position;
 		presented_frames++;
+		av_frame_unref(late_frame);
+		late_frame_skips = 0;
 #ifdef DEV_ENABLED
 		if (debug_first_presented_position < 0.0) {
 			debug_first_presented_position = frame_position;
@@ -1150,6 +1252,59 @@ public:
 #endif
 	}
 
+	bool can_seek_on_worker() const {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		return network_cancel && format && format->pb && (format->pb->seekable & AVIO_SEEKABLE_NORMAL) && !live_hls && !String(format->iformat->name).contains("hls");
+#else
+		return false;
+#endif
+	}
+	bool seek_on_worker(double p_position) {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (!can_seek_on_worker()) {
+			print_verbose("FFmpeg: video seek requires a fresh input.");
+			return false;
+		}
+		const uint64_t began = OS::get_singleton()->get_ticks_usec();
+		const double forward = p_position - position;
+		// A small forward correction can consume reference frames already in
+		// the bounded packet queue. Seeking the container backwards to its GOP
+		// keyframe needlessly decodes those earlier frames a second time. The
+		// producer keeps sole demuxer ownership; this path never seeks/flushes it.
+		if (packet_reader.is_started() && !demux_eof && !decoder_draining && !waiting_for_keyframe &&
+				forward >= 0.1 && forward <= 2.0 && decoded_position < p_position && packet_reader.has_prefill(forward + 0.5)) {
+			if (audio_playback.is_valid()) {
+				audio_playback->set_parameter(SNAME("_ffmpeg_prepare_reuse_seek"), true);
+			}
+			av_frame_unref(queued_frame);
+			av_frame_unref(presentation_frame);
+			stream_error = OK;
+			stream_error_message = String();
+			playing = true;
+			_prepare_seek_output(p_position);
+			forward_seek_count++;
+			print_verbose(vformat("FFmpeg: buffered forward video seek prepared in %d ms (error %d).", (OS::get_singleton()->get_ticks_usec() - began) / 1000, int(stream_error)));
+			return stream_error == OK;
+		}
+		// The decode worker joins both packet producers before reusing their
+		// formats. Live playlists retain their fresh-manifest reopen path.
+		packet_reader.stop(false);
+		packet_reader.reset();
+		if (audio_playback.is_valid()) {
+			audio_playback->set_parameter(SNAME("_ffmpeg_prepare_reuse_seek"), true);
+		}
+		format->pb->error = 0;
+		format->pb->eof_reached = 0;
+		stream_error = OK;
+		stream_error_message = String();
+		playing = true;
+		seek(p_position);
+		print_verbose(vformat("FFmpeg: retained video seek prepared in %d ms (error %d).", (OS::get_singleton()->get_ticks_usec() - began) / 1000, int(stream_error)));
+		return stream_error == OK;
+#else
+		return false;
+#endif
+	}
 	void play() override {
 		if (live_start_prepared) {
 			// Initial live preroll has already selected the first source frame
@@ -1210,43 +1365,49 @@ public:
 			demux_eof = false;
 			decoder_draining = false;
 			waiting_for_keyframe = false;
-			pending_audio.clear();
-			pending_audio_offset = 0;
-			audio_frames_due = 0.0;
-			if (audio_playback.is_valid()) {
-				// A shorter soundtrack may already have reached EOF. A seek in
-				// an active video must reactivate it, without unpausing output.
-				if (playing) {
-					audio_playback->start_playback(p_time);
-				} else {
-					audio_playback->seek(p_time);
-				}
-				if (network_cancel && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK) {
-					stream_error = ERR_UNAVAILABLE;
-					return;
-				}
+			_prepare_seek_output(p_time);
+		}
+	}
+	void _prepare_seek_output(double p_time) {
+		av_frame_unref(late_frame);
+		late_frame_skips = 0;
+		pending_audio.clear();
+		pending_audio_offset = 0;
+		audio_frames_due = 0.0;
+		audio_prefill_started = false;
+		if (audio_playback.is_valid()) {
+			// A shorter soundtrack may already have reached EOF. A seek in
+			// an active video must reactivate it, without unpausing output.
+			if (playing) {
+				audio_playback->start_playback(p_time);
+			} else {
+				audio_playback->seek(p_time);
 			}
-			position = p_time;
-			playback_clock = p_time;
-			if (network_cancel) {
-				// A demuxer seeks to a preceding keyframe. Decode/discard that
-				// preroll on the worker before publishing readiness, including
-				// when the caller is paused. Audio has not advanced yet.
-				seek_target = p_time;
-				seek_preroll = true;
-				const bool was_playing = playing;
-				const bool was_paused = paused;
-				playing = true;
-				paused = false;
-				const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 30000000;
-				while (seek_preroll && playing && stream_error == OK && !network_cancel->is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
-					update(0.0);
-				}
-				paused = was_paused;
-				playing = was_playing;
-				if (seek_preroll && stream_error == OK) {
-					stream_error = ERR_UNAVAILABLE;
-				}
+			if (network_cancel && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK) {
+				stream_error = ERR_UNAVAILABLE;
+				return;
+			}
+		}
+		position = p_time;
+		playback_clock = p_time;
+		if (network_cancel) {
+			// A demuxer seeks to a preceding keyframe. Decode/discard that
+			// preroll on the worker before publishing readiness, including
+			// when the caller is paused. Audio has not advanced yet.
+			seek_target = p_time;
+			seek_preroll = true;
+			const bool was_playing = playing;
+			const bool was_paused = paused;
+			playing = true;
+			paused = false;
+			const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 30000000;
+			while (seek_preroll && playing && stream_error == OK && !network_cancel->is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
+				update(0.0);
+			}
+			paused = was_paused;
+			playing = was_playing;
+			if (seek_preroll && stream_error == OK) {
+				stream_error = ERR_UNAVAILABLE;
 			}
 		}
 	}
@@ -1286,7 +1447,7 @@ Ref<VideoStreamPlayback> ffmpeg_open_video_on_worker(const String &p_path, const
 	return playback->open_file(p_path, p_headers, p_cancel, p_audio_file, p_audio_headers, r_error, p_dvr) ? Ref<VideoStreamPlayback>(playback) : Ref<VideoStreamPlayback>();
 }
 
-bool ffmpeg_start_video_read_ahead(const Ref<VideoStreamPlayback> &p_playback, String *r_error) {
+bool ffmpeg_start_video_read_ahead(const Ref<VideoStreamPlayback> &p_playback, String *r_error, bool p_after_finite_seek) {
 	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
 	if (playback.is_null()) {
 		if (r_error) {
@@ -1294,7 +1455,17 @@ bool ffmpeg_start_video_read_ahead(const Ref<VideoStreamPlayback> &p_playback, S
 		}
 		return false;
 	}
-	return playback->start_read_ahead(r_error);
+	return playback->start_read_ahead(r_error, p_after_finite_seek);
+}
+
+bool ffmpeg_seek_video_on_worker(const Ref<VideoStreamPlayback> &p_playback, double p_position) {
+	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
+	return playback.is_valid() && playback->seek_on_worker(p_position);
+}
+
+bool ffmpeg_can_reuse_video_seek(const Ref<VideoStreamPlayback> &p_playback) {
+	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
+	return playback.is_valid() && playback->can_seek_on_worker();
 }
 
 void VideoStreamMedia::_bind_methods() {

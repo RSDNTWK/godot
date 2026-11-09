@@ -1,0 +1,11 @@
+--- a/libswscale/arm/swscale_unscaled.c
++++ b/libswscale/arm/swscale_unscaled.c
+@@ -158,6 +158,8 @@
+         && c->opts.dst_format == AV_PIX_FMT_##OFMT                                          \
+         && !(c->opts.src_h & 1)                                                             \
+         && !(c->opts.src_w & 15)                                                            \
++        && (c->opts.flags & SWS_POINT)                                                      \
++        && !(c->opts.flags & SWS_BITEXACT)                                                 \
+         && !accurate_rnd) {                                                                 \
+         c->convert_unscaled = ifmt##_to_##ofmt##_neon_wrapper;                              \
+     }                                                                                       \

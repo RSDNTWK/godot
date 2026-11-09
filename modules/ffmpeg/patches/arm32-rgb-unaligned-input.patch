@@ -1,0 +1,11 @@
+--- a/libswscale/input.c
++++ b/libswscale/input.c
+@@ -254,7 +254,7 @@
+                          origin == AV_PIX_FMT_BGRA ||                      \
+                          origin == AV_PIX_FMT_ARGB ||                      \
+                          origin == AV_PIX_FMT_ABGR)                        \
+-                        ? AV_RN32A(&src[(i) * 4])                          \
++                        ? AV_RN32(&src[(i) * 4])                          \
+                         : ((origin == AV_PIX_FMT_X2RGB10LE ||              \
+                             origin == AV_PIX_FMT_X2BGR10LE)                \
+                            ? AV_RL32(&src[(i) * 4])                        \

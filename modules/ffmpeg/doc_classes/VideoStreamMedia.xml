@@ -10,7 +10,8 @@
 		For manually paired direct URLs, set [member audio_file]. Both inputs must use HTTPS and pass destination validation, including redirects and secondary requests. Only bounded transport and PCM buffers are retained. HLS requires an FFmpeg SDK with HLS/MPEG-TS demuxers. Login, DRM, proof-of-origin token generation, and SABR transport are not implemented. Native streaming is unavailable on Web; retain the project's browser/iframe adapter. Aspect fitting, cross-client synchronization, permissions, and playlist controls remain the application's responsibility.
 		Enable [member live_dvr_enabled] before creating playback to rewind a DVR-enabled YouTube livestream. Use [method VideoStreamPlayer.get_dvr_window] for the advertised window, [member VideoStreamPlayer.stream_position] to seek within it, and [method VideoStreamPlayer.seek_to_live] to return to the safe live edge. Seeking reopens both validated network inputs on the worker and completes only after common-clock preroll. No media files are cached. Unsupported or ambiguous HLS timelines do not expose a DVR window.
 	</description>
-	<tutorials />
+	<tutorials>
+	</tutorials>
 	<members>
 		<member name="live_dvr_enabled" type="bool" setter="set_live_dvr_enabled" getter="is_live_dvr_enabled" default="false">
 			Enables native YouTube DVR when the service advertises it and the selected HLS inputs provide a continuous, timestamped rewind window. Initially starts near the live edge. Positions use a fixed origin established from the first advertised window; its start and end advance as older segments expire and new segments arrive. Normal playback and non-YouTube inputs keep their existing behavior when this option is disabled. DVR across timestamp discontinuities, encrypted HLS, and byte-ranged segments is unsupported.

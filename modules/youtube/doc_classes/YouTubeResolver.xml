@@ -6,7 +6,8 @@
 		Available on threaded Windows, Linux/BSD, and Android builds. Web projects should use their browser playback path. Returned URLs expire and may require the returned HTTP headers and the same network identity used for resolution.
 		This class ports the public YouTube playback subset of yt-dlp, not its complete site/extractor feature set. Login, cookies, DRM, proof-of-origin tokens, playlists, subtitles are not implemented.
 	</description>
-	<tutorials />
+	<tutorials>
+	</tutorials>
 	<methods>
 		<method name="cancel">
 			<return type="void" />

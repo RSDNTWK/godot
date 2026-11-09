@@ -146,6 +146,13 @@ public:
 	}
 	double get_dvr_input_start() const { return input_start; }
 	int open(const String &p_url) {
+		String scheme, host, path, fragment;
+		int port;
+		const bool youtube_media = p_url.parse_url(scheme, host, port, path, fragment) == OK && host.to_lower().ends_with(".googlevideo.com");
+		// Match upstream yt-dlp's YouTube media chunk policy. This is a bounded
+		// streamed request, never a full-file cache; all range opens remain pinned
+		// and validated by MediaHTTP. Other sources retain their current behavior.
+		http.set_range_chunk_size(youtube_media ? 10 * 1024 * 1024 : 0);
 		const Error open_error = cancel ? http.open(p_url, headers) : ERR_INVALID_PARAMETER;
 		if (open_error != OK) {
 			return AVERROR(EACCES);

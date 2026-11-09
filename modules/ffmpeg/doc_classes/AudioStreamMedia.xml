@@ -11,7 +11,8 @@
 		With [member live_dvr_enabled], a DVR-enabled YouTube livestream exposes [code]get_dvr_window()[/code] and [code]seek_to_live()[/code] on its native playback instance. Seek that instance directly to retain its fixed DVR timeline origin. The window dictionary contains [code]available[/code], [code]start[/code], [code]end[/code], [code]live_position[/code], [code]position[/code], and UTC fields matching [method VideoStreamPlayer.get_dvr_window]. Expired positions clamp to the available window. A new playback instance establishes a new origin; UTC values let application logic translate positions between instances.
 		YouTube service restrictions can prevent playback. Login, DRM, proof-of-origin token generation, playlists, and subtitles are not supported by the native resolver. HTTPS transport validates certificates and public destinations, including redirects and subsequent media requests. Native streaming is unavailable on Web; retain the project's browser playback adapter.
 	</description>
-	<tutorials />
+	<tutorials>
+	</tutorials>
 	<members>
 		<member name="live_dvr_enabled" type="bool" setter="set_live_dvr_enabled" getter="is_live_dvr_enabled" default="false">
 			Enables worker-side rewind and return-to-live for YouTube live audio when a continuous DVR window is advertised. Set before creating playback. Audio begins near the live edge and uses bounded in-memory buffering without persistent media caching. Unsupported HLS timelines do not expose a DVR window.

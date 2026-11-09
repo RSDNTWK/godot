@@ -78,7 +78,9 @@ bool MediaHTTP::valid_url(const String &p_url) {
 	}
 	String scheme, host, path, fragment;
 	int port;
-	return p_url.parse_url(scheme, host, port, path, fragment) == OK && !host.is_empty() && (port == 0 || port == 443) && fragment.is_empty();
+	// parse_url rejects explicit ports outside 1..65535. Port zero here means
+	// that the URL omitted its port, in which case HTTPS uses 443.
+	return p_url.parse_url(scheme, host, port, path, fragment) == OK && !host.is_empty() && fragment.is_empty();
 }
 
 String MediaHTTP::resolve_url(const String &p_base, const String &p_target) {
@@ -109,7 +111,7 @@ bool MediaHTTP::interrupted() const {
 	return (cancel && cancel->is_set()) || (secondary_cancel && secondary_cancel->is_set()) || now >= deadline || (absolute_deadline && now >= absolute_deadline);
 }
 
-Error MediaHTTP::connect(const String &p_host) {
+Error MediaHTTP::connect(const String &p_host, int p_port) {
 	Vector<IPAddress> candidates;
 	if (IPAddress::is_valid_ip_address(p_host)) {
 		IPAddress literal(p_host);
@@ -162,7 +164,7 @@ Error MediaHTTP::connect(const String &p_host) {
 		client->set_blocking_mode(false);
 		client->set_read_chunk_size(65536);
 		// Pin the vetted address, retaining the original hostname for TLS/SNI.
-		last_error = client->connect_to_host(String(address), 443, TLSOptions::client(Ref<X509Certificate>(), p_host));
+		last_error = client->connect_to_host(String(address), p_port, TLSOptions::client(Ref<X509Certificate>(), p_host));
 		if (last_error != OK) {
 			continue;
 		}
@@ -190,8 +192,12 @@ Error MediaHTTP::open(const String &p_url, const Dictionary &p_headers, int64_t 
 	return open_internal(p_url, p_headers, p_offset, p_post, String(), OS::get_singleton()->get_ticks_usec() + 15000000);
 }
 
+void MediaHTTP::set_range_chunk_size(int64_t p_bytes) {
+	range_chunk_bytes = CLAMP(p_bytes, int64_t(0), int64_t(10 * 1024 * 1024));
+}
+
 Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers, int64_t p_offset, const String &p_post, const String &p_if_range, uint64_t p_deadline) {
-	if (p_offset < 0) {
+	if (p_offset < 0 || p_offset == INT64_MAX) {
 		return ERR_INVALID_PARAMETER;
 	}
 	close();
@@ -204,6 +210,7 @@ Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers,
 	if (!valid_url(p_url) || p_url.parse_url(initial_scheme, initial_host, initial_port, initial_path, initial_fragment) != OK) {
 		return ERR_UNAUTHORIZED;
 	}
+	initial_port = initial_port ? initial_port : 443;
 	deadline = p_deadline;
 	for (int redirect = 0; redirect < 6 && !interrupted(); redirect++) {
 		if (!valid_url(url)) {
@@ -212,7 +219,9 @@ Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers,
 		String scheme, host, path, fragment;
 		int port;
 		url.parse_url(scheme, host, port, path, fragment);
-		if (host != initial_host) {
+		port = port ? port : 443;
+		const bool same_origin = host == initial_host && port == initial_port;
+		if (!same_origin) {
 			if (!post.is_empty()) {
 				return ERR_UNAUTHORIZED;
 			}
@@ -220,17 +229,17 @@ Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers,
 				headers.erase(name);
 			}
 		}
-		Error error = connect(host);
+		Error error = connect(host, port);
 		if (error != OK) {
 			return error;
 		}
 		Vector<String> request_headers;
-		request_headers.push_back("Host: " + (host.contains(":") ? "[" + host + "]" : host));
+		request_headers.push_back("Host: " + (host.contains(":") ? "[" + host + "]" : host) + (port == 443 ? String() : ":" + itos(port)));
 		request_headers.push_back("Accept-Encoding: identity");
 		// API client metadata is restricted to the original origin. Authentication
 		// headers are never forwarded by this transport.
 		for (const String &name : { String("User-Agent"), String("Referer"), String("Accept"), String("Origin"), String("X-YouTube-Client-Name"), String("X-YouTube-Client-Version"), String("X-Goog-Visitor-Id") }) {
-			if (name.begins_with("X-") && host != initial_host) {
+			if (name.begins_with("X-") && !same_origin) {
 				continue;
 			}
 			String value = headers.get(name, String());
@@ -248,8 +257,9 @@ Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers,
 		if (!post.is_empty()) {
 			request_headers.push_back("Content-Type: application/json");
 		}
-		if (p_offset > 0) {
-			request_headers.push_back("Range: bytes=" + itos(p_offset) + "-");
+		const int64_t range_end = post.is_empty() && range_chunk_bytes > 0 ? p_offset + MIN(range_chunk_bytes - 1, INT64_MAX - 1 - p_offset) : -1;
+		if (p_offset > 0 || range_end >= 0) {
+			request_headers.push_back("Range: bytes=" + itos(p_offset) + "-" + (range_end >= 0 ? itos(range_end) : String()));
 			if (!p_if_range.is_empty()) {
 				request_headers.push_back("If-Range: " + p_if_range);
 			}
@@ -321,7 +331,7 @@ Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers,
 			String first = range.substr(6).get_slice("-", 0);
 			String last = range.get_slice("-", 1).get_slice("/", 0);
 			String total = range.get_slice("/", 1);
-			if (!first.is_valid_int() || !last.is_valid_int() || first.length() > 19 || last.length() > 19 || first.to_int() != p_offset || last.to_int() < p_offset || last.to_int() == INT64_MAX ||
+			if (!first.is_valid_int() || !last.is_valid_int() || first.length() > 19 || last.length() > 19 || first.to_int() != p_offset || last.to_int() < p_offset || last.to_int() == INT64_MAX || (range_end >= 0 && last.to_int() > range_end) ||
 					(total != "*" && (!total.is_valid_int() || total.length() > 19 || total.to_int() <= last.to_int())) ||
 					(remaining >= 0 && remaining != last.to_int() - p_offset + 1)) {
 				return ERR_INVALID_DATA;

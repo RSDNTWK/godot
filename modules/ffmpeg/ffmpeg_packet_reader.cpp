@@ -88,7 +88,7 @@ void FFmpegPacketReader::_produce() {
 	int result = 0;
 	while (!_interrupted()) {
 #ifdef FFMPEG_TESTS_ENABLED
-		result = test_read ? test_read(test_userdata, packet, &stop_requested, external_cancel) : av_read_frame(format, packet);
+		result = test_read ? test_read(test_userdata, packet, &io_stop_requested, external_cancel) : av_read_frame(format, packet);
 #else
 		result = av_read_frame(format, packet);
 #endif
@@ -256,8 +256,11 @@ int FFmpegPacketReader::get_terminal_error() const {
 	return terminal_error;
 }
 
-void FFmpegPacketReader::stop() {
+void FFmpegPacketReader::stop(bool p_interrupt_io) {
 	stop_requested.set();
+	if (p_interrupt_io) {
+		io_stop_requested.set();
+	}
 #ifdef THREADS_ENABLED
 	capacity_changed.notify_all();
 #endif
@@ -290,6 +293,7 @@ void FFmpegPacketReader::reset() {
 	selected_stream = -1;
 	time_base = { 0, 1 };
 	stop_requested.clear();
+	io_stop_requested.clear();
 }
 
 #endif // MODULE_MEDIA_STREAM_ENABLED

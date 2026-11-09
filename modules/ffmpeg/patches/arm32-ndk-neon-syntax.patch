@@ -1,0 +1,155 @@
+--- a/libswscale/arm/rgb2yuv_neon_common.S
++++ b/libswscale/arm/rgb2yuv_neon_common.S
+@@ -236,19 +236,10 @@
+ // common aliases
+ 
+ alias   CO_R    d0
+-CO_RY   .dn     d0.s16[0]
+-CO_RU   .dn     d0.s16[1]
+-CO_RV   .dn     d0.s16[2]
+ 
+ alias   CO_G    d1
+-CO_GY   .dn     d1.s16[0]
+-CO_GU   .dn     d1.s16[1]
+-CO_GV   .dn     d1.s16[2]
+ 
+ alias   CO_B    d2
+-CO_BY   .dn     d2.s16[0]
+-CO_BU   .dn     d2.s16[1]
+-CO_BV   .dn     d2.s16[2]
+ 
+ alias   BIAS_U, d3
+ alias   BIAS_V, BIAS_U
+@@ -281,8 +272,8 @@
+         compute_y_16x1
+         store_y8_16x1   \y1, \count
+ 
+-        compute_chroma_8x1 u, U
+-        compute_chroma_8x1 v, V
++        compute_chroma_8x1 u, U, 1
++        compute_chroma_8x1 v, V, 2
+ 
+         store_chroma_\yuv_fmt\()_8x1 \chroma, \count
+ 
+--- a/libswscale/arm/rgb2yuv_neon_16.S
++++ b/libswscale/arm/rgb2yuv_neon_16.S
+@@ -19,7 +19,7 @@
+  */
+ 
+ #include "config.h"
+-#if HAVE_AS_DN_DIRECTIVE
++#if HAVE_NEON
+ #include "rgb2yuv_neon_common.S"
+ 
+ /* downsampled R16G16B16 x8 */
+@@ -51,14 +51,14 @@
+         vmovl.u8        n16x16_l,   \s8x16\()_l
+         vmovl.u8        n16x16_h,   \s8x16\()_h
+ 
+-        \action         y16x16_l,   n16x16_l,   \coeff
+-        \action         y16x16_h,   n16x16_h,   \coeff
++        \action\().s16   y16x16_l,   n16x16_l,   \coeff
++        \action\().s16   y16x16_h,   n16x16_h,   \coeff
+ .endm
+ 
+ .macro compute_y_16x1
+-        compute_y_16x1_step vmul, r8x16, CO_RY
+-        compute_y_16x1_step vmla, g8x16, CO_GY
+-        compute_y_16x1_step vmla, b8x16, CO_BY
++        compute_y_16x1_step vmul, r8x16, CO_R[0]
++        compute_y_16x1_step vmla, g8x16, CO_G[0]
++        compute_y_16x1_step vmla, b8x16, CO_B[0]
+ 
+         vrshrn.i16      y8x16_l,    y16x16_l,   #8
+         vrshrn.i16      y8x16_h,    y16x16_h,   #8
+@@ -70,10 +70,10 @@
+ alias_qw    c8x8x2, q10
+ 
+ 
+-.macro compute_chroma_8x1   c, C
+-        vmul            c16x8,  r16x8,  CO_R\C
+-        vmla            c16x8,  g16x8,  CO_G\C
+-        vmla            c16x8,  b16x8,  CO_B\C
++.macro compute_chroma_8x1   c, C, lane
++        vmul.s16        c16x8,  r16x8,  CO_R[\lane]
++        vmla.s16        c16x8,  g16x8,  CO_G[\lane]
++        vmla.s16        c16x8,  b16x8,  CO_B[\lane]
+ 
+         vrshrn.i16      \c\()8x8,   c16x8,      #8
+         vadd.u8         \c\()8x8,   \c\()8x8,   BIAS_\C
+--- a/libswscale/arm/rgb2yuv_neon_32.S
++++ b/libswscale/arm/rgb2yuv_neon_32.S
+@@ -19,7 +19,7 @@
+  */
+ 
+ #include "config.h"
+-#if HAVE_AS_DN_DIRECTIVE
++#if HAVE_NEON
+ #include "rgb2yuv_neon_common.S"
+ 
+ /* downsampled R16G16B16 x8 */
+@@ -65,10 +65,10 @@
+         vmov.u8         n16x16_o,   #0
+         vtrn.u8         \s8x16,     n16x16_o
+ 
+-        \action         y32x16_el,  \s8x16\()_l,    \coeff
+-        \action         y32x16_eh,  \s8x16\()_h,    \coeff
+-        \action         y32x16_ol,  n16x16_ol,      \coeff
+-        \action         y32x16_oh,  n16x16_oh,      \coeff
++        \action\().s16   y32x16_el,  \s8x16\()_l,    \coeff
++        \action\().s16   y32x16_eh,  \s8x16\()_h,    \coeff
++        \action\().s16   y32x16_ol,  n16x16_ol,      \coeff
++        \action\().s16   y32x16_oh,  n16x16_oh,      \coeff
+ .endm
+ 
+ /*
+@@ -77,9 +77,9 @@
+  * clobber: q11-q15, r8x16, g8x16, b8x16
+  */
+ .macro compute_y_16x1
+-        compute_y_16x1_step vmull, r8x16, CO_RY
+-        compute_y_16x1_step vmlal, g8x16, CO_GY
+-        compute_y_16x1_step vmlal, b8x16, CO_BY
++        compute_y_16x1_step vmull, r8x16, CO_R[0]
++        compute_y_16x1_step vmlal, g8x16, CO_G[0]
++        compute_y_16x1_step vmlal, b8x16, CO_B[0]
+ 
+         vrshrn.i32      y16x16_el,  y32x16_el,  #15
+         vrshrn.i32      y16x16_eh,  y32x16_eh,  #15
+@@ -97,8 +97,8 @@
+ alias_qw    c8x8x2, q10
+ 
+ .macro compute_chroma_8x1_step  action, s16x8, coeff
+-        \action         c32x8_l,    \s16x8\()_l,    \coeff
+-        \action         c32x8_h,    \s16x8\()_h,    \coeff
++        \action\().s16   c32x8_l,    \s16x8\()_l,    \coeff
++        \action\().s16   c32x8_h,    \s16x8\()_h,    \coeff
+ .endm
+ 
+ /*
+@@ -106,10 +106,10 @@
+  * out:     c8x8
+  * clobber: q14-q15
+  */
+-.macro compute_chroma_8x1   c, C
+-        compute_chroma_8x1_step vmull, r16x8, CO_R\C
+-        compute_chroma_8x1_step vmlal, g16x8, CO_G\C
+-        compute_chroma_8x1_step vmlal, b16x8, CO_B\C
++.macro compute_chroma_8x1   c, C, lane
++        compute_chroma_8x1_step vmull, r16x8, CO_R[\lane]
++        compute_chroma_8x1_step vmlal, g16x8, CO_G[\lane]
++        compute_chroma_8x1_step vmlal, b16x8, CO_B[\lane]
+ 
+         vrshrn.i32      c16x8_l,    c32x8_l,    #15
+         vrshrn.i32      c16x8_h,    c32x8_h,    #15
+--- a/libswscale/arm/swscale_unscaled.c
++++ b/libswscale/arm/swscale_unscaled.c
+@@ -23,7 +23,7 @@
+ #include "libswscale/swscale_internal.h"
+ #include "libavutil/arm/cpu.h"
+ 
+-#if HAVE_AS_DN_DIRECTIVE
++#if HAVE_NEON
+ extern void rgbx_to_nv12_neon_32(const uint8_t *src, uint8_t *y, uint8_t *chroma,
+                 int width, int height,
+                 int y_stride, int c_stride, int src_stride,

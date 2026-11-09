@@ -81,6 +81,10 @@ Ref<FileAccess> FileAccess::create_for_path(const String &p_path) {
 }
 
 Ref<FileAccess> FileAccess::create_temp(ModeFlags p_mode_flags, const String &p_prefix, const String &p_extension, bool p_keep, Error *r_error) {
+	Error ignored_error;
+	if (!r_error) {
+		r_error = &ignored_error;
+	}
 	const String ERROR_COMMON_PREFIX = "Error while creating temporary file";
 
 	if (!p_prefix.is_empty() && !p_prefix.is_valid_filename()) {

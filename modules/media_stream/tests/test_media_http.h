@@ -48,6 +48,7 @@ struct ScriptedReply {
 	String range;
 	String body;
 	String validator = "\"version-1\"";
+	String location;
 	bool disconnect = false;
 };
 
@@ -55,6 +56,9 @@ struct ScriptedHTTP {
 	Vector<ScriptedReply> replies;
 	Vector<Vector<String>> requests;
 	Vector<HTTPClient::Method> methods;
+	Vector<int> ports;
+	Vector<String> tls_names;
+	Vector<bool> unsafe_tls;
 	int connections = 0;
 };
 
@@ -84,7 +88,10 @@ public:
 		_create = p_previous;
 		fixture = nullptr;
 	}
-	Error connect_to_host(const String &, int, Ref<TLSOptions>) override {
+	Error connect_to_host(const String &, int p_port, Ref<TLSOptions> p_tls) override {
+		fixture->ports.push_back(p_port);
+		fixture->tls_names.push_back(p_tls.is_valid() ? p_tls->get_common_name_override() : String());
+		fixture->unsafe_tls.push_back(p_tls.is_null() || p_tls->is_unsafe_client());
 		reply = fixture->replies[MIN(fixture->connections++, fixture->replies.size() - 1)];
 		status = STATUS_CONNECTED;
 		return OK;
@@ -105,6 +112,9 @@ public:
 	int get_response_code() const override { return reply.code; }
 	int64_t get_response_body_length() const override { return reply.length; }
 	Error get_response_headers(List<String> *r_headers) override {
+		if (!reply.location.is_empty()) {
+			r_headers->push_back("Location: " + reply.location);
+		}
 		if (!reply.range.is_empty()) {
 			r_headers->push_back("Content-Range: " + reply.range);
 		}
@@ -174,6 +184,67 @@ TEST_CASE("[MediaStream][NativeStreaming] Partial responses and interrupted GET 
 		REQUIRE(fixture.requests.size() == 2);
 		CHECK(fixture.requests[1].has("Range: bytes=4-"));
 		CHECK(fixture.requests[1].has("If-Range: \"version-1\""));
+	}
+}
+
+TEST_CASE("[MediaStream][NativeStreaming] Bounded media ranges include the first chunk and resume without gaps") {
+	ScriptedHTTP fixture;
+	for (int i = 0; i < 2; i++) {
+		ScriptedReply reply;
+		reply.code = 206;
+		reply.length = 4;
+		reply.range = i == 0 ? "bytes 0-3/8" : "bytes 4-7/8";
+		reply.body = i == 0 ? "abcd" : "efgh";
+		fixture.replies.push_back(reply);
+	}
+	ScriptedFactory factory(fixture);
+	SafeFlag cancel;
+	MediaHTTP http(&cancel);
+	http.set_range_chunk_size(4);
+	REQUIRE(http.open("https://8.8.8.8/media") == OK);
+	uint8_t bytes[8] = {};
+	REQUIRE(http.read(bytes, 8) == 4);
+	REQUIRE(http.read(bytes + 4, 4) == 4);
+	CHECK(memcmp(bytes, "abcdefgh", 8) == 0);
+	CHECK(http.read(bytes, 8) == 0);
+	REQUIRE(fixture.requests.size() == 2);
+	CHECK(fixture.requests[0].has("Range: bytes=0-3"));
+	CHECK(fixture.requests[1].has("Range: bytes=4-7"));
+	CHECK(fixture.requests[1].has("If-Range: \"version-1\""));
+}
+
+TEST_CASE("[MediaStream][NativeStreaming] Bounded range responses cannot exceed the requested end") {
+	ScriptedHTTP fixture;
+	ScriptedReply reply;
+	reply.code = 206;
+	reply.length = 8;
+	reply.range = "bytes 0-7/8";
+	reply.body = "abcdefgh";
+	fixture.replies.push_back(reply);
+	ScriptedFactory factory(fixture);
+	SafeFlag cancel;
+	MediaHTTP http(&cancel);
+	http.set_range_chunk_size(4);
+	CHECK(http.open("https://8.8.8.8/media") == ERR_INVALID_DATA);
+}
+
+TEST_CASE("[MediaStream][NativeStreaming] Initial ignored ranges retain ordinary GET compatibility and POST is unchanged") {
+	for (bool post : { false, true }) {
+		ScriptedHTTP fixture;
+		ScriptedReply reply;
+		reply.body = "abcdefgh";
+		fixture.replies.push_back(reply);
+		ScriptedFactory factory(fixture);
+		SafeFlag cancel;
+		MediaHTTP http(&cancel);
+		http.set_range_chunk_size(64 * 1024 * 1024);
+		REQUIRE(http.open("https://8.8.8.8/media", Dictionary(), 0, post ? String("{}") : String()) == OK);
+		uint8_t bytes[8];
+		REQUIRE(http.read(bytes, 8) == 8);
+		CHECK(memcmp(bytes, "abcdefgh", 8) == 0);
+		CHECK(http.read(bytes, 8) == 0);
+		REQUIRE(fixture.requests.size() == 1);
+		CHECK(fixture.requests[0].has("Range: bytes=0-10485759") == !post);
 	}
 }
 
@@ -262,7 +333,7 @@ TEST_CASE("[MediaStream][Network] HTTPS range reopening preserves data" * doctes
 	CHECK(http.read(second, sizeof(second)) == 0);
 }
 
-TEST_CASE("[MediaStream] Destination addresses must be public unicast") {
+TEST_CASE("[MediaStream][NativeStreaming] Destination addresses must be public unicast") {
 	CHECK(MediaHTTP::public_address(IPAddress("8.8.8.8")));
 	CHECK(MediaHTTP::public_address(IPAddress("2606:4700:4700::1111")));
 	CHECK(MediaHTTP::public_address(IPAddress("64:ff9b::808:808")));
@@ -272,7 +343,7 @@ TEST_CASE("[MediaStream] Destination addresses must be public unicast") {
 	}
 }
 
-TEST_CASE("[MediaStream] Redirect and secondary-resource URLs share HTTPS validation") {
+TEST_CASE("[MediaStream][NativeStreaming] Redirect and secondary-resource URLs share HTTPS validation") {
 	CHECK(MediaHTTP::resolve_url("https://example.com/a/index.m3u8", "segment.ts") == "https://example.com/a/segment.ts");
 	CHECK(MediaHTTP::resolve_url("https://example.com/a/index.m3u8", "/b/segment.ts") == "https://example.com/b/segment.ts");
 	CHECK(MediaHTTP::resolve_url("https://example.com/a/index.m3u8", "//cdn.example.com/segment.ts") == "https://cdn.example.com/segment.ts");
@@ -281,7 +352,65 @@ TEST_CASE("[MediaStream] Redirect and secondary-resource URLs share HTTPS valida
 	CHECK_FALSE(MediaHTTP::valid_url("http://example.com/video"));
 	CHECK_FALSE(MediaHTTP::valid_url("file:///video"));
 	CHECK_FALSE(MediaHTTP::valid_url("https://user@example.com/video"));
-	CHECK_FALSE(MediaHTTP::valid_url("https://example.com:8080/video"));
+	CHECK(MediaHTTP::valid_url("https://example.com:8080/video"));
+	CHECK(MediaHTTP::valid_url("https://example.com:65535/video"));
+	CHECK(MediaHTTP::resolve_url("https://example.com:8443/a/index.m3u8", "segment.ts") == "https://example.com:8443/a/segment.ts");
+	CHECK(MediaHTTP::resolve_url("https://[2606:4700:4700::1111]:8443/a/index.m3u8", "/segment.ts") == "https://[2606:4700:4700::1111]:8443/segment.ts");
+	for (const String &port : { String("0"), String("-1"), String("65536"), String("4294975739"), String("-4294967295"), String("abc"), String("") }) {
+		CHECK_FALSE(MediaHTTP::valid_url("https://example.com:" + port + "/video"));
+	}
 	CHECK_FALSE(MediaHTTP::valid_url("https://example.com/video\r\nHeader: value"));
+}
+
+TEST_CASE("[MediaStream][NativeStreaming] HTTPS custom ports preserve TLS identity and isolate redirect origins") {
+	for (const String &host : { String("8.8.8.8"), String("[2606:4700:4700::1111]") }) {
+		ScriptedHTTP fixture;
+		ScriptedReply first;
+		first.code = 302;
+		first.location = "https://" + host + ":9443/media";
+		fixture.replies.push_back(first);
+		ScriptedReply second;
+		second.body = "abcdefgh";
+		fixture.replies.push_back(second);
+		ScriptedFactory factory(fixture);
+		Dictionary headers;
+		headers["X-YouTube-Client-Name"] = "unit-client";
+		MediaHTTP http;
+		REQUIRE(http.open("https://" + host + ":8443/media", headers) == OK);
+		REQUIRE(fixture.ports.size() == 2);
+		CHECK(fixture.ports[0] == 8443);
+		CHECK(fixture.ports[1] == 9443);
+		CHECK(fixture.requests[0].has("Host: " + host + ":8443"));
+		CHECK(fixture.requests[1].has("Host: " + host + ":9443"));
+		CHECK(fixture.requests[0].has("X-YouTube-Client-Name: unit-client"));
+		CHECK_FALSE(fixture.requests[1].has("X-YouTube-Client-Name: unit-client"));
+		const String tls_host = host.trim_prefix("[").trim_suffix("]");
+		CHECK(fixture.tls_names[0] == tls_host);
+		CHECK(fixture.tls_names[1] == tls_host);
+		CHECK_FALSE(fixture.unsafe_tls[0]);
+		CHECK_FALSE(fixture.unsafe_tls[1]);
+	}
+	SUBCASE("POST redirects cannot change port even on the same host") {
+		ScriptedHTTP fixture;
+		ScriptedReply reply;
+		reply.code = 307;
+		reply.location = "https://8.8.8.8:9443/media";
+		fixture.replies.push_back(reply);
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		CHECK(http.open("https://8.8.8.8:8443/media", Dictionary(), 0, "{}") == ERR_UNAUTHORIZED);
+		CHECK(fixture.connections == 1);
+	}
+	SUBCASE("A custom port cannot admit a private redirect destination") {
+		ScriptedHTTP fixture;
+		ScriptedReply reply;
+		reply.code = 302;
+		reply.location = "https://127.0.0.1:9443/media";
+		fixture.replies.push_back(reply);
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		CHECK(http.open("https://8.8.8.8:8443/media") == ERR_UNAUTHORIZED);
+		CHECK(fixture.connections == 1);
+	}
 }
 } // namespace TestMediaHTTP

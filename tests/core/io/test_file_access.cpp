@@ -38,6 +38,28 @@ TEST_FORCE_LINK(test_file_access)
 
 namespace TestFileAccess {
 
+TEST_CASE("[FileAccess] Temporary files accept an omitted error output") {
+	String path;
+	{
+		Ref<FileAccess> file = FileAccess::create_temp(FileAccess::READ_WRITE, "godot-optional-error", "tmp");
+		REQUIRE(file.is_valid());
+		path = file->get_path_absolute();
+		CHECK(FileAccess::exists(path));
+		file->store_32(0x12345678);
+		file->seek(0);
+		CHECK(file->get_32() == 0x12345678);
+	}
+	CHECK_FALSE(FileAccess::exists(path));
+	ERR_PRINT_OFF;
+	CHECK(FileAccess::create_temp(FileAccess::READ_WRITE, "invalid/prefix", "tmp").is_null());
+	CHECK(FileAccess::create_temp(FileAccess::READ_WRITE, "prefix", "invalid/extension").is_null());
+	ERR_PRINT_ON;
+	Error error = FAILED;
+	Ref<FileAccess> explicit_error = FileAccess::create_temp(FileAccess::READ_WRITE, "godot-explicit-error", "tmp", false, &error);
+	CHECK(explicit_error.is_valid());
+	CHECK(error == OK);
+}
+
 TEST_CASE("[FileAccess] CSV read") {
 	Ref<FileAccess> f = FileAccess::open(TestUtils::get_data_path("testdata.csv"), FileAccess::READ);
 	REQUIRE(f.is_valid());

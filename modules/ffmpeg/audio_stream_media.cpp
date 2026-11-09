@@ -123,6 +123,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	uint64_t timeline_trimmed_frames = 0;
 	uint64_t timeline_padded_frames = 0;
 	bool read_ahead_used = false;
+	double read_ahead_prefill_seconds = 6.0;
 
 	void close_decoder() {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
@@ -621,6 +622,10 @@ public:
 				failed = true;
 				return;
 			}
+			if (format->pb) {
+				format->pb->error = 0;
+				format->pb->eof_reached = 0;
+			}
 			if (av_seek_frame(format, stream_index, int64_t((time + remote_origin) / av_q2d(source_time_base)), AVSEEK_FLAG_BACKWARD) < 0) {
 				failed = true;
 				return;
@@ -663,12 +668,21 @@ public:
 	}
 	void set_parameter(const StringName &p_name, const Variant &p_value) override {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (p_name == SNAME("_ffmpeg_prepare_reuse_seek")) {
+			// Called only by the owning decode worker, before a finite seek.
+			// Join the producer before touching its demuxer or resetting IO.
+			packet_reader.stop(false);
+			packet_reader.reset();
+			read_ahead_used = false;
+			return;
+		}
 		if (p_name == SNAME("_ffmpeg_start_read_ahead")) {
 			if (!remote_cancel || !format || stream_index < 0) {
 				failed = true;
 				return;
 			}
 			if (!packet_reader.is_started()) {
+				read_ahead_prefill_seconds = p_value.get_type() == Variant::FLOAT ? CLAMP(double(p_value), 0.5, 6.0) : 6.0;
 				if (read_ahead_used || packet_reader.start(format, stream_index, remote_cancel) != OK) {
 					failed = true;
 					return;
@@ -694,6 +708,9 @@ public:
 		}
 	}
 	Variant get_parameter(const StringName &p_name) const override {
+		if (p_name == SNAME("_ffmpeg_reusable_seek")) {
+			return remote_cancel && format && format->pb && (format->pb->seekable & AVIO_SEEKABLE_NORMAL) && !remote_live_hls && !String(format->iformat->name).contains("hls");
+		}
 		if (p_name == SNAME("_ffmpeg_hls_timeline")) {
 			Dictionary state;
 			state["enabled"] = hls_pdt_timeline;
@@ -727,7 +744,7 @@ public:
 			return file_io.get_dvr_input_start();
 		}
 		if (p_name == SNAME("_ffmpeg_read_ahead_ready")) {
-			return packet_reader.is_started() && packet_reader.has_prefill();
+			return packet_reader.is_started() && packet_reader.has_prefill(read_ahead_prefill_seconds);
 		}
 		if (p_name == SNAME("_ffmpeg_read_ahead_error")) {
 			return packet_reader.is_started() ? packet_reader.get_terminal_error() : (failed ? AVERROR(EIO) : 0);

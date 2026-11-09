@@ -35,6 +35,7 @@ TEST_FORCE_LINK(test_worker_thread_pool)
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/os/os.h"
+#include "tests/test_tools.h"
 
 namespace TestWorkerThreadPool {
 
@@ -86,6 +87,31 @@ static void static_callable_group_test(uint32_t p_index) {
 	counter[p_index].increment();
 	counter[0].sub(2);
 }
+
+TEST_CASE("[WorkerThreadPool] Reclaim completed group allocations") {
+	ErrorDetector errors;
+	for (int workers : { 0, 1 }) {
+#ifndef THREADS_ENABLED
+		if (workers != 0) {
+			continue;
+		}
+#endif
+		WorkerThreadPool pool(false);
+		pool.init(workers);
+		for (int count : { 0, 1, 33 }) {
+			counter.clear();
+			counter.resize(MAX(count, 1));
+			WorkerThreadPool::GroupID group = pool.add_native_group_task(static_group_test, nullptr, count);
+			pool.wait_for_group_task_completion(group);
+			for (int i = 0; i < count; i++) {
+				CHECK(counter[i].get() == 1);
+			}
+		}
+	}
+	// Includes destruction of the pool's group allocator, which must be empty.
+	CHECK_FALSE(errors.has_error);
+}
+
 TEST_CASE("[WorkerThreadPool] Process elements using group tasks") {
 	for (int iterations = 0; iterations < 500; iterations++) {
 		const int count = Math::pow(2.0f, Math::random(0.0f, 5.0f));

@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Web PCM worker allocation regressions</title>
+<p>Serve the repository over HTTP after building the Web decoder. This test uses
+one worker at a time and deliberately fills its 512 MiB heap. Override the
+<code>worker</code> and <code>decoder</code> URL parameters for exported payloads.</p>
+<pre id="result">Running…</pre>
+<script>
+'use strict';
+const parameters = new URL(location.href).searchParams;
+const workerURL = new URL(parameters.get('worker') || '../web/pcm.worker.js', location.href).href;
+const decoderURL = new URL(parameters.get('decoder') || '../../../bin/godot.media.decoder.js', location.href).href;
+function wav(seconds) {
+	const bytes = new ArrayBuffer(44 + seconds * 48000 * 4);
+	const view = new DataView(bytes);
+	function text(offset, value) { for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i)); }
+	text(0, 'RIFF'); view.setUint32(4, bytes.byteLength - 8, true); text(8, 'WAVE');
+	text(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+	view.setUint16(22, 2, true); view.setUint32(24, 48000, true); view.setUint32(28, 192000, true);
+	view.setUint16(32, 4, true); view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, bytes.byteLength - 44, true);
+	for (let i = 44; i < bytes.byteLength; i += 4) { view.setInt16(i, 1000, true); view.setInt16(i + 2, -1000, true); }
+	return bytes;
+}
+async function run(mode, input, limit) {
+	const url = new URL('web_pcm_worker_faults.worker.js', location.href);
+	url.searchParams.set('mode', mode); url.searchParams.set('worker', workerURL);
+	url.searchParams.set('inputBytes', input.byteLength);
+	const worker = new Worker(url);
+	const diagnostics = [];
+	return new Promise(resolve => {
+		const timer = setTimeout(() => finish({ timeout: true }), 90000);
+		function finish(value) { clearTimeout(timer); worker.terminate(); resolve({ mode, ...value, diagnostics }); }
+		worker.onerror = event => finish({ workerError: event.message });
+		worker.onmessage = event => {
+			const value = event.data;
+			if (value.type === 'diagnostic' || value.type === 'native-result') diagnostics.push(value);
+			else if (value.type !== 'input_ack') {
+				const pcm = value.pcm ? new DataView(value.pcm) : null;
+				finish({ type: value.type, error: value.error, message: value.message, bytes: pcm?.byteLength || 0, firstLeft: pcm && pcm.byteLength >= 4 ? pcm.getInt16(0, true) : null, firstRight: pcm && pcm.byteLength >= 4 ? pcm.getInt16(2, true) : null });
+			}
+		};
+		const remote = mode === 'remote-join-oom';
+		worker.postMessage({ type: 'start', rate: 48000, limit, timeout: 60000, headers: {}, decoderURL, url: remote ? 'https://fixture.invalid/audio.wav' : '', fixture: remote ? input : null });
+		if (remote) return;
+		for (let offset = 0; offset < input.byteLength; offset += 262144) {
+			const data = input.slice(offset, Math.min(input.byteLength, offset + 262144));
+			worker.postMessage({ type: 'input', data, final: offset + data.byteLength === input.byteLength }, [data]);
+		}
+	});
+}
+(async () => {
+	const input = wav(2);
+	const cases = [
+		['exact-fit', input, 384000, 0], ['limit', input, 383996, 6],
+		['input-oom', input, 134217728, 6], ['state-oom', input, 134217728, 6],
+		['output-oom', wav(40), 134217728, 6], ['deadline', input, 134217728, 24],
+		['malformed', new Uint8Array([1,2,3,4,5,6,7,8]).buffer, 134217728, 30],
+		['join-oom', input, 134217728, 6], ['remote-join-oom', input, 134217728, 6],
+		['transfer-oom', input, 134217728, 6], ['load-error', input, 134217728, 19],
+		['init-error', input, 134217728, 20], ['throw-cleanup', input, 134217728, 1],
+	];
+	const checks = [];
+	for (const [mode, data, limit, error] of cases) {
+		const result = await run(mode, data, limit);
+		const correctResult = error ? result.type === 'error' && result.error === error && result.bytes === 0 : result.type === 'pcm' && result.bytes === 384000 && result.firstLeft === 1000 && result.firstRight === -1000;
+		const correctDiagnostics = result.diagnostics.every(value => value.type === 'diagnostic' ? value.inputFreed || value.exhausted : value.partialBytes === 0);
+		const requiredFault = ['input-oom', 'state-oom', 'output-oom'].includes(mode) ? result.diagnostics.some(value => value.exhausted) : mode !== 'throw-cleanup' || result.diagnostics.some(value => value.inputFreed);
+		checks.push({ mode, passed: correctResult && correctDiagnostics && requiredFault, result });
+	}
+	const result = { passed: checks.every(value => value.passed), checks };
+	document.getElementById('result').textContent = JSON.stringify(result, null, 2);
+	if (parameters.has('report')) await fetch(parameters.get('report'), { method: 'POST', body: JSON.stringify(result) });
+})();
+</script>

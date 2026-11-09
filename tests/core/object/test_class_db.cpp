@@ -35,8 +35,80 @@ TEST_FORCE_LINK(test_class_db)
 #include "core/config/engine.h"
 #include "core/core_constants.h"
 #include "core/object/class_db.h"
+#include "core/object/ref_counted.h"
+#include "core/os/semaphore.h"
+#include "core/os/thread.h"
 
 namespace TestClassDB {
+
+class _TestClassDBDefaultCache : public RefCounted {
+	GDCLASS(_TestClassDBDefaultCache, RefCounted);
+
+protected:
+	static void _bind_methods() {
+		ClassDB::bind_method(D_METHOD("get_value", "index"), &_TestClassDBDefaultCache::get_value);
+		for (int i = 0; i < 64; i++) {
+			ADD_PROPERTYI(PropertyInfo(Variant::INT, "value_" + itos(i)), "", "get_value", i);
+		}
+		ADD_PROPERTY_DEFAULT("value_0", 1000);
+	}
+
+public:
+	int get_value(int p_index) const {
+		// Property getters can enter the default cache for another class.
+		ClassDB::class_get_default_property_value("RefCounted", "script");
+		return p_index;
+	}
+};
+
+#ifdef THREADS_ENABLED
+TEST_CASE("[ClassDB] Concurrent default property cache population and updates") {
+	GDREGISTER_CLASS(_TestClassDBDefaultCache);
+	Semaphore gate;
+	struct Worker {
+		Semaphore *gate = nullptr;
+		int index = 0;
+		int failures = 0;
+	};
+	Worker workers[8];
+	Thread threads[8];
+	for (int i = 0; i < 8; i++) {
+		workers[i].gate = &gate;
+		workers[i].index = i;
+		threads[i].start([](void *p_data) {
+			Worker *worker = static_cast<Worker *>(p_data);
+			worker->gate->wait();
+			for (int j = 0; j < 1000; j++) {
+				const int index = (j + worker->index) % 64;
+				bool valid = false;
+				Variant value = ClassDB::class_get_default_property_value("_TestClassDBDefaultCache", "value_" + itos(index), &valid);
+				if (!valid || value != Variant(index == 0 ? 1000 : index)) {
+					worker->failures++;
+				}
+				// Exercise map growth while other threads read cached properties.
+				if (j < 64) {
+					const StringName name = "extra_" + itos(worker->index) + "_" + itos(j);
+					ClassDB::set_property_default_value("_TestClassDBDefaultCache", name, j);
+					value = ClassDB::class_get_default_property_value("_TestClassDBDefaultCache", name, &valid);
+					if (!valid || value != Variant(j)) {
+						worker->failures++;
+					}
+				}
+			}
+		}, &workers[i]);
+	}
+	for (int i = 0; i < 8; i++) {
+		gate.post();
+	}
+	for (int i = 0; i < 8; i++) {
+		threads[i].wait_to_finish();
+		CHECK(workers[i].failures == 0);
+	}
+	bool valid = true;
+	CHECK(ClassDB::class_get_default_property_value("_TestClassDBDefaultCache", "missing_property", &valid).get_type() == Variant::NIL);
+	CHECK_FALSE(valid);
+}
+#endif
 
 struct TypeReference {
 	StringName name;

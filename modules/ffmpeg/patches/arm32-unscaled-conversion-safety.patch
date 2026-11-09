@@ -1,0 +1,89 @@
+--- a/libswscale/arm/rgb2yuv_neon_common.S
++++ b/libswscale/arm/rgb2yuv_neon_common.S
+@@ -171,9 +171,9 @@
+ 
+ .macro store_y8_16x1            dst, count
+ .ifc "\count",""
+-        vstmia          \dst!,  {y8x16}
+-.else
+-        vstmia          \dst,   {y8x16}
++        vst1.8          {y8x16}, [\dst]!
++.else
++        vst1.8          {y8x16}, [\dst]
+         add             \dst,   \dst,           \count
+ .endif
+ .endm
+--- a/libswscale/arm/swscale_unscaled.c
++++ b/libswscale/arm/swscale_unscaled.c
+@@ -38,28 +38,38 @@
+                         const int srcStride[], int srcSliceY, int srcSliceH,
+                         uint8_t *const dst[], const int dstStride[]) {
+ 
+-    rgbx_to_nv12_neon_32(src[0] + srcSliceY * srcStride[0],
++    /* Each kernel consumes pairs of rows. Reject incomplete input slices
++     * before touching source or destination buffers. */
++    if ((srcSliceY | srcSliceH) & 1)
++        return AVERROR(EINVAL);
++
++    rgbx_to_nv12_neon_32(src[0],
+             dst[0] + srcSliceY * dstStride[0],
+             dst[1] + (srcSliceY / 2) * dstStride[1],
+             context->opts.src_w, srcSliceH,
+             dstStride[0], dstStride[1], srcStride[0],
+             context->input_rgb2yuv_table);
+ 
+-    return 0;
++    return srcSliceH;
+ }
+ 
+ static int rgbx_to_nv12_neon_16_wrapper(SwsInternal *context, const uint8_t *const src[],
+                         const int srcStride[], int srcSliceY, int srcSliceH,
+                         uint8_t *const dst[], const int dstStride[]) {
+ 
+-    rgbx_to_nv12_neon_16(src[0] + srcSliceY * srcStride[0],
++    /* Each kernel consumes pairs of rows. Reject incomplete input slices
++     * before touching source or destination buffers. */
++    if ((srcSliceY | srcSliceH) & 1)
++        return AVERROR(EINVAL);
++
++    rgbx_to_nv12_neon_16(src[0],
+             dst[0] + srcSliceY * dstStride[0],
+             dst[1] + (srcSliceY / 2) * dstStride[1],
+             context->opts.src_w, srcSliceH,
+             dstStride[0], dstStride[1], srcStride[0],
+             context->input_rgb2yuv_table);
+ 
+-    return 0;
++    return srcSliceH;
+ }
+ 
+ #define YUV_TO_RGB_TABLE                                                                    \
+@@ -93,7 +103,7 @@
+                                  c->yuv2rgb_y_offset >> 6,                                  \
+                                  c->yuv2rgb_y_coeff);                                       \
+                                                                                             \
+-    return 0;                                                                               \
++    return srcSliceH;                                                                               \
+ }                                                                                           \
+ 
+ #define DECLARE_FF_YUVX_TO_ALL_RGBX_FUNCS(yuvx)                                             \
+@@ -127,7 +137,7 @@
+                                  c->yuv2rgb_y_offset >> 6,                                  \
+                                  c->yuv2rgb_y_coeff);                                       \
+                                                                                             \
+-    return 0;                                                                               \
++    return srcSliceH;                                                                               \
+ }                                                                                           \
+ 
+ #define DECLARE_FF_NVX_TO_ALL_RGBX_FUNCS(nvx)                                               \
+@@ -164,7 +174,9 @@
+     int accurate_rnd = c->opts.flags & SWS_ACCURATE_RND;
+     if (c->opts.src_format == AV_PIX_FMT_RGBA
+             && c->opts.dst_format == AV_PIX_FMT_NV12
+-            && (c->opts.src_w >= 16)) {
++            && c->opts.src_w >= 16
++            && !(c->opts.src_w & 15)
++            && !(c->opts.src_h & 1)) {
+         c->convert_unscaled = accurate_rnd ? rgbx_to_nv12_neon_32_wrapper
+                                            : rgbx_to_nv12_neon_16_wrapper;
+     }

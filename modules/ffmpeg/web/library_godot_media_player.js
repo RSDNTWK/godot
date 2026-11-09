@@ -119,17 +119,19 @@ const GodotMediaPlayerLibrary = {
 		direct: function (r, url) {
 			const element = document.createElement(r.video ? 'video' : 'audio');
 			r.element = element;
-			element.preload = 'metadata'; element.playsInline = true; element.volume = r.volume;
+			element.preload = r.video ? 'auto' : 'metadata'; element.playsInline = true; element.volume = r.volume;
 			if (!r.opaque) element.crossOrigin = 'anonymous';
 			if (r.video) GodotMediaPlayer.mount(r, element);
 			const active = function () { return GodotMediaPlayer.alive(r) && r.element === element; };
 			element.addEventListener('loadedmetadata', function () { if (active()) r.metadataReady = true; });
+			element.addEventListener('loadeddata', function () { if (active()) r.frameTime = -1; });
 			element.addEventListener('canplay', function () { if (active()) r.buffering = false; });
 			element.addEventListener('playing', function () { if (active()) { if (!r.wantPlay) element.pause(); r.buffering = false; r.lastError = ''; } });
 			element.addEventListener('waiting', function () { if (active()) r.buffering = true; });
 			element.addEventListener('stalled', function () { if (active() && element.readyState < 3) r.buffering = true; });
 			element.addEventListener('ended', function () { if (active()) GodotMediaPlayer.push(r, {'type': 'finished'}); });
 			element.addEventListener('seeked', function () {
+				if (active()) r.frameTime = -1;
 				if (!active() || !r.seeking || element.seeking) return;
 				GodotMediaPlayer.push(r, {'type': 'seek', 'request': r.seeking.id, 'position': element.currentTime});
 				r.seeking = null;
@@ -340,7 +342,15 @@ const GodotMediaPlayerLibrary = {
 			if (!r.frameCanvas) { r.frameCanvas = document.createElement('canvas'); r.frameContext = r.frameCanvas.getContext('2d', {'willReadFrequently': true}); }
 			r.frameCanvas.width = width; r.frameCanvas.height = height;
 			r.frameContext.drawImage(r.element, 0, 0, width, height);
-			HEAPU8.set(r.frameContext.getImageData(0, 0, width, height).data, pointer);
+			const data = r.frameContext.getImageData(0, 0, width, height).data;
+			// readyState can precede the first drawable frame, especially while
+			// paused. Do not memoize an empty canvas at an unchanged currentTime.
+			if (r.frameTime < 0) {
+				let drawable = false;
+				for (let i = 3; i < data.length; i += 4) { if (data[i]) { drawable = true; break; } }
+				if (!drawable) return 0;
+			}
+			HEAPU8.set(data, pointer);
 			r.frameTime = r.element.currentTime; return 1;
 		} catch (error) { r.opaque = true; return 0; }
 	},

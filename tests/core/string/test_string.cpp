@@ -2241,6 +2241,17 @@ TEST_CASE("[String][URL] Parse URL") {
 	CHECK_URL("https://godotengine.org:notaport", "https://", "godotengine.org", 0, "", "", Error::ERR_INVALID_PARAMETER);
 	CHECK_URL("https://godotengine.org:-8080", "https://", "godotengine.org", -8080, "", "", Error::ERR_INVALID_PARAMETER);
 	CHECK_URL("https://godotengine.org:88888", "https://", "godotengine.org", 88888, "", "", Error::ERR_INVALID_PARAMETER);
+	// Do not narrow a parsed 64-bit value to int before validating it. These
+	// malformed values otherwise wrap to valid low ports, including HTTPS443.
+	CHECK_URL("https://godotengine.org:4294967297", "https://", "godotengine.org", 0, "", "", Error::ERR_INVALID_PARAMETER);
+	CHECK_URL("https://godotengine.org:4294967739", "https://", "godotengine.org", 0, "", "", Error::ERR_INVALID_PARAMETER);
+	CHECK_URL("https://godotengine.org:4294975739", "https://", "godotengine.org", 0, "", "", Error::ERR_INVALID_PARAMETER);
+	CHECK_URL("https://godotengine.org:-4294967295", "https://", "godotengine.org", 0, "", "", Error::ERR_INVALID_PARAMETER);
+	CHECK_URL("https://[2606:4700:4700::1111]:4294975739/video", "https://", "2606:4700:4700::1111", 0, "/video", "", Error::ERR_INVALID_PARAMETER);
+	CHECK_URL("https://godotengine.org:9223372036854775807", "https://", "godotengine.org", 0, "", "", Error::ERR_INVALID_PARAMETER);
+	CHECK_URL("https://godotengine.org:1", "https://", "godotengine.org", 1, "", "", Error::OK);
+	CHECK_URL("https://godotengine.org:65535", "https://", "godotengine.org", 65535, "", "", Error::OK);
+	CHECK_URL("https://godotengine.org:000008443", "https://", "godotengine.org", 8443, "", "", Error::OK);
 
 #undef CHECK_URL
 }

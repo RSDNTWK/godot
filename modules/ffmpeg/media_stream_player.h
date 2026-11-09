@@ -34,6 +34,7 @@
 #if defined(WEB_ENABLED) || defined(MODULE_MEDIA_STREAM_ENABLED)
 #include "audio_stream_pcm_decoder.h"
 
+#include "core/templates/vector.h"
 #include "scene/audio/audio_stream_player.h"
 #include "scene/gui/control.h"
 #include "scene/gui/video_stream_player.h"
@@ -51,6 +52,13 @@ class MediaStreamPlayer : public Control {
 	Dictionary capabilities;
 	Array ranges;
 	Ref<AudioStreamPCMDecoder> decoder;
+	int64_t decoder_generation = 0;
+	struct RetiringPreparation {
+		Ref<AudioStreamPCMDecoder> decoder;
+		int64_t generation = 0;
+		String source;
+	};
+	Vector<RetiringPreparation> retiring_preparations;
 	Ref<AudioStreamWAV> pcm;
 	AudioStreamPlayer *audio = nullptr;
 	VideoStreamPlayer *video = nullptr;
@@ -80,6 +88,7 @@ class MediaStreamPlayer : public Control {
 	Ref<Material> saved_material;
 
 	void _reset();
+	void _collect_retired_preparations();
 	void _event(const StringName &p_kind, Dictionary p_payload = Dictionary());
 	void _capabilities(const Dictionary &p_capabilities);
 	void _ranges(const Array &p_ranges);
@@ -117,6 +126,8 @@ public:
 	void set_volume_linear(float p_volume);
 	float get_volume_linear() const { return volume; }
 	Dictionary get_snapshot() const;
+	bool is_preparing() const;
+	Dictionary get_preparation_state() const;
 	Dictionary get_capabilities() const { return capabilities.duplicate(true); }
 	Array get_seekable_ranges() const { return ranges.duplicate(true); }
 	int64_t get_generation() const { return generation; }

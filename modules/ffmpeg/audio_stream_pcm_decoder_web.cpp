@@ -165,15 +165,33 @@ void AudioStreamPCMDecoder::_collect(const Ref<AudioStreamPCMDecoder> &p_keepali
 	if (!user_cancelled && !timeout && state == 0) {
 		if (web_input.is_valid() && bool(status.get("input_ready", false))) {
 			Vector<uint8_t> chunk;
-			chunk.resize(MIN(uint64_t(262144), web_input->get_length() - web_input->get_position()));
-			const int read = web_input->get_buffer(chunk.ptrw(), chunk.size());
-			if (read != chunk.size() || !godot_web_pcm_input(web_request, chunk.ptr(), read, web_input->get_position() == web_input->get_length())) {
-				result_error = ERR_FILE_CANT_READ;
+			if (chunk.resize(MIN(uint64_t(262144), web_input->get_length() - web_input->get_position())) != OK) {
+				result_error = ERR_OUT_OF_MEMORY;
+				status["message"] = "Could not allocate the encoded input chunk.";
 			} else {
-				if (web_input->get_position() == web_input->get_length()) {
-					web_input.unref();
+				const int read = web_input->get_buffer(chunk.ptrw(), chunk.size());
+				if (read != chunk.size()) {
+					result_error = ERR_FILE_CANT_READ;
+				} else if (!godot_web_pcm_input(web_request, chunk.ptr(), read, web_input->get_position() == web_input->get_length())) {
+					// A worker or transfer can fail after the initial status poll.
+					// Preserve that asynchronous error instead of reporting a file read failure.
+					const int submitted_state = godot_web_pcm_status(web_request, json, sizeof(json));
+					Variant parsed = JSON::parse_string(String::utf8(json));
+					if (submitted_state == -1 && parsed.get_type() == Variant::DICTIONARY) {
+						status = parsed;
+						result_error = Error(int(status.get("error", int(FAILED))));
+						if (result_error == OK) {
+							result_error = FAILED;
+						}
+					} else {
+						result_error = ERR_FILE_CANT_READ;
+					}
+				} else {
+					if (web_input->get_position() == web_input->get_length()) {
+						web_input.unref();
+					}
+					return;
 				}
-				return;
 			}
 		} else {
 			return;

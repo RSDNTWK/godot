@@ -56,14 +56,15 @@ thread_local WorkerThreadPool::UnlockableLocks WorkerThreadPool::unlockable_lock
 
 void WorkerThreadPool::_process_task(Task *p_task) {
 #ifdef THREADS_ENABLED
-	int pool_thread_index = thread_ids[Thread::get_caller_id()];
-	ThreadData &curr_thread = threads[pool_thread_index];
+	// An empty pool processes tasks synchronously on the calling thread.
+	ThreadData *curr_thread = threads.is_empty() ? nullptr : &threads[thread_ids[Thread::get_caller_id()]];
+	int pool_thread_index = curr_thread ? curr_thread->index : -1;
 	Task *prev_task = nullptr; // In case this is recursively called.
 
 	bool safe_for_nodes_backup = is_current_thread_safe_for_nodes();
 	CallQueue *call_queue_backup = MessageQueue::get_singleton() != MessageQueue::get_main_singleton() ? MessageQueue::get_singleton() : nullptr;
 
-	{
+	if (curr_thread) {
 		// Tasks must start with these at default values. They are free to set-and-forget otherwise.
 		set_current_thread_safe_for_nodes(false);
 		MessageQueue::set_thread_singleton_override(nullptr);
@@ -76,11 +77,11 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 
 		task_mutex.lock();
 		p_task->pool_thread_index = pool_thread_index;
-		prev_task = curr_thread.current_task;
-		curr_thread.current_task = p_task;
-		curr_thread.has_pump_task = p_task->is_pump_task;
+		prev_task = curr_thread->current_task;
+		curr_thread->current_task = p_task;
+		curr_thread->has_pump_task = p_task->is_pump_task;
 		if (p_task->pending_notify_yield_over) {
-			curr_thread.yield_is_over = true;
+			curr_thread->yield_is_over = true;
 		}
 		task_mutex.unlock();
 	}
@@ -164,13 +165,15 @@ void WorkerThreadPool::_process_task(Task *p_task) {
 
 #ifdef THREADS_ENABLED
 	{
-		curr_thread.current_task = prev_task;
-		if (low_priority) {
+		if (curr_thread) {
+			curr_thread->current_task = prev_task;
+		}
+		if (curr_thread && low_priority) {
 			low_priority_threads_used--;
 
 			if (_try_promote_low_priority_task()) {
 				if (prev_task) { // Otherwise, this thread will catch it.
-					_notify_threads(&curr_thread, 1, 0);
+					_notify_threads(curr_thread, 1, 0);
 				}
 			}
 		}
@@ -725,7 +728,6 @@ bool WorkerThreadPool::is_group_task_completed(GroupID p_group) const {
 }
 
 void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
-#ifdef THREADS_ENABLED
 	task_mutex.lock();
 	Group **groupp = groups.getptr(p_group);
 	task_mutex.unlock();
@@ -736,6 +738,7 @@ void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
 	{
 		Group *group = *groupp;
 
+#ifdef THREADS_ENABLED
 		if (this == singleton) {
 			_unlock_unlockable_mutexes();
 		}
@@ -743,7 +746,10 @@ void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
 		if (this == singleton) {
 			_lock_unlockable_mutexes();
 		}
+#endif
 
+		// Without threads, posting a group runs it synchronously. The caller
+		// still owns the final completion reference and must reclaim the ID.
 		uint32_t max_users = group->tasks_used + 1; // Add 1 because the thread waiting for it is also user. Read before to avoid another thread freeing task after increment.
 		uint32_t finished_users = group->finished.increment(); // fetch happens before inc, so increment later.
 
@@ -756,7 +762,6 @@ void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
 
 	MutexLock task_lock(task_mutex); // This mutex is needed when Physics 2D and/or 3D is selected to run on a separate thread.
 	groups.erase(p_group);
-#endif
 }
 
 int WorkerThreadPool::get_thread_index() const {
