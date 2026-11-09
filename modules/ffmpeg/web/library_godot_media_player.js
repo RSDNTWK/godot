@@ -191,7 +191,9 @@ const GodotMediaPlayerLibrary = {
 			iframe.setAttribute('credentialless', '');
 			iframe.referrerPolicy = 'strict-origin-when-cross-origin';
 			iframe.allow = 'autoplay; encrypted-media; picture-in-picture';
-			iframe.src = 'https://www.youtube-nocookie.com/embed/' + id + '?enablejsapi=1&playsinline=1&origin=' + encodeURIComponent(location.origin);
+			const showControls = r.options['youtube_show_controls'] !== false;
+			iframe.src = 'https://www.youtube-nocookie.com/embed/' + id + '?enablejsapi=1&playsinline=1&origin=' + encodeURIComponent(location.origin)
+				+ '&controls=' + (showControls ? '1' : '0') + '&disablekb=' + (showControls ? '0' : '1') + '&fs=' + (showControls ? '1' : '0');
 			GodotMediaPlayer.mount(r, iframe);
 			GodotMediaPlayer.loadScript('https://www.youtube.com/iframe_api', function () { return window['YT'] && window['YT']['Player']; }).then(function () {
 				const deadline = performance.now() + 15000;
