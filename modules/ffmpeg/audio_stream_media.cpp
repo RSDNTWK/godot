@@ -25,6 +25,10 @@ extern "C" {
 
 #include <cstring>
 
+#ifdef FFMPEG_TESTS_ENABLED
+#include "tests/test_macros.h"
+#endif
+
 struct FFmpegBufferIO {
 	const uint8_t *data = nullptr;
 	int64_t size = 0;
@@ -1058,7 +1062,7 @@ bool ffmpeg_probe_audio_buffer(const Vector<uint8_t> &p_data, FFmpegAudioMetadat
 	return success;
 }
 
-bool ffmpeg_ogg_packet_sequence_to_buffer(const Ref<OggPacketSequence> &p_sequence, Vector<uint8_t> &r_data) {
+static bool ffmpeg_ogg_packet_sequence_to_buffer(const Ref<OggPacketSequence> &p_sequence, Vector<uint8_t> &r_data) {
 	r_data.clear();
 	ERR_FAIL_COND_V(p_sequence.is_null(), false);
 	Ref<OggPacketSequencePlayback> sequence_playback = p_sequence->instantiate_playback();
@@ -1108,6 +1112,51 @@ bool ffmpeg_ogg_packet_sequence_to_buffer(const Ref<OggPacketSequence> &p_sequen
 	ogg_stream_clear(&stream);
 	return !r_data.is_empty();
 }
+
+#ifdef FFMPEG_TESTS_ENABLED
+TEST_CASE("[NativeStreaming][OggPageGranules] Remuxing saved pages retains timestamps across large packets") {
+	Ref<OggPacketSequence> sequence;
+	sequence.instantiate();
+	PackedByteArray header;
+	header.resize(32);
+	Vector<PackedByteArray> header_page;
+	header_page.push_back(header);
+	sequence->push_page(0, header_page);
+	PackedByteArray packet;
+	packet.resize(6000);
+	Vector<PackedByteArray> audio_page;
+	audio_page.push_back(packet);
+	audio_page.push_back(packet);
+	sequence->push_page(96000, audio_page);
+	Vector<uint8_t> encoded;
+	REQUIRE(ffmpeg_ogg_packet_sequence_to_buffer(sequence, encoded));
+	ogg_sync_state sync;
+	REQUIRE(ogg_sync_init(&sync) == 0);
+	char *buffer = ogg_sync_buffer(&sync, encoded.size());
+	REQUIRE(buffer);
+	memcpy(buffer, encoded.ptr(), encoded.size());
+	REQUIRE(ogg_sync_wrote(&sync, encoded.size()) == 0);
+	ogg_page page;
+	int packets = 0;
+	int pages = 0;
+	int64_t last_granule = -1;
+	while (ogg_sync_pageout(&sync, &page) > 0) {
+		pages++;
+		const int completed = ogg_page_packets(&page);
+		const int64_t granule = ogg_page_granulepos(&page);
+		if (completed > 0) {
+			CHECK(granule >= 0);
+			last_granule = granule;
+		}
+		packets += completed;
+	}
+	ogg_sync_clear(&sync);
+	CHECK(pages >= 2);
+	CHECK(packets == 3);
+	CHECK(last_granule == 96000);
+}
+
+#endif
 
 Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_ogg_packets(const Ref<OggPacketSequence> &p_sequence, const Ref<AudioStream> &p_loop_stream) {
 	Vector<uint8_t> ogg_data;
