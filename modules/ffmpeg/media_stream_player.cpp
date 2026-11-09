@@ -64,6 +64,8 @@ void MediaStreamPlayer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_snapshot"), &MediaStreamPlayer::get_snapshot);
 	ClassDB::bind_method(D_METHOD("is_preparing"), &MediaStreamPlayer::is_preparing);
 	ClassDB::bind_method(D_METHOD("get_preparation_state"), &MediaStreamPlayer::get_preparation_state);
+	ClassDB::bind_method(D_METHOD("is_backend_retiring"), &MediaStreamPlayer::is_backend_retiring);
+	ClassDB::bind_method(D_METHOD("get_backend_retirement_state"), &MediaStreamPlayer::get_backend_retirement_state);
 	ClassDB::bind_method(D_METHOD("get_capabilities"), &MediaStreamPlayer::get_capabilities);
 	ClassDB::bind_method(D_METHOD("get_seekable_ranges"), &MediaStreamPlayer::get_seekable_ranges);
 	ClassDB::bind_method(D_METHOD("get_generation"), &MediaStreamPlayer::get_generation);
@@ -162,6 +164,7 @@ void MediaStreamPlayer::_collect_retired_preparations() {
 
 void MediaStreamPlayer::_reset() {
 	_collect_retired_preparations();
+	_collect_retired_backends();
 #ifdef WEB_ENABLED
 	if (web_handle) {
 		godot_web_media_close(web_handle);
@@ -182,6 +185,14 @@ void MediaStreamPlayer::_reset() {
 		decoder.unref();
 	}
 	decoder_generation = 0;
+	if (bound_playback.is_valid() && bound_playback->has_method(SNAME("get_retirement_fence"))) {
+		RetiringBackend retired;
+		retired.fence = bound_playback->call(SNAME("get_retirement_fence"));
+		retired.backend_instance_id = int64_t(uint64_t(bound_playback->get_instance_id()));
+		retired.generation = bound_generation;
+		retired.source = source;
+		retiring_backends.push_back(retired);
+	}
 	_native_unbind();
 	audio->stop();
 	audio->set_stream(Ref<AudioStream>());
@@ -208,7 +219,7 @@ Error MediaStreamPlayer::open(const String &p_source, const Dictionary &p_option
 #ifdef WEB_ENABLED
 	if (remote && !MediaSourcePolicy::browser_url(p_source)) {
 #else
-	if (remote && !MediaSourcePolicy::https_url(p_source)) {
+	if (remote && !MediaSourcePolicy::native_url(p_source, p_options.get("allow_http", false))) {
 #endif
 		return ERR_INVALID_PARAMETER;
 	}
@@ -240,7 +251,7 @@ Error MediaStreamPlayer::open(const String &p_source, const Dictionary &p_option
 		decoder.instantiate();
 		decoder_generation = generation;
 		decoder->connect(SNAME("completed"), callable_mp(this, &MediaStreamPlayer::_pcm_completed).bind(generation));
-		const Error err = decoder->decode(source, options.get("mix_rate", 0), options.get("max_pcm_bytes", 128 * 1024 * 1024), options.get("timeout_msec", 60000), options.get("http_headers", Dictionary()));
+		const Error err = decoder->decode(source, options.get("mix_rate", 0), options.get("max_pcm_bytes", 128 * 1024 * 1024), options.get("timeout_msec", 60000), options.get("http_headers", Dictionary()), options.get("allow_http", false));
 		if (err == OK) {
 			buffering = true;
 			return OK;
@@ -359,6 +370,7 @@ Error MediaStreamPlayer::_open_backend() {
 		stream->set_file(source);
 		stream->set_http_headers(options.get("http_headers", Dictionary()));
 		stream->set_live_dvr_enabled(options.get("dvr", true));
+		stream->set_allow_http(options.get("allow_http", false));
 		video->set_stream(stream);
 		if (video->get_stream_playback().is_null()) {
 			opened = buffering = false;
@@ -372,6 +384,7 @@ Error MediaStreamPlayer::_open_backend() {
 		stream->set_file(source);
 		stream->set_http_headers(options.get("http_headers", Dictionary()));
 		stream->set_live_dvr_enabled(options.get("dvr", true));
+		stream->set_allow_http(options.get("allow_http", false));
 		audio->set_stream(stream);
 		audio->play();
 		_apply_pause();
@@ -397,6 +410,7 @@ void MediaStreamPlayer::_native_bind() {
 	}
 	_native_unbind();
 	bound_playback = playback;
+	bound_generation = generation;
 	if (playback->has_signal(SNAME("ready"))) {
 		playback->connect(SNAME("ready"), callable_mp(this, &MediaStreamPlayer::_native_ready).bind(generation));
 		playback->connect(SNAME("buffering_changed"), callable_mp(this, &MediaStreamPlayer::_native_buffering).bind(generation));
@@ -550,7 +564,7 @@ void MediaStreamPlayer::stop() {
 	_reset();
 	source = String();
 	options.clear();
-	set_process_internal(!retiring_preparations.is_empty());
+	set_process_internal(!retiring_preparations.is_empty() || !retiring_backends.is_empty());
 }
 Error MediaStreamPlayer::seek(double p_seconds) {
 	if (!ready_state) {
@@ -676,6 +690,43 @@ bool MediaStreamPlayer::is_preparing() const {
 	return false;
 }
 
+void MediaStreamPlayer::_collect_retired_backends() {
+	for (int i = retiring_backends.size() - 1; i >= 0; i--) {
+		if (bool(retiring_backends[i].fence->call(SNAME("is_retired")))) {
+			retiring_backends.remove_at(i);
+		}
+	}
+}
+
+bool MediaStreamPlayer::is_backend_retiring() const {
+	for (const RetiringBackend &retired : retiring_backends) {
+		if (!bool(retired.fence->call(SNAME("is_retired")))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+Dictionary MediaStreamPlayer::get_backend_retirement_state() const {
+	Array retiring;
+	for (const RetiringBackend &retired : retiring_backends) {
+		if (!bool(retired.fence->call(SNAME("is_retired")))) {
+			Dictionary identity;
+			identity["backend_instance_id"] = retired.backend_instance_id;
+			identity["generation"] = retired.generation;
+			identity["source"] = retired.source;
+			retiring.push_back(identity);
+		}
+	}
+	Dictionary state;
+	state["playback_instance_id"] = int64_t(uint64_t(get_instance_id()));
+	state["generation"] = generation;
+	state["busy"] = !retiring.is_empty();
+	state["retiring_count"] = retiring.size();
+	state["retiring"] = retiring;
+	return state;
+}
+
 Dictionary MediaStreamPlayer::get_preparation_state() const {
 	auto identity = [](const Ref<AudioStreamPCMDecoder> &p_decoder, int64_t p_generation, const String &p_source) {
 		Dictionary request;
@@ -714,6 +765,7 @@ Dictionary MediaStreamPlayer::get_snapshot() const {
 	state["ready"] = ready_state;
 	state["buffering"] = buffering;
 	state["preparation"] = get_preparation_state();
+	state["backend_retirement"] = get_backend_retirement_state();
 	state["paused"] = paused;
 	state["position"] = position;
 	state["duration"] = duration;
@@ -959,9 +1011,10 @@ void MediaStreamPlayer::_notification(int p_what) {
 #endif
 	if (p_what == NOTIFICATION_INTERNAL_PROCESS) {
 		_collect_retired_preparations();
+		_collect_retired_backends();
 		if (opened) {
 			_poll();
-		} else if (retiring_preparations.is_empty()) {
+		} else if (retiring_preparations.is_empty() && retiring_backends.is_empty()) {
 			set_process_internal(false);
 		}
 	} else if (p_what == NOTIFICATION_ENTER_TREE && is_preparing()) {

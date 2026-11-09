@@ -57,15 +57,15 @@
 #endif
 
 namespace {
-bool valid_source(const String &p_source) {
+bool valid_source(const String &p_source, bool p_allow_http = false) {
 #ifdef MODULE_YOUTUBE_ENABLED
 	if (!YouTubeParser::video_id(p_source).is_empty()) {
 		return true;
 	}
 #endif
-	return MediaHTTP::valid_url(p_source);
+	return MediaHTTP::valid_url(p_source, p_allow_http);
 }
-bool resolve_source(const String &p_source, bool p_audio_only, const SafeFlag &p_cancel, String &r_url, Dictionary &r_headers, String &r_audio_url, Dictionary &r_audio_headers, String &r_message, bool *r_dvr_supported = nullptr, Dictionary *r_metadata = nullptr, int p_max_height = 1080) {
+bool resolve_source(const String &p_source, bool p_audio_only, const SafeFlag &p_cancel, String &r_url, Dictionary &r_headers, String &r_audio_url, Dictionary &r_audio_headers, String &r_message, bool *r_dvr_supported = nullptr, Dictionary *r_metadata = nullptr, int p_max_height = 1080, bool p_allow_http = false) {
 	r_url = String();
 	Dictionary metadata = FFmpegMediaMetadata::source(p_source);
 	String url = p_source;
@@ -104,7 +104,7 @@ bool resolve_source(const String &p_source, bool p_audio_only, const SafeFlag &p
 		}
 	}
 #endif
-	if (!MediaHTTP::valid_url(url) || (!r_audio_url.is_empty() && !MediaHTTP::valid_url(r_audio_url))) {
+	if (!MediaHTTP::valid_url(url, p_allow_http) || (!r_audio_url.is_empty() && !MediaHTTP::valid_url(r_audio_url, p_allow_http && url.begins_with("http://")))) {
 		return false;
 	}
 	r_url = url;
@@ -239,6 +239,8 @@ Error prepare_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double 
 // bounded PCM queue; control methods only publish commands and never do IO.
 class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 	GDCLASS(FFmpegAsyncAudio, AudioStreamPlaybackResampled);
+	// First member is destroyed last, after all native worker owners.
+	FFmpegRetirementGuard retirement;
 	Thread worker;
 	SafeFlag quit;
 	SafeFlag interrupt;
@@ -253,6 +255,7 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 	uint64_t generation = 0;
 	double requested_position = 0;
 	double position = 0;
+	bool allow_http = false;
 	bool prepare_requested = true;
 	bool seek_requested = false;
 	bool reusable_seek = false;
@@ -317,7 +320,7 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 				Dictionary unused_headers;
 				String message;
 				Ref<FFmpegDVRWindow> window;
-				if (playback.is_null() && (!resolved_url.is_empty() || resolve_source(path, true, interrupt, resolved_url, resolved_headers, unused_audio, unused_headers, message, &dvr_supported, &resolved_metadata))) {
+				if (playback.is_null() && (!resolved_url.is_empty() || resolve_source(path, true, interrupt, resolved_url, resolved_headers, unused_audio, unused_headers, message, &dvr_supported, &resolved_metadata, 1080, allow_http))) {
 					publish_metadata(requested, resolved_metadata);
 					if (dvr.enabled && dvr_supported) {
 						window.instantiate();
@@ -325,7 +328,7 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 						window->requested_position = !go_live && anchor < 0 ? from : -1;
 						window->required = anchor >= 0;
 					}
-					playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, resolved_url, Ref<AudioStream>(), resolved_headers, &interrupt, &duration, window.ptr());
+					playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, resolved_url, Ref<AudioStream>(), resolved_headers, &interrupt, &duration, window.ptr(), true, allow_http);
 				}
 				const bool dvr_open = window.is_valid() && bool(window->snapshot().get("available", false));
 				current = requested;
@@ -442,6 +445,7 @@ public:
 		headers = p_headers.duplicate();
 		owner = p_owner;
 		dvr.enabled = owner->is_live_dvr_enabled();
+		allow_http = owner->is_http_allowed();
 		post_event(generation, 1);
 		worker.start(run, this);
 		return worker.is_started();
@@ -511,6 +515,7 @@ public:
 
 class FFmpegAsyncVideo : public VideoStreamPlayback {
 	GDCLASS(FFmpegAsyncVideo, VideoStreamPlayback);
+	FFmpegRetirementGuard retirement;
 #ifdef FFMPEG_TESTS_ENABLED
 	FFmpegTestVideoFactory test_factory = nullptr;
 	void *test_userdata = nullptr;
@@ -571,6 +576,7 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 	bool published_video_position_valid = false;
 	int64_t frontend_frames_accepted = 0;
 	uint64_t presentable_progress_usec = 0;
+	bool allow_http = false;
 	bool prepare_requested = true;
 	bool seek_requested = false;
 	bool reusable_seek = false;
@@ -806,12 +812,12 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				}
 #endif
 				if (!resolved) {
-					resolved = resolve_source(path, false, interrupt, resolved_video, video_headers, resolved_audio, resolved_audio_headers, message, &dvr_supported, &resolved_metadata, quality_limit);
+					resolved = resolve_source(path, false, interrupt, resolved_video, video_headers, resolved_audio, resolved_audio_headers, message, &dvr_supported, &resolved_metadata, quality_limit, allow_http);
 					if (resolved && !audio_file.is_empty()) {
 						String unused_audio;
 						Dictionary unused_headers;
 						resolved_audio_headers = audio_headers;
-						resolved = resolve_source(audio_file, true, interrupt, resolved_audio, resolved_audio_headers, unused_audio, unused_headers, message);
+						resolved = resolve_source(audio_file, true, interrupt, resolved_audio, resolved_audio_headers, unused_audio, unused_headers, message, nullptr, nullptr, 1080, allow_http && resolved_video.begins_with("http://"));
 					}
 				}
 				Ref<FFmpegDVRWindow> window;
@@ -829,7 +835,7 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 					} else
 #endif
 							if (!reused) {
-						playback = ffmpeg_open_video_on_worker(resolved_video, video_headers, &interrupt, resolved_audio, resolved_audio_headers, &message, window.ptr());
+						playback = ffmpeg_open_video_on_worker(resolved_video, video_headers, &interrupt, resolved_audio, resolved_audio_headers, &message, window.ptr(), allow_http);
 					}
 				}
 				const bool dvr_open = window.is_valid() && bool(window->snapshot().get("available", false));
@@ -1182,7 +1188,7 @@ public:
 		test_local_path = p_path;
 		test_paired_audio = p_paired_audio;
 		set_test_factory(open_test_local, this);
-		return initialize(p_path, Dictionary(), String(), Dictionary(), false);
+		return initialize(p_path, Dictionary(), String(), Dictionary(), false, false);
 	}
 #endif
 #ifdef DEV_ENABLED
@@ -1216,7 +1222,7 @@ public:
 #endif
 		return false;
 	}
-	bool initialize(const String &p_path, const Dictionary &p_headers, const String &p_audio_file, const Dictionary &p_audio_headers, bool p_live_dvr_enabled) {
+	bool initialize(const String &p_path, const Dictionary &p_headers, const String &p_audio_file, const Dictionary &p_audio_headers, bool p_live_dvr_enabled, bool p_allow_http) {
 		presentation_texture.instantiate();
 		texture = presentation_texture;
 		path = p_path;
@@ -1224,6 +1230,7 @@ public:
 		audio_file = p_audio_file;
 		audio_headers = p_audio_headers.duplicate();
 		dvr.enabled = p_live_dvr_enabled;
+		allow_http = p_allow_http;
 #ifdef MODULE_YOUTUBE_ENABLED
 		adaptive_quality = audio_file.is_empty() && !YouTubeParser::video_id(path).is_empty();
 #endif
@@ -1495,7 +1502,7 @@ public:
 };
 
 Ref<AudioStreamPlayback> ffmpeg_async_audio(const String &p_path, const Dictionary &p_headers, const Ref<AudioStreamMedia> &p_owner) {
-	if (!valid_source(p_path)) {
+	if (!valid_source(p_path, p_owner->is_http_allowed())) {
 		return Ref<AudioStreamPlayback>();
 	}
 	Ref<FFmpegAsyncAudio> playback;
@@ -1503,13 +1510,13 @@ Ref<AudioStreamPlayback> ffmpeg_async_audio(const String &p_path, const Dictiona
 	return playback->initialize(p_path, p_headers, p_owner) ? Ref<AudioStreamPlayback>(playback) : Ref<AudioStreamPlayback>();
 }
 
-Ref<VideoStreamPlayback> ffmpeg_async_video(const String &p_path, const Dictionary &p_headers, const String &p_audio_file, const Dictionary &p_audio_headers, bool p_live_dvr_enabled) {
-	if (!valid_source(p_path) || (!p_audio_file.is_empty() && !valid_source(p_audio_file))) {
+Ref<VideoStreamPlayback> ffmpeg_async_video(const String &p_path, const Dictionary &p_headers, const String &p_audio_file, const Dictionary &p_audio_headers, bool p_live_dvr_enabled, bool p_allow_http) {
+	if (!valid_source(p_path, p_allow_http) || (!p_audio_file.is_empty() && !valid_source(p_audio_file, p_allow_http && p_path.begins_with("http://")))) {
 		return Ref<VideoStreamPlayback>();
 	}
 	Ref<FFmpegAsyncVideo> playback;
 	playback.instantiate();
-	return playback->initialize(p_path, p_headers, p_audio_file, p_audio_headers, p_live_dvr_enabled) ? Ref<VideoStreamPlayback>(playback) : Ref<VideoStreamPlayback>();
+	return playback->initialize(p_path, p_headers, p_audio_file, p_audio_headers, p_live_dvr_enabled, p_allow_http) ? Ref<VideoStreamPlayback>(playback) : Ref<VideoStreamPlayback>();
 }
 #ifdef FFMPEG_TESTS_ENABLED
 class FFmpegTestVideoStream : public VideoStream {
@@ -1535,6 +1542,7 @@ public:
 #endif
 
 void register_ffmpeg_async_playback_types() {
+	GDREGISTER_INTERNAL_CLASS(FFmpegRetirementFence);
 	GDREGISTER_INTERNAL_CLASS(FFmpegAsyncAudio);
 	GDREGISTER_INTERNAL_CLASS(FFmpegAsyncVideo);
 #ifdef FFMPEG_TESTS_ENABLED
@@ -1577,7 +1585,7 @@ Ref<VideoStreamPlayback> ffmpeg_test_async_video(FFmpegTestVideoFactory p_factor
 	Ref<FFmpegAsyncVideo> playback;
 	playback.instantiate();
 	playback->set_test_factory(p_factory, p_userdata);
-	return playback->initialize("test://finite-video", Dictionary(), String(), Dictionary(), false) ? Ref<VideoStreamPlayback>(playback) : Ref<VideoStreamPlayback>();
+	return playback->initialize("test://finite-video", Dictionary(), String(), Dictionary(), false, false) ? Ref<VideoStreamPlayback>(playback) : Ref<VideoStreamPlayback>();
 }
 #endif
 #endif // MODULE_MEDIA_STREAM_ENABLED

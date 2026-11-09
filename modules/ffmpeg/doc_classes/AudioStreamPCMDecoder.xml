@@ -31,7 +31,8 @@
 			<param index="2" name="max_pcm_bytes" type="int" default="134217728" />
 			<param index="3" name="timeout_msec" type="int" default="60000" />
 			<param index="4" name="http_headers" type="Dictionary" default="{}" />
-			<description>Starts a worker request. A zero mix rate snapshots the current AudioServer mix rate; explicit rates must be between 8000 and 192000 Hz. PCM payload is limited to between 4 bytes and 128 MiB, rounded down to whole stereo 16-bit frames. Timeout must be between 1 and 60000 ms and covers resolution, transport, decoding and result collection. Returns [constant OK] when started, [constant ERR_BUSY] while the previous request is still being collected, or an argument/setup error. The source must use HTTPS for network transport; there is no silent HTTP-to-HTTPS rewriting. Native and browser validation guarantees differ as described above.</description>
+			<param index="5" name="allow_http" type="bool" default="false" />
+			<description>Starts a worker request. A zero mix rate snapshots the current AudioServer mix rate; explicit rates must be between 8000 and 192000 Hz. PCM payload is limited to between 4 bytes and 128 MiB, rounded down to whole stereo 16-bit frames. Timeout must be between 1 and 60000 ms and covers resolution, transport, decoding and result collection. Returns [constant OK] when started, [constant ERR_BUSY] while the previous request is still being collected, or an argument/setup error. Native network transport requires HTTPS by default. Native-only allow_http admits an original HTTP source with public-address pinning and the same redirect/secondary validation. HTTPS never downgrades to HTTP, including after an upgrade. Web PCM still requires HTTPS/CORS and ignores this native option. There is no silent URL rewriting. Native and browser validation guarantees differ as described above.</description>
 		</method>
 		<method name="get_request_id" qualifiers="const">
 			<return type="int" />

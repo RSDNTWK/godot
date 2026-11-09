@@ -67,4 +67,7 @@ inline bool youtube_url(const String &p_url) {
 	host = host.to_lower();
 	return host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be" || host == "youtube-nocookie.com" || host.ends_with(".youtube-nocookie.com");
 }
+inline bool native_url(const String &p_url, bool p_allow_http = false) {
+	return https_url(p_url) || (p_allow_http && p_url.begins_with("http://") && browser_url(p_url) && !p_url.contains("@") && !p_url.contains("#"));
+}
 } //namespace MediaSourcePolicy

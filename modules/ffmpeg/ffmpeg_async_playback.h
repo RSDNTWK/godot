@@ -33,7 +33,7 @@
 #include "video_stream_media.h"
 
 Ref<AudioStreamPlayback> ffmpeg_async_audio(const String &p_path, const Dictionary &p_headers, const Ref<AudioStreamMedia> &p_owner);
-Ref<VideoStreamPlayback> ffmpeg_async_video(const String &p_path, const Dictionary &p_headers, const String &p_audio_file, const Dictionary &p_audio_headers, bool p_live_dvr_enabled = false);
+Ref<VideoStreamPlayback> ffmpeg_async_video(const String &p_path, const Dictionary &p_headers, const String &p_audio_file, const Dictionary &p_audio_headers, bool p_live_dvr_enabled = false, bool p_allow_http = false);
 // Linked only in FFmpeg test builds. Exercises the real worker, PCM queue,
 // frontend backpressure and terminal handling with a deterministic input.
 using FFmpegTestVideoFactory = Ref<VideoStreamPlayback> (*)(void *);

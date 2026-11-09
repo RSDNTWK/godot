@@ -63,6 +63,14 @@ class MediaStreamPlayer : public Control {
 	AudioStreamPlayer *audio = nullptr;
 	VideoStreamPlayer *video = nullptr;
 	Ref<RefCounted> bound_playback;
+	int64_t bound_generation = 0;
+	struct RetiringBackend {
+		Ref<RefCounted> fence;
+		int64_t backend_instance_id = 0;
+		int64_t generation = 0;
+		String source;
+	};
+	Vector<RetiringBackend> retiring_backends;
 	int64_t generation = 0;
 	int64_t seek_request_id = 0;
 	bool opened = false;
@@ -89,6 +97,7 @@ class MediaStreamPlayer : public Control {
 
 	void _reset();
 	void _collect_retired_preparations();
+	void _collect_retired_backends();
 	void _event(const StringName &p_kind, Dictionary p_payload = Dictionary());
 	void _capabilities(const Dictionary &p_capabilities);
 	void _ranges(const Array &p_ranges);
@@ -128,6 +137,8 @@ public:
 	Dictionary get_snapshot() const;
 	bool is_preparing() const;
 	Dictionary get_preparation_state() const;
+	bool is_backend_retiring() const;
+	Dictionary get_backend_retirement_state() const;
 	Dictionary get_capabilities() const { return capabilities.duplicate(true); }
 	Array get_seekable_ranges() const { return ranges.duplicate(true); }
 	int64_t get_generation() const { return generation; }

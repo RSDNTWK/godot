@@ -23,6 +23,7 @@ class VideoStreamMedia : public VideoStream {
 	String audio_file;
 	Dictionary audio_http_headers;
 	bool live_dvr_enabled = false;
+	bool allow_http = false;
 
 protected:
 	static void _bind_methods();
@@ -30,6 +31,8 @@ protected:
 public:
 	void set_live_dvr_enabled(bool p_enabled) { live_dvr_enabled = p_enabled; }
 	bool is_live_dvr_enabled() const { return live_dvr_enabled; }
+	void set_allow_http(bool p_enabled) { allow_http = p_enabled; }
+	bool is_http_allowed() const { return allow_http; }
 	void set_http_headers(const Dictionary &p_headers) { http_headers = p_headers.duplicate(); }
 	Dictionary get_http_headers() const { return http_headers.duplicate(); }
 	void set_audio_file(const String &p_file) { audio_file = p_file; }
@@ -47,6 +50,7 @@ class AudioStreamMedia : public AudioStream {
 	mutable double length = -1.0;
 	Dictionary http_headers;
 	bool live_dvr_enabled = false;
+	bool allow_http = false;
 	SafeNumeric<int64_t> remote_length_usec;
 
 protected:
@@ -55,6 +59,8 @@ protected:
 public:
 	void set_live_dvr_enabled(bool p_enabled) { live_dvr_enabled = p_enabled; }
 	bool is_live_dvr_enabled() const { return live_dvr_enabled; }
+	void set_allow_http(bool p_enabled) { allow_http = p_enabled; }
+	bool is_http_allowed() const { return allow_http; }
 	void set_http_headers(const Dictionary &p_headers) { http_headers = p_headers.duplicate(); }
 	Dictionary get_http_headers() const { return http_headers.duplicate(); }
 	void publish_remote_length(double p_length) { remote_length_usec.set(int64_t(MAX(p_length, 0.0) * 1000000.0)); }
@@ -64,8 +70,8 @@ public:
 	double get_length() const override;
 };
 
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String(), const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>(), const Dictionary &p_headers = Dictionary(), const SafeFlag *p_cancel = nullptr, double *r_length = nullptr, FFmpegDVRWindow *p_dvr = nullptr, bool p_dvr_primary = true);
-Ref<VideoStreamPlayback> ffmpeg_open_video_on_worker(const String &p_path, const Dictionary &p_headers, const SafeFlag *p_cancel, const String &p_audio_file = String(), const Dictionary &p_audio_headers = Dictionary(), String *r_error = nullptr, FFmpegDVRWindow *p_dvr = nullptr);
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String(), const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>(), const Dictionary &p_headers = Dictionary(), const SafeFlag *p_cancel = nullptr, double *r_length = nullptr, FFmpegDVRWindow *p_dvr = nullptr, bool p_dvr_primary = true, bool p_allow_http = false);
+Ref<VideoStreamPlayback> ffmpeg_open_video_on_worker(const String &p_path, const Dictionary &p_headers, const SafeFlag *p_cancel, const String &p_audio_file = String(), const Dictionary &p_audio_headers = Dictionary(), String *r_error = nullptr, FFmpegDVRWindow *p_dvr = nullptr, bool p_allow_http = false);
 bool ffmpeg_start_video_read_ahead(const Ref<VideoStreamPlayback> &p_playback, String *r_error = nullptr, bool p_after_finite_seek = false);
 bool ffmpeg_seek_video_on_worker(const Ref<VideoStreamPlayback> &p_playback, double p_position);
 bool ffmpeg_can_reuse_video_seek(const Ref<VideoStreamPlayback> &p_playback);

@@ -13,6 +13,7 @@
 	<tutorials>
 	</tutorials>
 	<members>
+		<member name="allow_http" type="bool" setter="set_allow_http" getter="is_http_allowed" default="false">Native-only opt-in for an original HTTP source. Set before creating playback. Public destination validation and address pinning remain enforced. HTTPS redirects and secondary media cannot downgrade to HTTP.</member>
 		<member name="live_dvr_enabled" type="bool" setter="set_live_dvr_enabled" getter="is_live_dvr_enabled" default="false">
 			Enables native YouTube DVR when the service advertises it and the selected HLS inputs provide a continuous, timestamped rewind window. Initially starts near the live edge. Positions use a fixed origin established from the first advertised window; its start and end advance as older segments expire and new segments arrive. Normal playback and non-YouTube inputs keep their existing behavior when this option is disabled. DVR across timestamp discontinuities, encrypted HLS, and byte-ranged segments is unsupported.
 		</member>

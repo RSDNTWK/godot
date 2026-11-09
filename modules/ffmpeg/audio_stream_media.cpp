@@ -512,10 +512,11 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 
 public:
 	~AudioStreamPlaybackFFmpeg() override { close_decoder(); }
-	void set_remote_options(const Dictionary &p_headers, const SafeFlag *p_cancel, FFmpegDVRWindow *p_dvr = nullptr, bool p_primary = true) {
+	void set_remote_options(const Dictionary &p_headers, const SafeFlag *p_cancel, FFmpegDVRWindow *p_dvr = nullptr, bool p_primary = true, bool p_allow_http = false) {
 		remote_cancel = p_cancel;
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		file_io.set_remote_options(p_headers, p_cancel, packet_reader.get_stop_flag());
+		file_io.set_allow_http(p_allow_http);
 		file_io.set_dvr(Ref<FFmpegDVRWindow>(p_dvr), p_primary);
 #else
 		file_io.set_remote_options(p_headers, p_cancel);
@@ -547,13 +548,14 @@ public:
 	}
 
 #ifdef MODULE_MEDIA_STREAM_ENABLED
-	bool open_pcm_source(const String &p_path, const Dictionary &p_headers, const SafeFlag *p_cancel, int p_rate, uint64_t p_deadline) {
+	bool open_pcm_source(const String &p_path, const Dictionary &p_headers, const SafeFlag *p_cancel, int p_rate, uint64_t p_deadline, bool p_allow_http) {
 		finite_pcm_preparation = true;
 		path = p_path;
 		output_sample_rate = p_rate;
 		remote_cancel = p_cancel;
 		live_preroll_deadline = p_deadline;
 		file_io.set_remote_options(p_headers, p_cancel, nullptr, p_deadline);
+		file_io.set_allow_http(p_allow_http);
 		if (!open_decoder()) {
 			return false;
 		}
@@ -846,7 +848,7 @@ public:
 #include "core/os/thread.h"
 #include "scene/resources/audio_stream_wav.h"
 
-Error ffmpeg_decode_audio_pcm(const String &p_source, const Dictionary &p_headers, const SafeFlag &p_cancel, int p_mix_rate, int64_t p_max_pcm_bytes, uint64_t p_deadline, Dictionary &r_result) {
+Error ffmpeg_decode_audio_pcm(const String &p_source, const Dictionary &p_headers, const SafeFlag &p_cancel, int p_mix_rate, int64_t p_max_pcm_bytes, uint64_t p_deadline, Dictionary &r_result, bool p_allow_http) {
 	r_result.clear();
 	if (p_mix_rate < 8000 || p_mix_rate > 192000 || p_max_pcm_bytes < 4 || p_max_pcm_bytes > 128 * 1024 * 1024 || !p_deadline) {
 		return ERR_INVALID_PARAMETER;
@@ -860,7 +862,7 @@ Error ffmpeg_decode_audio_pcm(const String &p_source, const Dictionary &p_header
 	}
 	Ref<AudioStreamPlaybackFFmpeg> decoder;
 	decoder.instantiate();
-	if (!decoder->open_pcm_source(p_source, p_headers, &p_cancel, p_mix_rate, p_deadline)) {
+	if (!decoder->open_pcm_source(p_source, p_headers, &p_cancel, p_mix_rate, p_deadline, p_allow_http)) {
 		r_result["message"] = decoder->get_parameter(SNAME("_ffmpeg_error_message"));
 		error = interrupted_error();
 		return error != OK ? error : ERR_CANT_OPEN;
@@ -964,10 +966,10 @@ Ref<AudioStreamPlayback> AudioStreamMedia::instantiate_playback() {
 	}
 	return playback;
 }
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path, const Ref<AudioStream> &p_loop_stream, const Dictionary &p_headers, const SafeFlag *p_cancel, double *r_length, FFmpegDVRWindow *p_dvr, bool p_dvr_primary) {
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path, const Ref<AudioStream> &p_loop_stream, const Dictionary &p_headers, const SafeFlag *p_cancel, double *r_length, FFmpegDVRWindow *p_dvr, bool p_dvr_primary, bool p_allow_http) {
 	Ref<AudioStreamPlaybackFFmpeg> playback;
 	playback.instantiate();
-	playback->set_remote_options(p_headers, p_cancel, p_dvr, p_dvr_primary);
+	playback->set_remote_options(p_headers, p_cancel, p_dvr, p_dvr_primary, p_allow_http);
 	if (!playback->open_buffer(p_data, p_format, p_path)) {
 		return Ref<AudioStreamPlayback>();
 	}
@@ -1141,6 +1143,9 @@ double AudioStreamMedia::get_length() const {
 }
 
 void AudioStreamMedia::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_allow_http", "enabled"), &AudioStreamMedia::set_allow_http);
+	ClassDB::bind_method(D_METHOD("is_http_allowed"), &AudioStreamMedia::is_http_allowed);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "allow_http"), "set_allow_http", "is_http_allowed");
 	ClassDB::bind_method(D_METHOD("set_live_dvr_enabled", "enabled"), &AudioStreamMedia::set_live_dvr_enabled);
 	ClassDB::bind_method(D_METHOD("is_live_dvr_enabled"), &AudioStreamMedia::is_live_dvr_enabled);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "live_dvr_enabled"), "set_live_dvr_enabled", "is_live_dvr_enabled");

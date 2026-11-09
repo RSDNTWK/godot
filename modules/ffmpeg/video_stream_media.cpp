@@ -629,7 +629,7 @@ public:
 		return false;
 	}
 
-	bool open_file(const String &p_path, const Dictionary &p_headers = Dictionary(), const SafeFlag *p_cancel = nullptr, const String &p_audio_file = String(), const Dictionary &p_audio_headers = Dictionary(), String *r_error = nullptr, FFmpegDVRWindow *p_dvr = nullptr) {
+	bool open_file(const String &p_path, const Dictionary &p_headers = Dictionary(), const SafeFlag *p_cancel = nullptr, const String &p_audio_file = String(), const Dictionary &p_audio_headers = Dictionary(), String *r_error = nullptr, FFmpegDVRWindow *p_dvr = nullptr, bool p_allow_http = false) {
 		close();
 		if (r_error) {
 			*r_error = String();
@@ -641,6 +641,7 @@ public:
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		packet_reader.reset();
 		file_io.set_remote_options(p_headers, p_cancel, packet_reader.get_stop_flag());
+		file_io.set_allow_http(p_allow_http);
 		file_io.set_dvr(Ref<FFmpegDVRWindow>(p_dvr), true);
 #else
 		file_io.set_remote_options(p_headers, p_cancel);
@@ -742,7 +743,11 @@ public:
 		}
 #endif
 #endif
-		audio_playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, p_audio_file.is_empty() ? p_path : p_audio_file, Ref<AudioStream>(), p_audio_file.is_empty() ? network_headers : p_audio_headers, network_cancel, nullptr, p_dvr, false);
+		// Reuse the effective primary URL for muxed audio after redirects. Once
+		// that input upgraded to HTTPS, paired audio cannot reopen via HTTP.
+		const String effective_primary = file_io.get_remote_url();
+		const String audio_source = p_audio_file.is_empty() ? (effective_primary.is_empty() ? p_path : effective_primary) : p_audio_file;
+		audio_playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, audio_source, Ref<AudioStream>(), p_audio_file.is_empty() ? network_headers : p_audio_headers, network_cancel, nullptr, p_dvr, false, p_allow_http && file_io.is_http_transport());
 		if (!p_audio_file.is_empty() && audio_playback.is_null()) {
 			return _open_failed(r_error, "Could not open the paired audio input.");
 		}
@@ -1429,7 +1434,7 @@ public:
 Ref<VideoStreamPlayback> VideoStreamMedia::instantiate_playback() {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 	if (FFmpegFileIO::is_remote(get_file())) {
-		return ffmpeg_async_video(get_file(), get_http_headers(), get_audio_file(), get_audio_http_headers(), is_live_dvr_enabled());
+		return ffmpeg_async_video(get_file(), get_http_headers(), get_audio_file(), get_audio_http_headers(), is_live_dvr_enabled(), is_http_allowed());
 	}
 #endif
 	Ref<VideoStreamPlaybackFFmpeg> playback;
@@ -1440,11 +1445,11 @@ Ref<VideoStreamPlayback> VideoStreamMedia::instantiate_playback() {
 	return playback;
 }
 
-Ref<VideoStreamPlayback> ffmpeg_open_video_on_worker(const String &p_path, const Dictionary &p_headers, const SafeFlag *p_cancel, const String &p_audio_file, const Dictionary &p_audio_headers, String *r_error, FFmpegDVRWindow *p_dvr) {
+Ref<VideoStreamPlayback> ffmpeg_open_video_on_worker(const String &p_path, const Dictionary &p_headers, const SafeFlag *p_cancel, const String &p_audio_file, const Dictionary &p_audio_headers, String *r_error, FFmpegDVRWindow *p_dvr, bool p_allow_http) {
 	Ref<VideoStreamPlaybackFFmpeg> playback;
 	playback.instantiate();
 	playback->use_async_frames();
-	return playback->open_file(p_path, p_headers, p_cancel, p_audio_file, p_audio_headers, r_error, p_dvr) ? Ref<VideoStreamPlayback>(playback) : Ref<VideoStreamPlayback>();
+	return playback->open_file(p_path, p_headers, p_cancel, p_audio_file, p_audio_headers, r_error, p_dvr, p_allow_http) ? Ref<VideoStreamPlayback>(playback) : Ref<VideoStreamPlayback>();
 }
 
 bool ffmpeg_start_video_read_ahead(const Ref<VideoStreamPlayback> &p_playback, String *r_error, bool p_after_finite_seek) {
@@ -1469,6 +1474,9 @@ bool ffmpeg_can_reuse_video_seek(const Ref<VideoStreamPlayback> &p_playback) {
 }
 
 void VideoStreamMedia::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_allow_http", "enabled"), &VideoStreamMedia::set_allow_http);
+	ClassDB::bind_method(D_METHOD("is_http_allowed"), &VideoStreamMedia::is_http_allowed);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "allow_http"), "set_allow_http", "is_http_allowed");
 	ClassDB::bind_method(D_METHOD("set_live_dvr_enabled", "enabled"), &VideoStreamMedia::set_live_dvr_enabled);
 	ClassDB::bind_method(D_METHOD("is_live_dvr_enabled"), &VideoStreamMedia::is_live_dvr_enabled);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "live_dvr_enabled"), "set_live_dvr_enabled", "is_live_dvr_enabled");

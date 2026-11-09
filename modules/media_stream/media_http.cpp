@@ -67,8 +67,8 @@ bool MediaHTTP::public_address(const IPAddress &p_address) {
 			!(b[0] == 0x3f && (b[1] & 0xf0) == 0xf0);
 }
 
-bool MediaHTTP::valid_url(const String &p_url) {
-	if (p_url.length() > 32768 || !p_url.begins_with("https://") || p_url.contains("@") || p_url.contains("\\")) {
+bool MediaHTTP::valid_url(const String &p_url, bool p_allow_http) {
+	if (p_url.length() > 32768 || (!p_url.begins_with("https://") && !(p_allow_http && p_url.begins_with("http://"))) || p_url.contains("@") || p_url.contains("\\")) {
 		return false;
 	}
 	for (int i = 0; i < p_url.length(); i++) {
@@ -79,7 +79,7 @@ bool MediaHTTP::valid_url(const String &p_url) {
 	String scheme, host, path, fragment;
 	int port;
 	// parse_url rejects explicit ports outside 1..65535. Port zero here means
-	// that the URL omitted its port, in which case HTTPS uses 443.
+	// that the URL omitted its port; the caller supplies the scheme's default.
 	return p_url.parse_url(scheme, host, port, path, fragment) == OK && !host.is_empty() && fragment.is_empty();
 }
 
@@ -87,15 +87,15 @@ String MediaHTTP::resolve_url(const String &p_base, const String &p_target) {
 	if (p_target.contains("://")) {
 		return p_target;
 	}
-	if (p_target.begins_with("//")) {
-		return "https:" + p_target;
-	}
 	String scheme, host, path, fragment;
 	int port;
 	if (p_base.parse_url(scheme, host, port, path, fragment) != OK) {
 		return String();
 	}
-	String origin = "https://" + (host.contains(":") ? "[" + host + "]" : host) + (port ? ":" + itos(port) : String());
+	if (p_target.begins_with("//")) {
+		return scheme + p_target.trim_prefix("//");
+	}
+	String origin = scheme + (host.contains(":") ? "[" + host + "]" : host) + (port ? ":" + itos(port) : String());
 	if (p_target.begins_with("/")) {
 		return origin + p_target;
 	}
@@ -111,7 +111,7 @@ bool MediaHTTP::interrupted() const {
 	return (cancel && cancel->is_set()) || (secondary_cancel && secondary_cancel->is_set()) || now >= deadline || (absolute_deadline && now >= absolute_deadline);
 }
 
-Error MediaHTTP::connect(const String &p_host, int p_port) {
+Error MediaHTTP::connect(const String &p_host, int p_port, bool p_tls) {
 	Vector<IPAddress> candidates;
 	if (IPAddress::is_valid_ip_address(p_host)) {
 		IPAddress literal(p_host);
@@ -163,8 +163,8 @@ Error MediaHTTP::connect(const String &p_host, int p_port) {
 		client = HTTPClient::create();
 		client->set_blocking_mode(false);
 		client->set_read_chunk_size(65536);
-		// Pin the vetted address, retaining the original hostname for TLS/SNI.
-		last_error = client->connect_to_host(String(address), p_port, TLSOptions::client(Ref<X509Certificate>(), p_host));
+		// Both schemes pin the vetted address. HTTPS retains hostname validation/SNI.
+		last_error = client->connect_to_host(String(address), p_port, p_tls ? TLSOptions::client(Ref<X509Certificate>(), p_host) : Ref<TLSOptions>());
 		if (last_error != OK) {
 			continue;
 		}
@@ -207,20 +207,23 @@ Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers,
 	String post = p_post;
 	String initial_scheme, initial_host, initial_path, initial_fragment;
 	int initial_port;
-	if (!valid_url(p_url) || p_url.parse_url(initial_scheme, initial_host, initial_port, initial_path, initial_fragment) != OK) {
+	if (!valid_url(p_url, allow_http) || p_url.parse_url(initial_scheme, initial_host, initial_port, initial_path, initial_fragment) != OK) {
 		return ERR_UNAUTHORIZED;
 	}
-	initial_port = initial_port ? initial_port : 443;
+	initial_port = initial_port ? initial_port : (initial_scheme == "https://" ? 443 : 80);
+	bool require_https = initial_scheme == "https://";
 	deadline = p_deadline;
 	for (int redirect = 0; redirect < 6 && !interrupted(); redirect++) {
-		if (!valid_url(url)) {
+		if (!valid_url(url, allow_http && !require_https)) {
 			return ERR_UNAUTHORIZED;
 		}
 		String scheme, host, path, fragment;
 		int port;
 		url.parse_url(scheme, host, port, path, fragment);
-		port = port ? port : 443;
-		const bool same_origin = host == initial_host && port == initial_port;
+		const bool tls = scheme == "https://";
+		require_https = require_https || tls;
+		port = port ? port : (tls ? 443 : 80);
+		const bool same_origin = scheme == initial_scheme && host == initial_host && port == initial_port;
 		if (!same_origin) {
 			if (!post.is_empty()) {
 				return ERR_UNAUTHORIZED;
@@ -229,12 +232,12 @@ Error MediaHTTP::open_internal(const String &p_url, const Dictionary &p_headers,
 				headers.erase(name);
 			}
 		}
-		Error error = connect(host, port);
+		Error error = connect(host, port, tls);
 		if (error != OK) {
 			return error;
 		}
 		Vector<String> request_headers;
-		request_headers.push_back("Host: " + (host.contains(":") ? "[" + host + "]" : host) + (port == 443 ? String() : ":" + itos(port)));
+		request_headers.push_back("Host: " + (host.contains(":") ? "[" + host + "]" : host) + (port == (tls ? 443 : 80) ? String() : ":" + itos(port)));
 		request_headers.push_back("Accept-Encoding: identity");
 		// API client metadata is restricted to the original origin. Authentication
 		// headers are never forwarded by this transport.

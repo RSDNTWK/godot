@@ -14,6 +14,7 @@
 	<tutorials>
 	</tutorials>
 	<members>
+		<member name="allow_http" type="bool" setter="set_allow_http" getter="is_http_allowed" default="false">Native-only opt-in for an original HTTP source. Set before creating playback. Public destination validation and address pinning remain enforced. HTTPS redirects and secondary media cannot downgrade to HTTP.</member>
 		<member name="live_dvr_enabled" type="bool" setter="set_live_dvr_enabled" getter="is_live_dvr_enabled" default="false">
 			Enables worker-side rewind and return-to-live for YouTube live audio when a continuous DVR window is advertised. Set before creating playback. Audio begins near the live edge and uses bounded in-memory buffering without persistent media caching. Unsupported HLS timelines do not expose a DVR window.
 		</member>

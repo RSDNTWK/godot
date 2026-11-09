@@ -27,6 +27,7 @@ class FFmpegFileIO {
 	uint64_t absolute_deadline = 0;
 	Ref<FFmpegDVRWindow> dvr;
 	bool dvr_primary = true;
+	bool allow_http = false;
 #endif
 
 	static int interrupt(void *p_opaque) {
@@ -76,7 +77,22 @@ class FFmpegFileIO {
 	}
 
 public:
+	String get_remote_url() const {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
+		return remote ? remote->get_url() : String();
+#else
+		return String();
+#endif
+	}
+	bool is_http_transport() const {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		return remote && remote->is_http_transport();
+#else
+		return false;
+#endif
+	}
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+	void set_allow_http(bool p_enabled) { allow_http = p_enabled; }
 	void set_dvr(const Ref<FFmpegDVRWindow> &p_dvr, bool p_primary) {
 		dvr = p_dvr;
 		dvr_primary = p_primary;
@@ -114,10 +130,11 @@ public:
 		// Keep FFmpeg protocol handling for remote URLs.
 		if (is_remote(p_path)) {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
-			if (!MediaHTTP::valid_url(p_path) || !remote_cancel) {
+			if (!MediaHTTP::valid_url(p_path, allow_http) || !remote_cancel) {
 				return AVERROR(EACCES);
 			}
 			remote = memnew(FFmpegRemoteIO(remote_cancel, remote_headers, remote_stop, absolute_deadline));
+			remote->set_allow_http(allow_http);
 			remote->set_dvr(dvr, dvr_primary);
 			return remote->open_format(r_format, p_path, p_input_format);
 #else

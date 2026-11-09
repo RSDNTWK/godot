@@ -47,6 +47,7 @@ struct ScriptedReply {
 	int64_t length = 8;
 	String range;
 	String body;
+	PackedByteArray binary_body;
 	String validator = "\"version-1\"";
 	String location;
 	bool disconnect = false;
@@ -126,6 +127,10 @@ public:
 	PackedByteArray read_response_body_chunk() override {
 		PackedByteArray bytes;
 		if (!sent) {
+			if (!reply.binary_body.is_empty()) {
+				sent = true;
+				return reply.binary_body;
+			}
 			CharString body = reply.body.utf8();
 			bytes.resize(body.length());
 			if (body.length()) {
@@ -410,6 +415,124 @@ TEST_CASE("[MediaStream][NativeStreaming] HTTPS custom ports preserve TLS identi
 		ScriptedFactory factory(fixture);
 		MediaHTTP http;
 		CHECK(http.open("https://8.8.8.8:8443/media") == ERR_UNAUTHORIZED);
+		CHECK(fixture.connections == 1);
+	}
+}
+TEST_CASE("[MediaStream][NativeStreaming][HTTPCompatibility] Cleartext requires explicit admission and HTTPS upgrades cannot downgrade") {
+	SUBCASE("Default rejection happens before a connection") {
+		ScriptedHTTP fixture;
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		CHECK(http.open("http://8.8.8.8/media") == ERR_UNAUTHORIZED);
+		CHECK(fixture.connections == 0);
+	}
+	SUBCASE("Opt-in preserves ports, relative URLs and seek ranges") {
+		ScriptedHTTP fixture;
+		ScriptedReply reply;
+		reply.code = 206;
+		reply.range = "bytes 0-7/8";
+		reply.body = "abcdefgh";
+		fixture.replies.push_back(reply);
+		reply.range = "bytes 4-7/8";
+		reply.length = 4;
+		reply.body = "efgh";
+		fixture.replies.push_back(reply);
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		http.set_allow_http(true);
+		REQUIRE(http.open("http://8.8.8.8:8080/a/media") == OK);
+		uint8_t buffer[8];
+		CHECK(http.read(buffer, 3) == 3);
+		REQUIRE(http.seek(4) == OK);
+		CHECK(http.read(buffer, 4) == 4);
+		CHECK(memcmp(buffer, "efgh", 4) == 0);
+		REQUIRE(fixture.requests.size() == 2);
+		CHECK(fixture.ports[0] == 8080);
+		CHECK(fixture.requests[0].has("Host: 8.8.8.8:8080"));
+		CHECK(fixture.requests[1].has("Range: bytes=4-"));
+		CHECK(fixture.tls_names[0].is_empty());
+		CHECK(MediaHTTP::resolve_url("http://8.8.8.8:8080/a/media", "segment.ts") == "http://8.8.8.8:8080/a/segment.ts");
+		CHECK(MediaHTTP::resolve_url("http://8.8.8.8/a/media", "//1.1.1.1/segment.ts") == "http://1.1.1.1/segment.ts");
+	}
+	SUBCASE("Interrupted HTTP bodies resume with the original entity validator") {
+		ScriptedHTTP fixture;
+		ScriptedReply reply;
+		reply.body = "abc";
+		reply.disconnect = true;
+		fixture.replies.push_back(reply);
+		reply.code = 206;
+		reply.range = "bytes 3-7/8";
+		reply.body = "defgh";
+		reply.length = 5;
+		reply.disconnect = false;
+		fixture.replies.push_back(reply);
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		http.set_allow_http(true);
+		REQUIRE(http.open("http://8.8.8.8/media") == OK);
+		uint8_t buffer[8];
+		CHECK(http.read(buffer, 3) == 3);
+		CHECK(http.read(buffer + 3, 5) == 5);
+		CHECK(memcmp(buffer, "abcdefgh", 8) == 0);
+		REQUIRE(fixture.requests.size() == 2);
+		CHECK(fixture.requests[1].has("If-Range: \"version-1\""));
+	}
+	SUBCASE("HTTP to HTTPS enables verified TLS and changes origin") {
+		ScriptedHTTP fixture;
+		ScriptedReply redirect;
+		redirect.code = 302;
+		redirect.location = "https://8.8.8.8/media";
+		fixture.replies.push_back(redirect);
+		fixture.replies.push_back(ScriptedReply());
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		http.set_allow_http(true);
+		Dictionary headers;
+		headers["X-YouTube-Client-Name"] = "test-client";
+		REQUIRE(http.open("http://8.8.8.8/media", headers) == OK);
+		REQUIRE(fixture.connections == 2);
+		CHECK(fixture.ports[0] == 80);
+		CHECK(fixture.ports[1] == 443);
+		CHECK_FALSE(fixture.unsafe_tls[1]);
+		CHECK(fixture.tls_names[1] == "8.8.8.8");
+		CHECK_FALSE(fixture.requests[1].has("X-YouTube-Client-Name: test-client"));
+	}
+	SUBCASE("HTTPS cannot redirect to HTTP even with opt-in") {
+		ScriptedHTTP fixture;
+		ScriptedReply redirect;
+		redirect.code = 302;
+		redirect.location = "http://8.8.8.8/media";
+		fixture.replies.push_back(redirect);
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		http.set_allow_http(true);
+		CHECK(http.open("https://8.8.8.8/media") == ERR_UNAUTHORIZED);
+		CHECK(fixture.connections == 1);
+	}
+	SUBCASE("An upgraded HTTP chain cannot return to HTTP") {
+		ScriptedHTTP fixture;
+		ScriptedReply redirect;
+		redirect.code = 302;
+		redirect.location = "https://8.8.8.8/media";
+		fixture.replies.push_back(redirect);
+		redirect.location = "http://8.8.8.8/media";
+		fixture.replies.push_back(redirect);
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		http.set_allow_http(true);
+		CHECK(http.open("http://8.8.8.8/media") == ERR_UNAUTHORIZED);
+		CHECK(fixture.connections == 2);
+	}
+	SUBCASE("Cleartext does not admit a private redirect") {
+		ScriptedHTTP fixture;
+		ScriptedReply redirect;
+		redirect.code = 302;
+		redirect.location = "http://127.0.0.1/media";
+		fixture.replies.push_back(redirect);
+		ScriptedFactory factory(fixture);
+		MediaHTTP http;
+		http.set_allow_http(true);
+		CHECK(http.open("http://8.8.8.8/media") == ERR_UNAUTHORIZED);
 		CHECK(fixture.connections == 1);
 	}
 }

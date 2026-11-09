@@ -42,6 +42,8 @@ extern "C" {
 }
 
 class FFmpegRemoteIO {
+	// Unit tests exercise FFmpeg's real secondary-open callback without sockets.
+	friend struct FFmpegRemoteIOTestAccess;
 	MediaHTTP http;
 	const SafeFlag *cancel;
 	const SafeFlag *stop;
@@ -118,6 +120,9 @@ class FFmpegRemoteIO {
 		}
 		FFmpegRemoteIO *child = memnew(FFmpegRemoteIO(parent->cancel, parent->headers, parent->stop, parent->absolute_deadline));
 		String url = MediaHTTP::resolve_url(parent->http.get_url(), String::utf8(p_url));
+		// Secondary media may use HTTP only while its actual parent is HTTP.
+		// An HTTPS manifest cannot downgrade segments, keys or nested playlists.
+		child->set_allow_http(parent->http.get_url().begins_with("http://"));
 		if (parent->dvr.is_valid() && (url == parent->manifest_url || url == parent->http.get_url())) {
 			child->dvr = parent->dvr;
 			child->manifest_url = parent->manifest_url;
@@ -140,6 +145,9 @@ class FFmpegRemoteIO {
 
 public:
 	FFmpegRemoteIO(const SafeFlag *p_cancel, const Dictionary &p_headers, const SafeFlag *p_stop = nullptr, uint64_t p_absolute_deadline = 0) : http(p_cancel, p_stop, p_absolute_deadline), cancel(p_cancel), stop(p_stop), absolute_deadline(p_absolute_deadline), headers(p_headers) {}
+	void set_allow_http(bool p_enabled) { http.set_allow_http(p_enabled); }
+	bool is_http_transport() const { return http.get_url().begins_with("http://"); }
+	String get_url() const { return http.get_url(); }
 	void set_dvr(const Ref<FFmpegDVRWindow> &p_dvr, bool p_primary) {
 		dvr = p_dvr;
 		primary = p_primary;
@@ -213,7 +221,7 @@ public:
 		(*r_format)->io_close2 = close_secondary;
 		(*r_format)->interrupt_callback = { interrupt, this };
 		// FFmpeg's protocols never open a socket or local file on this path.
-		(*r_format)->protocol_whitelist = av_strdup("https");
+		(*r_format)->protocol_whitelist = av_strdup(http.get_url().begins_with("http://") ? "http,https" : "https");
 		if (!(*r_format)->protocol_whitelist) {
 			avformat_free_context(*r_format);
 			*r_format = nullptr;

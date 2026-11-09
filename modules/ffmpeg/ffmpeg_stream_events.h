@@ -31,6 +31,30 @@
 #pragma once
 
 #include "core/object/class_db.h"
+#include "core/object/ref_counted.h"
+#include "core/templates/safe_refcount.h"
+
+// A fence owns no playback reference. It becomes ready only after every
+// derived backend member (including worker owners) has been destroyed.
+class FFmpegRetirementFence : public RefCounted {
+	GDCLASS(FFmpegRetirementFence, RefCounted);
+	SafeFlag retired;
+
+protected:
+	static void _bind_methods() {
+		ClassDB::bind_method(D_METHOD("is_retired"), &FFmpegRetirementFence::is_retired);
+	}
+
+public:
+	bool is_retired() const { return retired.is_set(); }
+	void mark_retired() { retired.set(); }
+};
+
+struct FFmpegRetirementGuard {
+	Ref<FFmpegRetirementFence> fence;
+	FFmpegRetirementGuard() { fence.instantiate(); }
+	~FFmpegRetirementGuard() { fence->mark_retired(); }
+};
 
 struct FFmpegStreamEvents {
 	bool ready = false;
@@ -44,6 +68,7 @@ struct FFmpegStreamEvents {
 // Notifications are delivered on the main thread, and commands superseded by a
 // later seek/stop cannot deliver stale completion events to the application.
 #define FFMPEG_STREAM_EVENTS(m_class, m_override) \
+	Ref<FFmpegRetirementFence> get_retirement_fence() const { return retirement.fence; } \
 	FFmpegStreamEvents events; \
 	FFmpegDVRTimeline dvr; \
 	Dictionary stream_metadata; \
@@ -142,6 +167,7 @@ struct FFmpegStreamEvents {
 		call_deferred(SNAME("_stream_event"), int64_t(p_generation), p_kind, p_position); \
 	} \
 	static void _bind_methods() { \
+		ClassDB::bind_method(D_METHOD("get_retirement_fence"), &m_class::get_retirement_fence); \
 		ClassDB::bind_method(D_METHOD("get_stream_metadata"), &m_class::get_stream_metadata); \
 		ClassDB::bind_method(D_METHOD("get_dvr_window"), &m_class::get_dvr_window); \
 		ClassDB::bind_method(D_METHOD("seek_to_live"), &m_class::seek_to_live); \

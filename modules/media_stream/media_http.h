@@ -50,21 +50,23 @@ class MediaHTTP {
 	bool ended = false;
 	bool failed = false;
 	bool resumable = false;
+	bool allow_http = false;
 	String entity_validator;
 	uint64_t deadline = 0;
 	uint64_t absolute_deadline = 0;
 	int response_status = 0;
 	int64_t range_chunk_bytes = 0;
 	bool interrupted() const;
-	Error connect(const String &p_host, int p_port);
+	Error connect(const String &p_host, int p_port, bool p_tls);
 	Error open_internal(const String &p_url, const Dictionary &p_headers, int64_t p_offset, const String &p_post, const String &p_if_range, uint64_t p_deadline);
 	Error resume();
 
 public:
 	explicit MediaHTTP(const SafeFlag *p_cancel = nullptr, const SafeFlag *p_secondary_cancel = nullptr, uint64_t p_absolute_deadline = 0) : cancel(p_cancel), secondary_cancel(p_secondary_cancel), absolute_deadline(p_absolute_deadline) {}
 	static bool public_address(const IPAddress &p_address);
-	static bool valid_url(const String &p_url);
+	static bool valid_url(const String &p_url, bool p_allow_http = false);
 	static String resolve_url(const String &p_base, const String &p_target);
+	void set_allow_http(bool p_enabled) { allow_http = p_enabled; }
 	// Optional bounded ranges for media CDNs which throttle open-ended GETs.
 	// Zero preserves ordinary request behavior. Redirect/entity validation stays.
 	void set_range_chunk_size(int64_t p_bytes);

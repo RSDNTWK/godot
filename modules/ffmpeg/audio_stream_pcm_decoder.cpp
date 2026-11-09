@@ -46,7 +46,7 @@
 #endif
 
 void AudioStreamPCMDecoder::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("decode", "source", "mix_rate", "max_pcm_bytes", "timeout_msec", "http_headers"), &AudioStreamPCMDecoder::decode, DEFVAL(0), DEFVAL(128 * 1024 * 1024), DEFVAL(60000), DEFVAL(Dictionary()));
+	ClassDB::bind_method(D_METHOD("decode", "source", "mix_rate", "max_pcm_bytes", "timeout_msec", "http_headers", "allow_http"), &AudioStreamPCMDecoder::decode, DEFVAL(0), DEFVAL(128 * 1024 * 1024), DEFVAL(60000), DEFVAL(Dictionary()), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("cancel"), &AudioStreamPCMDecoder::cancel);
 	ClassDB::bind_method(D_METHOD("is_decoding"), &AudioStreamPCMDecoder::is_decoding);
 	ClassDB::bind_method(D_METHOD("get_request_id"), &AudioStreamPCMDecoder::get_request_id);
@@ -66,7 +66,7 @@ Dictionary AudioStreamPCMDecoder::get_capabilities(const String &p_source) {
 	return capabilities;
 }
 
-Error AudioStreamPCMDecoder::decode(const String &p_source, int p_mix_rate, int64_t p_max_pcm_bytes, int p_timeout_msec, const Dictionary &p_http_headers) {
+Error AudioStreamPCMDecoder::decode(const String &p_source, int p_mix_rate, int64_t p_max_pcm_bytes, int p_timeout_msec, const Dictionary &p_http_headers, bool p_allow_http) {
 	ERR_FAIL_COND_V(!Thread::is_main_thread(), ERR_INVALID_PARAMETER);
 	if (busy) {
 		return ERR_BUSY;
@@ -79,10 +79,11 @@ Error AudioStreamPCMDecoder::decode(const String &p_source, int p_mix_rate, int6
 	if (p_source.is_empty() || rate < 8000 || rate > 192000 || p_max_pcm_bytes < 4 || p_max_pcm_bytes > 128 * 1024 * 1024 || p_timeout_msec < 1 || p_timeout_msec > 60000) {
 		return ERR_INVALID_PARAMETER;
 	}
-	if (p_source.contains("://") && !p_source.begins_with("res://") && !p_source.begins_with("user://") && !MediaHTTP::valid_url(p_source)) {
+	if (p_source.contains("://") && !p_source.begins_with("res://") && !p_source.begins_with("user://") && !MediaHTTP::valid_url(p_source, p_allow_http)) {
 		return ERR_INVALID_PARAMETER;
 	}
 	source = p_source;
+	allow_http = p_allow_http;
 	headers = p_http_headers.duplicate(true);
 	mix_rate = rate;
 	max_pcm_bytes = p_max_pcm_bytes - p_max_pcm_bytes % 4;
@@ -141,7 +142,7 @@ void AudioStreamPCMDecoder::_worker(void *p_self) {
 	}
 #endif
 	if (self->result_error == OK) {
-		self->result_error = ffmpeg_decode_audio_pcm(resolved, transport_headers, self->interrupted, self->mix_rate, self->max_pcm_bytes, self->deadline, self->result);
+		self->result_error = ffmpeg_decode_audio_pcm(resolved, transport_headers, self->interrupted, self->mix_rate, self->max_pcm_bytes, self->deadline, self->result, self->allow_http);
 		if (self->result_error == OK && !resolved_metadata.is_empty()) {
 			Dictionary metadata = self->result.get("metadata", Dictionary());
 			metadata["title"] = FFmpegMediaMetadata::title(resolved_metadata.get("title", String()));

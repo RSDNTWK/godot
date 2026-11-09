@@ -47,6 +47,7 @@ class AudioStreamPCMDecoder : public RefCounted {
 	ObjectID tree_id;
 	SafeFlag interrupted;
 	bool busy = false;
+	bool allow_http = false;
 	bool user_cancelled = false;
 	int64_t request_id = 0;
 	String source;
@@ -70,7 +71,7 @@ protected:
 	static void _bind_methods();
 
 public:
-	Error decode(const String &p_source, int p_mix_rate = 0, int64_t p_max_pcm_bytes = 128 * 1024 * 1024, int p_timeout_msec = 60000, const Dictionary &p_http_headers = Dictionary());
+	Error decode(const String &p_source, int p_mix_rate = 0, int64_t p_max_pcm_bytes = 128 * 1024 * 1024, int p_timeout_msec = 60000, const Dictionary &p_http_headers = Dictionary(), bool p_allow_http = false);
 	void cancel();
 	bool is_decoding() const { return busy; }
 	int64_t get_request_id() const { return request_id; }
@@ -80,5 +81,5 @@ public:
 
 // Synchronous internal decoder: caller must run this on a worker. It returns
 // only actual decoded samples and never publishes a truncated or padded WAV.
-Error ffmpeg_decode_audio_pcm(const String &p_source, const Dictionary &p_headers, const SafeFlag &p_cancel, int p_mix_rate, int64_t p_max_pcm_bytes, uint64_t p_deadline, Dictionary &r_result);
+Error ffmpeg_decode_audio_pcm(const String &p_source, const Dictionary &p_headers, const SafeFlag &p_cancel, int p_mix_rate, int64_t p_max_pcm_bytes, uint64_t p_deadline, Dictionary &r_result, bool p_allow_http = false);
 #endif

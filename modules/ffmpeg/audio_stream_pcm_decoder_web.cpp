@@ -45,7 +45,7 @@
 #include "servers/audio/audio_server.h"
 
 void AudioStreamPCMDecoder::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("decode", "source", "mix_rate", "max_pcm_bytes", "timeout_msec", "http_headers"), &AudioStreamPCMDecoder::decode, DEFVAL(0), DEFVAL(128 * 1024 * 1024), DEFVAL(60000), DEFVAL(Dictionary()));
+	ClassDB::bind_method(D_METHOD("decode", "source", "mix_rate", "max_pcm_bytes", "timeout_msec", "http_headers", "allow_http"), &AudioStreamPCMDecoder::decode, DEFVAL(0), DEFVAL(128 * 1024 * 1024), DEFVAL(60000), DEFVAL(Dictionary()), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("cancel"), &AudioStreamPCMDecoder::cancel);
 	ClassDB::bind_method(D_METHOD("is_decoding"), &AudioStreamPCMDecoder::is_decoding);
 	ClassDB::bind_method(D_METHOD("get_request_id"), &AudioStreamPCMDecoder::get_request_id);
@@ -73,7 +73,7 @@ Dictionary AudioStreamPCMDecoder::get_capabilities(const String &p_source) {
 	return capabilities;
 }
 
-Error AudioStreamPCMDecoder::decode(const String &p_source, int p_mix_rate, int64_t p_max_pcm_bytes, int p_timeout_msec, const Dictionary &p_http_headers) {
+Error AudioStreamPCMDecoder::decode(const String &p_source, int p_mix_rate, int64_t p_max_pcm_bytes, int p_timeout_msec, const Dictionary &p_http_headers, bool p_allow_http) {
 	ERR_FAIL_COND_V(!Thread::is_main_thread(), ERR_INVALID_PARAMETER);
 	if (busy) {
 		return ERR_BUSY;

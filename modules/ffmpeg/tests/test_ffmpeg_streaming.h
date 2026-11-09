@@ -61,8 +61,22 @@
 #include "modules/ffmpeg/video_stream_media.h"
 #include "modules/media_stream/media_http.h"
 #include "modules/media_stream/tests/media_stream_test_utils.h"
+#include "modules/media_stream/tests/test_media_http.h"
 
 #include <cstring>
+
+struct FFmpegRemoteIOTestAccess {
+	static int open_secondary(FFmpegRemoteIO &p_parent, const String &p_url) {
+		AVFormatContext context = {};
+		context.opaque = &p_parent;
+		AVIOContext *child = nullptr;
+		const int result = FFmpegRemoteIO::open_secondary(&context, &child, p_url.utf8().get_data(), AVIO_FLAG_READ, nullptr);
+		if (child) {
+			FFmpegRemoteIO::close_secondary(&context, child);
+		}
+		return result;
+	}
+};
 
 Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel = nullptr, double p_seek_from = 0.0);
 Dictionary ffmpeg_test_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double p_fps, const SafeFlag &p_cancel,
@@ -71,6 +85,40 @@ bool ffmpeg_test_video_horizon_waiting(bool p_finite_video, double p_audio_posit
 bool ffmpeg_test_packet_source_starved(bool p_waiting, int p_queued_pcm, int64_t p_accepted_frames, double p_origin, double p_audible_position, int p_mix_rate, bool p_has_clock = true, bool p_has_audio = true);
 
 namespace TestNativeStreaming {
+
+TEST_CASE("[NativeStreaming][HTTPCompatibility] Secondary FFmpeg requests retain their actual parent scheme policy") {
+	for (bool initial_http : { false, true }) {
+		for (bool upgrade : { false, true }) {
+			TestMediaHTTP::ScriptedHTTP fixture;
+			TestMediaHTTP::ScriptedReply reply;
+			if (initial_http && upgrade) {
+				reply.code = 302;
+				reply.location = "https://8.8.8.8/master.m3u8";
+				fixture.replies.push_back(reply);
+				reply.code = 200;
+				reply.location = String();
+			}
+			fixture.replies.push_back(reply);
+			fixture.replies.push_back(reply);
+			TestMediaHTTP::ScriptedFactory factory(fixture);
+			SafeFlag cancel;
+			FFmpegRemoteIO parent(&cancel, Dictionary());
+			parent.set_allow_http(true);
+			REQUIRE(parent.open(String(initial_http ? "http://" : "https://") + "8.8.8.8/master.m3u8") == 0);
+			const int before = fixture.connections;
+			const int result = FFmpegRemoteIOTestAccess::open_secondary(parent, "http://8.8.8.8/segment.ts");
+			if (initial_http && !upgrade) {
+				CHECK(result == 0);
+				CHECK(fixture.connections == before + 1);
+				CHECK(parent.is_http_transport());
+			} else {
+				CHECK(result < 0);
+				CHECK(fixture.connections == before);
+				CHECK_FALSE(parent.is_http_transport());
+			}
+		}
+	}
+}
 
 TEST_CASE("[NativeStreaming] PCM and native media accept valid HTTPS custom ports without admitting invalid URL forms") {
 	for (const String &url : { String("https://example.com/video"), String("https://example.com:443/video"), String("https://example.com:8443/video"), String("https://example.com:65535/video"), String("https://[2606:4700:4700::1111]:9443/video") }) {
@@ -1781,6 +1829,61 @@ static void preparation_frame() {
 	SceneTree::get_singleton()->emit_signal(SNAME("process_frame"));
 	MessageQueue::get_singleton()->flush();
 	OS::get_singleton()->delay_usec(1000);
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][BackendRetirement] Stopped native playback retains an ownership fence until its last reference retires") {
+	ManualAudioDriver audio;
+	TestMediaHTTP::ScriptedHTTP fixture;
+	TestMediaHTTP::ScriptedReply reply;
+	// The real native worker/demuxer uses the scripted HTTP factory, not sockets.
+	reply.binary_body = packet_test_wave(48000);
+	reply.length = reply.binary_body.size();
+	fixture.replies.push_back(reply);
+	TestMediaHTTP::ScriptedFactory factory(fixture);
+	MediaPreparationOwner owner;
+	MediaStreamPlayer *player = owner.player;
+	SceneTree::get_singleton()->get_root()->add_child(player);
+	Dictionary options;
+	options["autoplay"] = false;
+	REQUIRE(player->open("https://8.8.8.8/fixture.wav", options) == OK);
+	Ref<AudioStreamPlayback> retained;
+	for (int i = 0; i < player->get_child_count(true); i++) {
+		AudioStreamPlayer *child = Object::cast_to<AudioStreamPlayer>(player->get_child(i, true));
+		if (child && child->has_stream_playback()) {
+			retained = child->get_stream_playback();
+		}
+	}
+	REQUIRE(retained.is_valid());
+	const int64_t opening = player->get_generation();
+	const int64_t backend_id = int64_t(uint64_t(retained->get_instance_id()));
+	CHECK_FALSE(player->is_backend_retiring());
+	const uint64_t began = OS::get_singleton()->get_ticks_usec();
+	player->stop();
+	CHECK(OS::get_singleton()->get_ticks_usec() - began < 250000);
+	CHECK_FALSE(player->is_preparing());
+	REQUIRE(player->is_backend_retiring());
+	Dictionary state = player->get_backend_retirement_state();
+	REQUIRE(int(state["retiring_count"]) == 1);
+	Dictionary identity = Array(state["retiring"])[0];
+	CHECK(int64_t(identity["generation"]) == opening);
+	CHECK(int64_t(identity["backend_instance_id"]) == backend_id);
+	CHECK(String(identity["source"]) == "https://8.8.8.8/fixture.wav");
+	int32_t output[512] = {};
+	for (int i = 0; i < 4; i++) {
+		audio.driver->mix_audio(256, output);
+		AudioServer::get_singleton()->update();
+		preparation_frame();
+	}
+	CHECK(player->is_backend_retiring()); // External ownership is still real.
+	retained.unref();
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+	while (player->is_backend_retiring() && OS::get_singleton()->get_ticks_usec() < deadline) {
+		audio.driver->mix_audio(256, output);
+		AudioServer::get_singleton()->update();
+		preparation_frame();
+	}
+	CHECK_FALSE(player->is_backend_retiring());
+	CHECK(int(player->get_backend_retirement_state()["retiring_count"]) == 0);
 }
 
 TEST_CASE("[SceneTree][NativeStreaming][PCMPreparation] Canceled PCM retains its identity and rejects replacement until frame collection") {
