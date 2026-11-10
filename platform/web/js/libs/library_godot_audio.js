@@ -1347,12 +1347,18 @@ const _GodotAudio = {
 
 		close_async: function (resolve, reject) {
 			const ctx = GodotAudio.ctx;
-			GodotAudio.ctx = null;
 			// Audio was not initialized.
 			if (!ctx) {
 				resolve();
 				return;
 			}
+			// Retire sample voices before invalidating their context. Native
+			// shutdown can still request pauses after this async hook runs.
+			for (const sampleNode of GodotAudio.sampleNodes.values()) {
+				sampleNode.stop(false);
+			}
+			GodotAudio.audioPositionWorkletNodes.length = 0;
+			GodotAudio.ctx = null;
 			// Remove latency callback
 			if (GodotAudio.interval) {
 				clearInterval(GodotAudio.interval);
