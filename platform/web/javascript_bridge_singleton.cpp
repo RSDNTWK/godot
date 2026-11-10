@@ -358,7 +358,7 @@ Variant JavaScriptBridge::eval(const String &p_code, bool p_use_global_exec_cont
 
 	switch (return_type) {
 		case Variant::BOOL:
-			return js_data.b;
+			return js_data.b != 0;
 		case Variant::FLOAT:
 			return js_data.d;
 		case Variant::STRING: {
