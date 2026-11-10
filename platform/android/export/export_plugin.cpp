@@ -1222,7 +1222,7 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 	// Leaving the unused types commented because looking these constants up
 	// again later would be annoying
 	// const int CHUNK_AXML_FILE = 0x00080003;
-	// const int CHUNK_RESOURCEIDS = 0x00080180;
+	const int CHUNK_RESOURCEIDS = 0x00080180;
 	const int CHUNK_STRINGS = 0x001C0001;
 	// const int CHUNK_XML_END_NAMESPACE = 0x00100101;
 	const int CHUNK_XML_END_TAG = 0x00100103;
@@ -1241,6 +1241,10 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 
 	uint32_t string_table_begins = 0;
 	uint32_t string_table_ends = 0;
+	uint32_t resource_ids_offset = 0;
+	int32_t feature_name_attribute = -1;
+	int32_t feature_required_attribute = -1;
+	int32_t feature_version_attribute = -1;
 	Vector<uint8_t> stable_extra;
 
 	String version_name = p_preset->get_version("version/name");
@@ -1312,6 +1316,9 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 
 				string_table_ends = ofs + size;
 
+			} break;
+			case CHUNK_RESOURCEIDS: {
+				resource_ids_offset = ofs;
 			} break;
 			case CHUNK_XML_START_TAG: {
 				int iofs = ofs + 8;
@@ -1440,6 +1447,8 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 						}
 
 						for (int i = 0; i < features.size(); i++) {
+							feature_name_attribute = attr_name_string;
+							feature_required_attribute = attr_required_string;
 							const String &feature_name = features[i].name;
 							bool feature_required = features[i].required;
 							String feature_version = features[i].version;
@@ -1470,6 +1479,8 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 									string_table.push_back("version");
 									attr_version_string = string_table.size() - 1;
 								}
+
+								feature_version_attribute = attr_version_string;
 
 								version_value = string_table.find(feature_version);
 								if (version_value == -1) {
@@ -1516,8 +1527,8 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 							encode_uint32(required_value, &p_manifest.write[ofs + 64]); // raw_value
 							encode_uint16(8, &p_manifest.write[ofs + 68]); // typedvalue_size
 							p_manifest.write[ofs + 70] = 0; // typedvalue_always0
-							p_manifest.write[ofs + 71] = 0x03; // typedvalue_type (string)
-							encode_uint32(required_value, &p_manifest.write[ofs + 72]); // typedvalue reference
+							p_manifest.write[ofs + 71] = 0x12; // typedvalue_type (boolean)
+							encode_uint32(feature_required ? 0xffffffff : 0, &p_manifest.write[ofs + 72]); // typed boolean value
 
 							ofs += 76;
 
@@ -1528,8 +1539,9 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 								encode_uint32(version_value, &p_manifest.write[ofs + 8]); // raw_value
 								encode_uint16(8, &p_manifest.write[ofs + 12]); // typedvalue_size
 								p_manifest.write[ofs + 14] = 0; // typedvalue_always0
-								p_manifest.write[ofs + 15] = 0x03; // typedvalue_type (string)
-								encode_uint32(version_value, &p_manifest.write[ofs + 16]); // typedvalue reference
+								bool hexadecimal_version = feature_version.begins_with("0x") || feature_version.begins_with("0X");
+								p_manifest.write[ofs + 15] = hexadecimal_version ? 0x11 : 0x10; // typedvalue_type (integer)
+								encode_uint32(hexadecimal_version ? feature_version.hex_to_int() : feature_version.to_int(), &p_manifest.write[ofs + 16]); // numeric feature version
 
 								ofs += 20;
 							}
@@ -1744,6 +1756,33 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 	ret.resize(new_stable_end + extra);
 	for (uint32_t i = 0; i < extra; i++) {
 		ret.write[new_stable_end + i] = p_manifest[string_table_ends + i];
+	}
+
+	if (feature_name_attribute >= 0) {
+		// Android resolves framework attributes through this string-indexed resource map.
+		// New string-pool entries need an ID as well as the correctly typed value.
+		uint32_t map_offset = resource_ids_offset ? new_stable_end + resource_ids_offset - string_table_ends : new_stable_end;
+		uint32_t previous_size = resource_ids_offset ? decode_uint32(&ret[map_offset + 4]) : 0;
+		uint32_t previous_count = previous_size ? (previous_size - 8) / 4 : 0;
+		int32_t last_feature_attribute = MAX(feature_name_attribute, MAX(feature_required_attribute, feature_version_attribute));
+		uint32_t count = MAX(previous_count, uint32_t(last_feature_attribute + 1));
+		uint32_t map_size = 8 + count * 4;
+		uint32_t growth = map_size - previous_size;
+		uint32_t previous_end = map_offset + previous_size;
+		uint32_t previous_file_size = ret.size();
+		ret.resize(previous_file_size + growth);
+		uint8_t *data = ret.ptrw();
+		memmove(data + previous_end + growth, data + previous_end, previous_file_size - previous_end);
+		encode_uint32(CHUNK_RESOURCEIDS, data + map_offset);
+		encode_uint32(map_size, data + map_offset + 4);
+		for (uint32_t i = previous_count; i < count; i++) {
+			encode_uint32(0, data + map_offset + 8 + i * 4);
+		}
+		encode_uint32(0x01010003, data + map_offset + 8 + feature_name_attribute * 4); // android:name
+		encode_uint32(0x0101028e, data + map_offset + 8 + feature_required_attribute * 4); // android:required
+		if (feature_version_attribute >= 0) {
+			encode_uint32(0x01010519, data + map_offset + 8 + feature_version_attribute * 4); // android:version
+		}
 	}
 
 	while (ret.size() % 4) {
