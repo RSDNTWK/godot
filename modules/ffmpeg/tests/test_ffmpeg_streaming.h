@@ -33,6 +33,7 @@
 #include "modules/modules_enabled.gen.h"
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 #include "core/io/file_access.h"
+#include "core/crypto/crypto_core.h"
 #include "core/io/json.h"
 #include "core/io/marshalls.h"
 #include "core/object/callable_mp.h"
@@ -66,25 +67,151 @@
 #include <cstring>
 
 struct FFmpegRemoteIOTestAccess {
-	static int open_secondary(FFmpegRemoteIO &p_parent, const String &p_url) {
+	static int64_t seek(FFmpegRemoteIO &p_parent, int64_t p_offset) {
+		return FFmpegRemoteIO::seek(&p_parent, p_offset, SEEK_SET);
+	}
+	static int open_secondary(FFmpegRemoteIO &p_parent, const String &p_url, AVIOContext **r_io = nullptr) {
 		AVFormatContext context = {};
 		context.opaque = &p_parent;
 		AVIOContext *child = nullptr;
 		const int result = FFmpegRemoteIO::open_secondary(&context, &child, p_url.utf8().get_data(), AVIO_FLAG_READ, nullptr);
-		if (child) {
+		if (r_io) {
+			*r_io = child;
+		} else if (child) {
 			FFmpegRemoteIO::close_secondary(&context, child);
 		}
 		return result;
 	}
+	static void close_secondary(AVIOContext *p_io) {
+		FFmpegRemoteIO::close_secondary(nullptr, p_io);
+	}
 };
 
 Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel = nullptr, double p_seek_from = 0.0);
+Ref<AudioStreamPlayback> ffmpeg_test_paired_audio(const Ref<VideoStreamPlayback> &p_playback);
 Dictionary ffmpeg_test_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double p_fps, const SafeFlag &p_cancel,
 		VideoStreamPlayback::AudioPlaybackPositionCallback p_restore_clock = nullptr, void *p_restore_userdata = nullptr);
 bool ffmpeg_test_video_horizon_waiting(bool p_finite_video, double p_audio_position, double p_presentable_position, uint64_t p_without_progress_usec);
 bool ffmpeg_test_packet_source_starved(bool p_waiting, int p_queued_pcm, int64_t p_accepted_frames, double p_origin, double p_audible_position, int p_mix_rate, bool p_has_clock = true, bool p_has_audio = true);
 
 namespace TestNativeStreaming {
+
+TEST_CASE("[Audio][NativeStreaming][TransportErrors] HTTP failures reach audio and video opening messages") {
+	for (int status : { 403, 429, 503 }) {
+		TestMediaHTTP::ScriptedHTTP fixture;
+		TestMediaHTTP::ScriptedReply reply;
+		reply.code = status;
+		fixture.replies.push_back(reply);
+		TestMediaHTTP::ScriptedFactory factory(fixture);
+		SafeFlag cancel;
+		const String source = "https://8.8.8.8/media?private_token=not-for-error-text";
+		String video_error;
+		CHECK(ffmpeg_open_video_on_worker(source, Dictionary(), &cancel, String(), Dictionary(), &video_error).is_null());
+		CHECK(video_error.contains(vformat("HTTP %d", status)));
+		CHECK_FALSE(video_error.contains("private_token"));
+		String audio_error;
+		CHECK(ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, source, Ref<AudioStream>(), Dictionary(), &cancel, nullptr, nullptr, true, false, &audio_error).is_null());
+		CHECK(audio_error.contains(vformat("HTTP %d", status)));
+		CHECK_FALSE(audio_error.contains("private_token"));
+		CHECK(fixture.requests.size() == 2);
+		CHECK_FALSE(fixture.unsafe_tls[0]);
+		CHECK_FALSE(fixture.unsafe_tls[1]);
+	}
+}
+
+TEST_CASE("[NativeStreaming][TransportErrors] Range and secondary failures retain HTTP status until the next successful operation") {
+	TestMediaHTTP::ScriptedHTTP fixture;
+	TestMediaHTTP::ScriptedReply first;
+	first.body = "abcdefgh";
+	fixture.replies.push_back(first);
+	TestMediaHTTP::ScriptedReply limited;
+	limited.code = 429;
+	fixture.replies.push_back(limited);
+	TestMediaHTTP::ScriptedReply last;
+	last.code = 206;
+	last.length = 4;
+	last.range = "bytes 4-7/8";
+	last.body = "efgh";
+	fixture.replies.push_back(last);
+	TestMediaHTTP::ScriptedReply secondary_failure;
+	secondary_failure.code = 503;
+	fixture.replies.push_back(secondary_failure);
+	fixture.replies.push_back(first);
+	TestMediaHTTP::ScriptedFactory factory(fixture);
+	SafeFlag cancel;
+	FFmpegRemoteIO remote(&cancel, Dictionary());
+	REQUIRE(remote.open("https://8.8.8.8/media") == 0);
+	CHECK(remote.get_error_message().is_empty());
+	CHECK(FFmpegRemoteIOTestAccess::seek(remote, 4) == AVERROR(EIO));
+	CHECK(remote.get_error_message().contains("seek"));
+	CHECK(remote.get_error_message().contains("HTTP 429"));
+	CHECK(fixture.requests.size() == 2);
+	CHECK(FFmpegRemoteIOTestAccess::seek(remote, 4) == 4);
+	CHECK(remote.get_error_message().is_empty());
+	CHECK(fixture.requests.size() == 3);
+	CHECK(FFmpegRemoteIOTestAccess::open_secondary(remote, "https://8.8.8.8/segment") == AVERROR(EACCES));
+	CHECK(remote.get_error_message().contains("HTTP 503"));
+	CHECK(FFmpegRemoteIOTestAccess::open_secondary(remote, "https://8.8.8.8/segment") == 0);
+	CHECK(remote.get_error_message().is_empty());
+	CHECK(fixture.requests.size() == 5);
+}
+
+TEST_CASE("[NativeStreaming][TransportErrors] Later child read failures survive child closure and stay isolated from other roots") {
+	TestMediaHTTP::ScriptedHTTP fixture;
+	TestMediaHTTP::ScriptedReply primary;
+	primary.body = "abcdefgh";
+	fixture.replies.push_back(primary);
+	TestMediaHTTP::ScriptedReply segment;
+	segment.body = "abcd";
+	segment.disconnect = true;
+	fixture.replies.push_back(segment);
+	TestMediaHTTP::ScriptedReply limited;
+	limited.code = 429;
+	fixture.replies.push_back(limited);
+	TestMediaHTTP::ScriptedReply recovered;
+	recovered.code = 206;
+	recovered.length = 4;
+	recovered.range = "bytes 4-7/8";
+	recovered.body = "efgh";
+	fixture.replies.push_back(recovered);
+	TestMediaHTTP::ScriptedFactory factory(fixture);
+	SafeFlag cancel;
+	FFmpegRemoteIO remote(&cancel, Dictionary());
+	FFmpegRemoteIO unrelated(&cancel, Dictionary());
+	REQUIRE(remote.open("https://8.8.8.8/media") == 0);
+	AVIOContext *child = nullptr;
+	REQUIRE(FFmpegRemoteIOTestAccess::open_secondary(remote, "https://8.8.8.8/segment", &child) == 0);
+	uint8_t bytes[8];
+	CHECK(avio_read(child, bytes, sizeof(bytes)) == 4);
+	CHECK(remote.get_error_message().contains("HTTP 429"));
+	CHECK(unrelated.get_error_message().is_empty());
+	FFmpegRemoteIOTestAccess::close_secondary(child);
+	CHECK(remote.get_error_message().contains("HTTP 429"));
+	CHECK(FFmpegRemoteIOTestAccess::seek(remote, 4) == 4);
+	CHECK(remote.get_error_message().is_empty());
+	CHECK(fixture.requests.size() == 4);
+}
+
+TEST_CASE("[NativeStreaming][TransportErrors] Failed DVR manifest body reads retain the response status") {
+	TestMediaHTTP::ScriptedHTTP fixture;
+	TestMediaHTTP::ScriptedReply first;
+	first.body = "#EXT";
+	first.disconnect = true;
+	fixture.replies.push_back(first);
+	TestMediaHTTP::ScriptedReply limited;
+	limited.code = 429;
+	fixture.replies.push_back(limited);
+	TestMediaHTTP::ScriptedFactory factory(fixture);
+	SafeFlag cancel;
+	FFmpegRemoteIO remote(&cancel, Dictionary());
+	Ref<FFmpegDVRWindow> window;
+	window.instantiate();
+	remote.set_dvr(window, true);
+	CHECK(remote.open("https://8.8.8.8/playlist.m3u8") == AVERROR(EIO));
+	CHECK(remote.get_error_message().contains("manifest read"));
+	CHECK(remote.get_error_message().contains("HTTP 429"));
+	CHECK(fixture.requests.size() == 2);
+}
 
 TEST_CASE("[NativeStreaming][HTTPCompatibility] Secondary FFmpeg requests retain their actual parent scheme policy") {
 	for (bool initial_http : { false, true }) {
@@ -529,6 +656,96 @@ struct AudioSink {
 };
 
 static Vector<uint8_t> packet_test_wave(int p_rate, int p_frames = 2048);
+
+// Generated offline: one black 16x16 MPEG-2 video frame in MP4, with no audio.
+// Raw input is YUV420P(Y=16,U/V=128), 25fps; ffmpeg -frames:v 1 -c:v mpeg2video -movflags +faststart.
+static Vector<uint8_t> transport_test_video() {
+	static const char encoded[] =
+			"AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAwZtb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAKAABAAABAAAAAAAA"
+			"AAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACMXRy"
+			"YWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAAKAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAA"
+			"AAAAAAAAAEAAAAAAEAAAABAAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAACgAAAAAAAEAAAAAAaltZGlhAAAAIG1kaGQAAAAA"
+			"AAAAAAAAAAAAADIAAAACAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAFUbWluZgAA"
+			"ABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAABFHN0YmwAAACwc3RzZAAAAAAA"
+			"AAABAAAAoG1wNHYAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAEAAQAEgAAABIAAAAAAAAAAEXTGF2YzYzLjEuMTAyIG1wZWcydmlk"
+			"ZW8AAAAAAAAAAAAY//8AAAAsZXNkcwAAAAADgICAGwABAASAgIANYREAAAAAAw1AAAAsiAaAgIABAgAAAApmaWVsAQAAAAAUYnRy"
+			"dAAAAAAAAw1AAAAsiAAAABhzdHRzAAAAAAAAAAEAAAABAAACAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAA"
+			"AAAAAAA5AAAAAQAAABRzdGNvAAAAAAAAAAEAAAMyAAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwA"
+			"AAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2My4xLjEwMgAAAAhmcmVlAAAAQW1kYXQAAAGzAQAQ"
+			"E///4BgAAAG1FIoAAQAAAAABuAAIAEAAAAEAAA//+AAAAbWP//NBgAAAAQET+H0pSIg=";
+	Vector<uint8_t> bytes;
+	bytes.resize(sizeof(encoded));
+	size_t length = 0;
+	if (CryptoCore::b64_decode(bytes.ptrw(), bytes.size(), &length, reinterpret_cast<const uint8_t *>(encoded), sizeof(encoded) - 1) != OK) {
+		return Vector<uint8_t>();
+	}
+	bytes.resize(length);
+	return bytes;
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][TransportErrors] Paired audio opening and prefill failures retain their own HTTP response") {
+	initialize_audio();
+	const Vector<uint8_t> video = transport_test_video();
+	REQUIRE_FALSE(video.is_empty());
+	for (bool prefill : { false, true }) {
+		TestMediaHTTP::ScriptedHTTP fixture;
+		TestMediaHTTP::ScriptedReply primary;
+		primary.length = video.size();
+		primary.binary_body = video;
+		fixture.replies.push_back(primary);
+		if (prefill) {
+			const Vector<uint8_t> wave = packet_test_wave(48000, 240000);
+			TestMediaHTTP::ScriptedReply audio;
+			audio.length = wave.size();
+			// Exceed the bounded three-second stream probe, leaving a valid,
+			// packet-aligned tail which is drained before the prefill check.
+			audio.binary_body.resize(44 + 48 * 4096 * 4);
+			memcpy(audio.binary_body.ptrw(), wave.ptr(), audio.binary_body.size());
+			audio.disconnect = true;
+			fixture.replies.push_back(audio);
+		}
+		TestMediaHTTP::ScriptedReply limited;
+		limited.code = prefill ? 503 : 429;
+		fixture.replies.push_back(limited);
+		TestMediaHTTP::ScriptedFactory factory(fixture);
+		SafeFlag cancel;
+		String error;
+		Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker("https://8.8.8.8/video.mp4", Dictionary(), &cancel, "https://8.8.8.8/audio.wav", Dictionary(), &error);
+		if (prefill) {
+			REQUIRE(playback.is_valid());
+			REQUIRE(fixture.requests.size() == 2);
+			CHECK(fixture.paths[0] == "/video.mp4");
+			CHECK(fixture.paths[1] == "/audio.wav");
+			REQUIRE(error.is_empty());
+			playback->play();
+			Ref<AudioStreamPlayback> audio = ffmpeg_test_paired_audio(playback);
+			REQUIRE(audio.is_valid());
+			AudioFrame samples[1024];
+			int64_t drained = 0;
+			const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 5000000;
+			ERR_PRINT_OFF;
+			while (int(audio->get_parameter(SNAME("stream_error"))) == OK && OS::get_singleton()->get_ticks_usec() < deadline) {
+				drained += MAX(audio->mix(samples, 1.0, 1024), 0);
+			}
+			ERR_PRINT_ON;
+			REQUIRE(drained > 0);
+			REQUIRE(int(audio->get_parameter(SNAME("stream_error"))) != OK);
+			REQUIRE(fixture.requests.size() == 3);
+			CHECK(fixture.paths[2] == "/audio.wav");
+			audio.unref();
+			CHECK_FALSE(ffmpeg_start_video_read_ahead(playback, &error));
+			CHECK(error.contains("audio packet read-ahead"));
+		} else {
+			CHECK(playback.is_null());
+			CHECK(error.contains("paired audio"));
+		}
+		CHECK(error.contains(vformat("HTTP %d", limited.code)));
+		CHECK_FALSE(error.contains("HTTP 200"));
+		CHECK(fixture.requests.size() == (prefill ? 3 : 2));
+		playback.unref();
+	}
+}
+
 
 struct LookaheadSink {
 	Vector<float> samples;
@@ -2402,7 +2619,7 @@ TEST_CASE("[SceneTree][NativeStreaming] Rejected destinations emit errors withou
 		SIGNAL_CHECK_FALSE("seek_completed");
 		Array arguments;
 		arguments.append(int(ERR_CANT_OPEN));
-		arguments.append(is_audio ? "Could not open or seek the audio stream." : "Could not open the video media container (FFmpeg error -13).");
+		arguments.append(vformat("Could not open the %s media container (FFmpeg error -13). Media transport open failed (error 4).", is_audio ? "audio" : "video"));
 		Array errors;
 		errors.append(arguments);
 		SIGNAL_CHECK("error", errors);

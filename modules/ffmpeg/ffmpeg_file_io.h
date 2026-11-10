@@ -102,6 +102,13 @@ public:
 	static bool is_remote(const String &p_path) {
 		return p_path.contains("://") && !p_path.begins_with("res://") && !p_path.begins_with("user://") && !p_path.begins_with("uid://");
 	}
+	String get_error_message() const {
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		return remote ? remote->get_error_message() : String();
+#else
+		return String();
+#endif
+	}
 	void set_remote_options(const Dictionary &p_headers, const SafeFlag *p_cancel, const SafeFlag *p_stop = nullptr, uint64_t p_absolute_deadline = 0) {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		remote_headers = p_headers;

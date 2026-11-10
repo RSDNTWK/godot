@@ -328,7 +328,7 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 						window->requested_position = !go_live && anchor < 0 ? from : -1;
 						window->required = anchor >= 0;
 					}
-					playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, resolved_url, Ref<AudioStream>(), resolved_headers, &interrupt, &duration, window.ptr(), true, allow_http);
+					playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, resolved_url, Ref<AudioStream>(), resolved_headers, &interrupt, &duration, window.ptr(), true, allow_http, &message);
 				}
 				const bool dvr_open = window.is_valid() && bool(window->snapshot().get("available", false));
 				current = requested;
@@ -402,7 +402,10 @@ class FFmpegAsyncAudio : public AudioStreamPlaybackResampled {
 					if (code != OK) {
 						error = true;
 						events.error = ERR_CONNECTION_ERROR;
-						events.message = "Audio stream reading/decoding failed.";
+						events.message = playback->get_parameter(SNAME("_ffmpeg_error_message"));
+						if (events.message.is_empty()) {
+							events.message = "Audio stream reading/decoding failed.";
+						}
 					}
 				}
 			}
@@ -927,6 +930,10 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				}
 				if (failed && message.is_empty() && playback.is_valid()) {
 					message = vformat("Could not start or seek the paired media at %.3f seconds (error %d; prepared %.3f seconds).", from, int(playback->get(SNAME("stream_error"))), playback->get_playback_position());
+					const String detail = playback->get(SNAME("_ffmpeg_error_message"));
+					if (!detail.is_empty()) {
+						message += " " + detail;
+					}
 				}
 				if (failed && !quality_backup.is_empty() && !interrupt.is_set()) {
 					// The lower rung could disappear or fail to open. Restore the

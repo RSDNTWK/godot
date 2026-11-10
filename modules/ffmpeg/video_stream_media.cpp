@@ -144,6 +144,10 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	bool _open_failed(String *r_error, const String &p_message) {
 		if (r_error) {
 			*r_error = p_message;
+			const String transport_error = file_io.get_error_message();
+			if (!transport_error.is_empty()) {
+				*r_error += " " + transport_error;
+			}
 		}
 		close();
 		return false;
@@ -577,7 +581,8 @@ public:
 			return true;
 		}
 		if (p_name == SNAME("_ffmpeg_error_message")) {
-			r_result = stream_error_message;
+			const String transport_error = file_io.get_error_message();
+			r_result = stream_error_message + (transport_error.is_empty() ? String() : " " + transport_error);
 			return true;
 		}
 		if (p_name == SNAME("_ffmpeg_video_lateness")) {
@@ -747,9 +752,10 @@ public:
 		// that input upgraded to HTTPS, paired audio cannot reopen via HTTP.
 		const String effective_primary = file_io.get_remote_url();
 		const String audio_source = p_audio_file.is_empty() ? (effective_primary.is_empty() ? p_path : effective_primary) : p_audio_file;
-		audio_playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, audio_source, Ref<AudioStream>(), p_audio_file.is_empty() ? network_headers : p_audio_headers, network_cancel, nullptr, p_dvr, false, p_allow_http && file_io.is_http_transport());
+		String audio_error;
+		audio_playback = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, audio_source, Ref<AudioStream>(), p_audio_file.is_empty() ? network_headers : p_audio_headers, network_cancel, nullptr, p_dvr, false, p_allow_http && file_io.is_http_transport(), &audio_error);
 		if (!p_audio_file.is_empty() && audio_playback.is_null()) {
-			return _open_failed(r_error, "Could not open the paired audio input.");
+			return _open_failed(r_error, "Could not open the paired audio input. " + audio_error);
 		}
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		if (p_dvr && bool(p_dvr->snapshot().get("available", false)) && (audio_playback.is_null() || !live_hls || !bool(audio_playback->get_parameter(SNAME("_ffmpeg_live_hls"))))) {
@@ -852,7 +858,7 @@ public:
 				return _open_failed(r_error, vformat("Remote video packet read-ahead ended before buffering (FFmpeg error %d).", packet_reader.get_terminal_error()));
 			}
 			if (audio_read_ahead && (int(audio_playback->get_parameter(SNAME("stream_error"))) != OK || (!audio_ready && int(audio_playback->get_parameter(SNAME("_ffmpeg_read_ahead_error"))) < 0))) {
-				return _open_failed(r_error, "Remote audio packet read-ahead failed before buffering.");
+				return _open_failed(r_error, "Remote audio packet read-ahead failed before buffering. " + String(audio_playback->get_parameter(SNAME("_ffmpeg_error_message"))));
 			}
 			if (OS::get_singleton()->get_ticks_usec() >= deadline) {
 				return _open_failed(r_error, "Timed out buffering remote video/audio packets.");
@@ -1417,6 +1423,9 @@ public:
 		}
 	}
 	Ref<Texture2D> get_texture() const override { return texture; }
+#ifdef FFMPEG_TESTS_ENABLED
+	Ref<AudioStreamPlayback> get_test_audio_playback() const { return audio_playback; }
+#endif
 	int get_channels() const override { return audio_playback.is_valid() ? 2 : 0; }
 	int get_mix_rate() const override { return audio_playback.is_valid() ? int(AudioServer::get_singleton()->get_mix_rate()) : 0; }
 	void set_audio_playback_position(double p_position) override {
@@ -1467,6 +1476,13 @@ bool ffmpeg_seek_video_on_worker(const Ref<VideoStreamPlayback> &p_playback, dou
 	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
 	return playback.is_valid() && playback->seek_on_worker(p_position);
 }
+
+#ifdef FFMPEG_TESTS_ENABLED
+Ref<AudioStreamPlayback> ffmpeg_test_paired_audio(const Ref<VideoStreamPlayback> &p_playback) {
+	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
+	return playback.is_valid() ? playback->get_test_audio_playback() : Ref<AudioStreamPlayback>();
+}
+#endif
 
 bool ffmpeg_can_reuse_video_seek(const Ref<VideoStreamPlayback> &p_playback) {
 	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;

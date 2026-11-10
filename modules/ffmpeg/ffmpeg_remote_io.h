@@ -32,9 +32,12 @@
 
 #include "ffmpeg_dvr.h"
 
+#include "core/os/mutex.h"
 #include "core/os/os.h"
 
 #include "modules/media_stream/media_http.h"
+
+#include <memory>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -59,6 +62,21 @@ class FFmpegRemoteIO {
 	int64_t manifest_position = 0;
 	double input_start = -1;
 	int64_t sequence_floor = -1;
+	struct TransportErrorContext {
+		Mutex mutex;
+		String message;
+	};
+	const std::shared_ptr<TransportErrorContext> error_context;
+
+	void set_transport_error(const String &p_operation, Error p_error) {
+		const int status = http.get_response_status();
+		MutexLock lock(error_context->mutex);
+		error_context->message = vformat("Media transport %s failed (error %d%s).", p_operation, int(p_error), status > 0 ? vformat(", HTTP %d", status) : String());
+	}
+	void clear_transport_error() {
+		MutexLock lock(error_context->mutex);
+		error_context->message = String();
+	}
 
 	static int read(void *p_self, uint8_t *p_buffer, int p_size) {
 		FFmpegRemoteIO *self = static_cast<FFmpegRemoteIO *>(p_self);
@@ -75,6 +93,9 @@ class FFmpegRemoteIO {
 			return amount;
 		}
 		int amount = self->http.read(p_buffer, p_size);
+		if (amount < 0) {
+			self->set_transport_error("read", ERR_CONNECTION_ERROR);
+		}
 		return amount > 0 ? amount : (amount == 0 ? AVERROR_EOF : AVERROR(EIO));
 	}
 	static int64_t seek(void *p_self, int64_t p_offset, int p_whence) {
@@ -106,7 +127,13 @@ class FFmpegRemoteIO {
 		if (base < 0 || p_offset < -base || p_offset > INT64_MAX - base) {
 			return AVERROR(EINVAL);
 		}
-		return self->http.seek(base + p_offset) == OK ? base + p_offset : AVERROR(EIO);
+		const Error error = self->http.seek(base + p_offset);
+		if (error != OK) {
+			self->set_transport_error("seek", error);
+			return AVERROR(EIO);
+		}
+		self->clear_transport_error();
+		return base + p_offset;
 	}
 	static int interrupt(void *p_self) {
 		FFmpegRemoteIO *self = static_cast<FFmpegRemoteIO *>(p_self);
@@ -118,7 +145,7 @@ class FFmpegRemoteIO {
 		if (!parent || (p_flags & AVIO_FLAG_WRITE)) {
 			return AVERROR(EACCES);
 		}
-		FFmpegRemoteIO *child = memnew(FFmpegRemoteIO(parent->cancel, parent->headers, parent->stop, parent->absolute_deadline));
+		FFmpegRemoteIO *child = memnew(FFmpegRemoteIO(parent->cancel, parent->headers, parent->stop, parent->absolute_deadline, parent->error_context));
 		String url = MediaHTTP::resolve_url(parent->http.get_url(), String::utf8(p_url));
 		// Secondary media may use HTTP only while its actual parent is HTTP.
 		// An HTTPS manifest cannot downgrade segments, keys or nested playlists.
@@ -135,6 +162,7 @@ class FFmpegRemoteIO {
 			memdelete(child);
 			return error;
 		}
+		parent->clear_transport_error();
 		*r_io = child->io;
 		return 0;
 	}
@@ -144,16 +172,21 @@ class FFmpegRemoteIO {
 	}
 
 public:
-	FFmpegRemoteIO(const SafeFlag *p_cancel, const Dictionary &p_headers, const SafeFlag *p_stop = nullptr, uint64_t p_absolute_deadline = 0) : http(p_cancel, p_stop, p_absolute_deadline), cancel(p_cancel), stop(p_stop), absolute_deadline(p_absolute_deadline), headers(p_headers) {}
+	FFmpegRemoteIO(const SafeFlag *p_cancel, const Dictionary &p_headers, const SafeFlag *p_stop = nullptr, uint64_t p_absolute_deadline = 0, const std::shared_ptr<TransportErrorContext> &p_error_context = {}) : http(p_cancel, p_stop, p_absolute_deadline), cancel(p_cancel), stop(p_stop), absolute_deadline(p_absolute_deadline), headers(p_headers), error_context(p_error_context ? p_error_context : std::make_shared<TransportErrorContext>()) {}
 	void set_allow_http(bool p_enabled) { http.set_allow_http(p_enabled); }
 	bool is_http_transport() const { return http.get_url().begins_with("http://"); }
 	String get_url() const { return http.get_url(); }
+	String get_error_message() const {
+		MutexLock lock(error_context->mutex);
+		return error_context->message;
+	}
 	void set_dvr(const Ref<FFmpegDVRWindow> &p_dvr, bool p_primary) {
 		dvr = p_dvr;
 		primary = p_primary;
 	}
 	double get_dvr_input_start() const { return input_start; }
 	int open(const String &p_url) {
+		clear_transport_error();
 		String scheme, host, path, fragment;
 		int port;
 		const bool youtube_media = p_url.parse_url(scheme, host, port, path, fragment) == OK && host.to_lower().ends_with(".googlevideo.com");
@@ -163,6 +196,7 @@ public:
 		http.set_range_chunk_size(youtube_media ? 10 * 1024 * 1024 : 0);
 		const Error open_error = cancel ? http.open(p_url, headers) : ERR_INVALID_PARAMETER;
 		if (open_error != OK) {
+			set_transport_error("open", open_error);
 			return AVERROR(EACCES);
 		}
 		if (dvr.is_valid()) {
@@ -180,6 +214,7 @@ public:
 				memcpy(body.ptrw() + old_size, chunk, amount);
 			}
 			if (amount < 0) {
+				set_transport_error("manifest read", ERR_CONNECTION_ERROR);
 				return AVERROR(EIO);
 			}
 			String text = String::utf8(reinterpret_cast<const char *>(body.ptr()), body.size());

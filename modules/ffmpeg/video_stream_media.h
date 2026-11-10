@@ -70,7 +70,7 @@ public:
 	double get_length() const override;
 };
 
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String(), const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>(), const Dictionary &p_headers = Dictionary(), const SafeFlag *p_cancel = nullptr, double *r_length = nullptr, FFmpegDVRWindow *p_dvr = nullptr, bool p_dvr_primary = true, bool p_allow_http = false);
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format = nullptr, const String &p_path = String(), const Ref<AudioStream> &p_loop_stream = Ref<AudioStream>(), const Dictionary &p_headers = Dictionary(), const SafeFlag *p_cancel = nullptr, double *r_length = nullptr, FFmpegDVRWindow *p_dvr = nullptr, bool p_dvr_primary = true, bool p_allow_http = false, String *r_error = nullptr);
 Ref<VideoStreamPlayback> ffmpeg_open_video_on_worker(const String &p_path, const Dictionary &p_headers, const SafeFlag *p_cancel, const String &p_audio_file = String(), const Dictionary &p_audio_headers = Dictionary(), String *r_error = nullptr, FFmpegDVRWindow *p_dvr = nullptr, bool p_allow_http = false);
 bool ffmpeg_start_video_read_ahead(const Ref<VideoStreamPlayback> &p_playback, String *r_error = nullptr, bool p_after_finite_seek = false);
 bool ffmpeg_seek_video_on_worker(const Ref<VideoStreamPlayback> &p_playback, double p_position);

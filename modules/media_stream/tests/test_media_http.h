@@ -56,6 +56,7 @@ struct ScriptedReply {
 struct ScriptedHTTP {
 	Vector<ScriptedReply> replies;
 	Vector<Vector<String>> requests;
+	Vector<String> paths;
 	Vector<HTTPClient::Method> methods;
 	Vector<int> ports;
 	Vector<String> tls_names;
@@ -97,7 +98,8 @@ public:
 		status = STATUS_CONNECTED;
 		return OK;
 	}
-	Error request(Method p_method, const String &, const Vector<String> &p_headers, const uint8_t *, int) override {
+	Error request(Method p_method, const String &p_path, const Vector<String> &p_headers, const uint8_t *, int) override {
+		fixture->paths.push_back(p_path);
 		fixture->requests.push_back(p_headers);
 		fixture->methods.push_back(p_method);
 		status = STATUS_BODY;

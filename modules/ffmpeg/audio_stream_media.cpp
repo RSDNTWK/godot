@@ -191,7 +191,9 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 			av_channel_layout_default(&codec->ch_layout, 2);
 		} else {
 			if (!path.is_empty()) {
-				if (file_io.open(&format, path) < 0) {
+				const int error = file_io.open(&format, path);
+				if (error < 0) {
+					decode_error = vformat("Could not open the audio media container (FFmpeg error %d).", error);
 					return false;
 				}
 			} else {
@@ -731,7 +733,8 @@ public:
 			return failed ? int(ERR_INVALID_DATA) : int(OK);
 		}
 		if (p_name == SNAME("_ffmpeg_error_message")) {
-			return decode_error;
+			const String transport_error = file_io.get_error_message();
+			return decode_error + (transport_error.is_empty() ? String() : " " + transport_error);
 		}
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		if (p_name == SNAME("_ffmpeg_can_read_ahead")) {
@@ -970,11 +973,14 @@ Ref<AudioStreamPlayback> AudioStreamMedia::instantiate_playback() {
 	}
 	return playback;
 }
-Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path, const Ref<AudioStream> &p_loop_stream, const Dictionary &p_headers, const SafeFlag *p_cancel, double *r_length, FFmpegDVRWindow *p_dvr, bool p_dvr_primary, bool p_allow_http) {
+Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t> &p_data, const char *p_format, const String &p_path, const Ref<AudioStream> &p_loop_stream, const Dictionary &p_headers, const SafeFlag *p_cancel, double *r_length, FFmpegDVRWindow *p_dvr, bool p_dvr_primary, bool p_allow_http, String *r_error) {
 	Ref<AudioStreamPlaybackFFmpeg> playback;
 	playback.instantiate();
 	playback->set_remote_options(p_headers, p_cancel, p_dvr, p_dvr_primary, p_allow_http);
 	if (!playback->open_buffer(p_data, p_format, p_path)) {
+		if (r_error) {
+			*r_error = playback->get_parameter(SNAME("_ffmpeg_error_message"));
+		}
 		return Ref<AudioStreamPlayback>();
 	}
 #ifdef MODULE_MEDIA_STREAM_ENABLED
