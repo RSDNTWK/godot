@@ -589,6 +589,10 @@ def add_shared_library(env, name, sources, **args):
 def add_library(env, name, sources, **args):
     library = env.Library(name, sources, **args)
     env.NoCache(library)
+    if env.get("library_reuse", False):
+        from misc.utility import library_cache
+
+        library_cache.register(env, library)
     return library
 
 

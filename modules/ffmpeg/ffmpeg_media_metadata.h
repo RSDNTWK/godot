@@ -34,6 +34,7 @@
 #include "core/variant/dictionary.h"
 
 extern "C" {
+#include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 }
 
@@ -103,6 +104,7 @@ inline Dictionary container(AVFormatContext *p_format, int p_stream, const Strin
 		metadata["video_width"] = stream->codecpar->width;
 		metadata["video_height"] = stream->codecpar->height;
 		metadata["video_fps"] = stream->avg_frame_rate.den > 0 ? av_q2d(stream->avg_frame_rate) : 0.0;
+		metadata["video_codec"] = avcodec_get_name(stream->codecpar->codec_id);
 	}
 	return metadata;
 }

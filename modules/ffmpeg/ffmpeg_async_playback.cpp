@@ -96,6 +96,8 @@ bool resolve_source(const String &p_source, bool p_audio_only, const SafeFlag &p
 			metadata["video_width"] = selected.get("width", 0);
 			metadata["video_height"] = selected.get("height", 0);
 			metadata["video_fps"] = selected.get("fps", 0.0);
+			metadata["video_codec"] = selected.get("vcodec", String());
+			metadata["video_format_id"] = selected.get("format_id", String());
 			metadata["quality_limit_height"] = p_max_height;
 			metadata["adaptive_quality"] = true;
 		}
@@ -142,7 +144,13 @@ struct StartupFrames {
 	int sampled_frames = 0;
 	uint64_t serial = 0;
 	uint64_t work_usec = 0;
+	uint64_t update_usec = 0;
+	uint64_t availability_wait_usec = 0;
+	uint64_t sleep_usec = 0;
+	uint64_t max_update_usec = 0;
 	double media_seconds = 0.0;
+	int update_calls = 0;
+	int network_waits = 0;
 	bool measured = false;
 	bool too_slow = false;
 };
@@ -186,7 +194,14 @@ Error prepare_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double 
 			if (OS::get_singleton()->get_ticks_usec() >= deadline) {
 				return ERR_TIMEOUT;
 			}
+			const uint64_t update_started = OS::get_singleton()->get_ticks_usec();
 			p_playback->update(0.0);
+			const uint64_t update_elapsed = OS::get_singleton()->get_ticks_usec() - update_started;
+			if (index >= warmup_frames) {
+				r_frames.update_usec += update_elapsed;
+				r_frames.max_update_usec = MAX(r_frames.max_update_usec, update_elapsed);
+				r_frames.update_calls++;
+			}
 			if (p_cancel.is_set()) {
 				return ERR_SKIP;
 			}
@@ -194,13 +209,23 @@ Error prepare_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double 
 			if (error != OK) {
 				return error;
 			}
-			if (bool(p_playback->get(SNAME("_ffmpeg_packet_waiting"))) || !p_playback->is_playing()) {
-				return OK; // Network waits and short tails are not CPU evidence.
+			if (bool(p_playback->get(SNAME("_ffmpeg_packet_waiting")))) {
+				if (index >= warmup_frames) {
+					r_frames.network_waits++;
+				}
+				return OK; // Do not classify a network wait as decoder work.
+			}
+			if (!p_playback->is_playing()) {
+				return OK; // Short tails are not CPU evidence.
 			}
 			if (uint64_t(int64_t(p_playback->get(SNAME("_ffmpeg_presented_frames")))) == r_frames.serial) {
 				// Sparse timestamps can already have a future decoded frame.
 				clock.position = MAX(clock.position, double(p_playback->get(SNAME("_ffmpeg_presentable_position"))));
+				const uint64_t sleep_started = OS::get_singleton()->get_ticks_usec();
 				OS::get_singleton()->delay_usec(1000);
+				if (index >= warmup_frames) {
+					r_frames.sleep_usec += OS::get_singleton()->get_ticks_usec() - sleep_started;
+				}
 			}
 		}
 		Ref<Image> image = p_playback->get(SNAME("_ffmpeg_cpu_frame"));
@@ -226,10 +251,12 @@ Error prepare_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double 
 		return ERR_SKIP;
 	}
 	r_frames.media_seconds = previous_position - measured_origin;
+	r_frames.availability_wait_usec = r_frames.work_usec > r_frames.update_usec + r_frames.sleep_usec ? r_frames.work_usec - r_frames.update_usec - r_frames.sleep_usec : 0;
 	r_frames.measured = r_frames.media_seconds > 0.0 && r_frames.media_seconds <= 3.0;
-	// This worker-only trial excludes frontend rendering/audio scheduling.
-	// Leave 30% of each source interval for those tasks and sustained jitter.
-	r_frames.too_slow = r_frames.measured && r_frames.work_usec > r_frames.media_seconds * 700000.0;
+	// Frame availability latency includes polling sleeps and time while
+	// asynchronous frames become visible. Judge synchronous decode and
+	// conversion cost only, preserving the existing 70% headroom threshold.
+	r_frames.too_slow = r_frames.measured && r_frames.update_usec > r_frames.media_seconds * 700000.0;
 	return OK;
 }
 #endif
@@ -879,18 +906,37 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 								vformat("Could not prepare initial video frames (error %d).", int(preparation));
 					} else if (startup_frames.too_slow) {
 						failed = true;
-						message = "Selected video exceeds the measured startup decoding budget.";
+						message = "Selected video exceeds the synchronous startup decoding budget.";
 					}
 					opened_metadata["startup_probe_frames"] = startup_frames.sampled_frames;
 					opened_metadata["startup_probe_work_usec"] = int64_t(startup_frames.work_usec);
+					opened_metadata["startup_probe_update_usec"] = int64_t(startup_frames.update_usec);
+					opened_metadata["startup_probe_availability_wait_usec"] = int64_t(startup_frames.availability_wait_usec);
+					opened_metadata["startup_probe_sleep_usec"] = int64_t(startup_frames.sleep_usec);
+					opened_metadata["startup_probe_max_update_usec"] = int64_t(startup_frames.max_update_usec);
+					opened_metadata["startup_probe_update_calls"] = startup_frames.update_calls;
+					opened_metadata["startup_probe_network_waits"] = startup_frames.network_waits;
 					opened_metadata["startup_probe_media_seconds"] = startup_frames.media_seconds;
 					opened_metadata["startup_probe_measured"] = startup_frames.measured;
+					const int fallback_height = failed ? FFmpegAdaptiveQuality::lower_height(int(resolved_metadata.get("video_height", 0))) : 0;
+					const int playback_error = playback.is_valid() ? int(playback->get(SNAME("stream_error"))) : int(ERR_UNCONFIGURED);
+					print_line(vformat("FFmpeg: Android startup quality probe budget_basis=synchronous_update_70pct format=%s selected=%dx%d@%.3ffps codec=%s frames=%d media=%.3fs elapsed=%dus update=%dus availability_wait=%dus sleep=%dus update_calls=%d max_update=%dus network_waits=%d measured=%s too_slow=%s preparation_error=%d playback_error=%d fallback_height=%d reason=%s",
+							String(resolved_metadata.get("video_format_id", String("unknown"))), int(opened_metadata.get("video_width", 0)), int(opened_metadata.get("video_height", 0)), double(opened_metadata.get("video_fps", 0.0)),
+							String(opened_metadata.get("video_codec", resolved_metadata.get("video_codec", String("unknown")))), startup_frames.sampled_frames, startup_frames.media_seconds,
+							int64_t(startup_frames.work_usec), int64_t(startup_frames.update_usec), int64_t(startup_frames.availability_wait_usec), int64_t(startup_frames.sleep_usec), startup_frames.update_calls,
+							int64_t(startup_frames.max_update_usec), startup_frames.network_waits, startup_frames.measured, startup_frames.too_slow, int(preparation), playback_error, fallback_height, message));
 					if (!failed && startup_frames.sampled_frames > 0 && !interrupt.is_set()) {
 						// A bounded trial can decode ahead of the initial image. Reopen
 						// the same validated selection before readiness; no trial PCM or
 						// images are played, and the source begins at its proper origin.
 						startup_metadata["startup_probe_frames"] = startup_frames.sampled_frames;
 						startup_metadata["startup_probe_work_usec"] = int64_t(startup_frames.work_usec);
+						startup_metadata["startup_probe_update_usec"] = int64_t(startup_frames.update_usec);
+						startup_metadata["startup_probe_availability_wait_usec"] = int64_t(startup_frames.availability_wait_usec);
+						startup_metadata["startup_probe_sleep_usec"] = int64_t(startup_frames.sleep_usec);
+						startup_metadata["startup_probe_max_update_usec"] = int64_t(startup_frames.max_update_usec);
+						startup_metadata["startup_probe_update_calls"] = startup_frames.update_calls;
+						startup_metadata["startup_probe_network_waits"] = startup_frames.network_waits;
 						startup_metadata["startup_probe_media_seconds"] = startup_frames.media_seconds;
 						startup_metadata["startup_probe_measured"] = startup_frames.measured;
 						initial_quality_checked = true;
@@ -911,6 +957,13 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				if (failed && adaptive_quality && quality_backup.is_empty() && !interrupt.is_set() && (message.begins_with("Timed out buffering remote") || message.begins_with("Selected video exceeds"))) {
 					const int lower = FFmpegAdaptiveQuality::lower_height(int(resolved_metadata.get("video_height", 0)));
 					if (lower > 0) {
+#if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
+						if (!startup_frames.update_calls) {
+							print_line(vformat("FFmpeg: Android startup quality rung selected=%dx%d@%.3ffps codec=%s format=%s probe=skipped fallback_height=%d reason=%s",
+									int(resolved_metadata.get("video_width", 0)), int(resolved_metadata.get("video_height", 0)), double(resolved_metadata.get("video_fps", 0.0)),
+									String(resolved_metadata.get("video_codec", String("unknown"))), String(resolved_metadata.get("video_format_id", String("unknown"))), lower, message));
+						}
+#endif
 #if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
 						initial_quality_checked = false;
 						startup_metadata.clear();
@@ -1574,6 +1627,12 @@ Dictionary ffmpeg_test_startup_frames(const Ref<VideoStreamPlayback> &p_playback
 	result["measured"] = frames.measured;
 	result["too_slow"] = frames.too_slow;
 	result["work_usec"] = int64_t(frames.work_usec);
+	result["update_usec"] = int64_t(frames.update_usec);
+	result["availability_wait_usec"] = int64_t(frames.availability_wait_usec);
+	result["sleep_usec"] = int64_t(frames.sleep_usec);
+	result["max_update_usec"] = int64_t(frames.max_update_usec);
+	result["update_calls"] = frames.update_calls;
+	result["network_waits"] = frames.network_waits;
 	result["sampled_frames"] = frames.sampled_frames;
 	result["media_seconds"] = frames.media_seconds;
 	Array images;
