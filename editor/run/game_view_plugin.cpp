@@ -340,6 +340,17 @@ void GameViewDebugger::reset_camera_3d_position() {
 	}
 }
 
+void GameViewDebugger::clear() {
+	for (Ref<EditorDebuggerSession> &session : sessions) {
+		// The started callback binds the session itself. Disconnect our callbacks
+		// before releasing it, so the bound Ref cannot keep a detached session alive.
+		session->disconnect("started", callable_mp(this, &GameViewDebugger::_session_started).bind(session));
+		session->disconnect("stopped", callable_mp(this, &GameViewDebugger::_session_stopped));
+	}
+	sessions.clear();
+	EditorDebuggerPlugin::clear();
+}
+
 void GameViewDebugger::setup_session(int p_session_id) {
 	Ref<EditorDebuggerSession> session = get_session(p_session_id);
 	ERR_FAIL_COND(session.is_null());

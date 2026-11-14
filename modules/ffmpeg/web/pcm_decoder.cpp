@@ -181,6 +181,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int godot_pcm_decode(const uint8_t *data, int si
 			error = decode_error(status);
 			goto cleanup;
 		}
+		codec->pkt_timebase = format->streams[stream]->time_base;
 		codec->thread_count = 1;
 		status = avcodec_open2(codec, decoder, nullptr);
 		if (status < 0) {

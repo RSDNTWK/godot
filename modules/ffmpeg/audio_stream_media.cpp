@@ -82,6 +82,9 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	AVFormatContext *format = nullptr;
 	AVIOContext *io_context = nullptr;
 	AVCodecContext *codec = nullptr;
+#ifdef FFMPEG_TESTS_ENABLED
+	Dictionary test_frame_timing;
+#endif
 	AVCodecParserContext *parser = nullptr;
 	AVFrame *frame = nullptr;
 	AVPacket *packet = nullptr;
@@ -256,6 +259,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 			if (!codec || avcodec_parameters_to_context(codec, stream->codecpar) < 0) {
 				return false;
 			}
+			codec->pkt_timebase = stream->time_base;
 			if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0) {
 				length = stream->duration * av_q2d(stream->time_base);
 			} else if (format->duration != AV_NOPTS_VALUE && format->duration > 0) {
@@ -360,6 +364,20 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 			}
 			const int result = avcodec_receive_frame(codec, frame);
 			if (result >= 0) {
+#ifdef FFMPEG_TESTS_ENABLED
+				if (test_frame_timing.is_empty()) {
+					test_frame_timing["time_base_num"] = codec->pkt_timebase.num;
+					test_frame_timing["time_base_den"] = codec->pkt_timebase.den;
+					test_frame_timing["stream_time_base_num"] = source_time_base.num;
+					test_frame_timing["stream_time_base_den"] = source_time_base.den;
+					test_frame_timing["stream_start"] = source_start_time;
+					test_frame_timing["pts"] = frame->pts;
+					test_frame_timing["best_effort_pts"] = frame->best_effort_timestamp;
+					test_frame_timing["duration"] = frame->duration;
+					test_frame_timing["rate"] = frame->sample_rate;
+					test_frame_timing["samples"] = frame->nb_samples;
+				}
+#endif
 				if (hls_pdt_timeline) {
 					// Declared HLS epochs use one UTC timeline for separate inputs.
 					// Reconcile encoder overlap/gaps against consumed PCM, never
@@ -622,6 +640,9 @@ public:
 		if (target == frame_position && !eof && !failed) {
 			return;
 		}
+#ifdef FFMPEG_TESTS_ENABLED
+		test_frame_timing.clear();
+#endif
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		if (remote_cancel && format && stream_index >= 0) {
 			if (read_ahead_used) {
@@ -716,6 +737,11 @@ public:
 		}
 	}
 	Variant get_parameter(const StringName &p_name) const override {
+#ifdef FFMPEG_TESTS_ENABLED
+		if (p_name == SNAME("_ffmpeg_test_frame_timing")) {
+			return test_frame_timing.duplicate();
+		}
+#endif
 		if (p_name == SNAME("_ffmpeg_reusable_seek")) {
 			return remote_cancel && format && format->pb && (format->pb->seekable & AVIO_SEEKABLE_NORMAL) && !remote_live_hls && !String(format->iformat->name).contains("hls");
 		}
@@ -1120,6 +1146,42 @@ static bool ffmpeg_ogg_packet_sequence_to_buffer(const Ref<OggPacketSequence> &p
 }
 
 #ifdef FFMPEG_TESTS_ENABLED
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+TEST_CASE("[NativeStreaming][PacketTimebase][Local] Primed container audio retains its declared sample timeline" * doctest::skip()) {
+	const String fixtures = OS::get_singleton()->get_environment("GODOT_FFMPEG_TIMING_FIXTURES");
+	REQUIRE(!fixtures.is_empty());
+	const char *files[] = { "tone-mp3.mp3.fixture", "tone-opus.opus.fixture", "tone-m4a.m4a.fixture" };
+	for (int index = 0; index < 3; index++) {
+		const char *file = files[index];
+		CAPTURE(file);
+		SafeFlag cancelled;
+		Ref<AudioStreamPlaybackFFmpeg> decoder;
+		decoder.instantiate();
+		REQUIRE(decoder->open_pcm_source(fixtures.path_join(file), Dictionary(), &cancelled, 48000, OS::get_singleton()->get_ticks_usec() + 10000000, false));
+		AudioFrame samples[1];
+		REQUIRE(decoder->read_pcm_samples(samples, 1) == 1);
+		const Dictionary timing = decoder->get_parameter(SNAME("_ffmpeg_test_frame_timing"));
+		const int num = timing.get("time_base_num", 0);
+		const int den = timing.get("time_base_den", 0);
+		CHECK(num > 0);
+		CHECK(den > 0);
+		CHECK(num == int(timing.get("stream_time_base_num", 0)));
+		CHECK(den == int(timing.get("stream_time_base_den", 0)));
+		CHECK(int(timing.get("samples", 0)) > 0);
+		// Encoder priming is removed from the samples and their presentation PTS.
+		// Compare the actual first decoded frame to the demuxer's declared start.
+		const int64_t start = timing.get("stream_start", AV_NOPTS_VALUE);
+		const int64_t pts = timing.get("pts", AV_NOPTS_VALUE);
+		REQUIRE(start != AV_NOPTS_VALUE);
+		REQUIRE(pts != AV_NOPTS_VALUE);
+		CHECK(pts == start);
+		print_line(vformat("Packet timebase %s: %s", file, timing));
+	}
+}
+
+
+#endif
+
 TEST_CASE("[NativeStreaming][OggPageGranules] Remuxing saved pages retains timestamps across large packets") {
 	Ref<OggPacketSequence> sequence;
 	sequence.instantiate();

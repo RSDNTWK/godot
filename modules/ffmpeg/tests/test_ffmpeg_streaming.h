@@ -2459,9 +2459,24 @@ static void check_playback(const String &url, bool p_explicit_pair) {
 		CHECK(String(playback->get_stream_metadata()["title"]) == resolved_title);
 		playback->play();
 		CHECK(wait_ready(playback));
-		uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 20000000;
+		const int mix_rate = playback->get_mix_rate();
+		uint64_t previous_update = OS::get_singleton()->get_ticks_usec();
+		uint64_t deadline = previous_update + 20000000;
+		double fractional_frames = 0.0;
+		// The real player supplies a consumed-sample clock every frame. Match
+		// that host contract, accepting only samples due in each output interval.
+		sink.live_available_frames = 0;
+		playback->set_audio_playback_position(0.0);
 		while (playback->get_playback_position() < 2.0 && OS::get_singleton()->get_ticks_usec() < deadline && playback->is_playing()) {
-			playback->update(0.016);
+			const uint64_t now = OS::get_singleton()->get_ticks_usec();
+			const double elapsed_delta = double(now - previous_update) / 1000000.0;
+			previous_update = now;
+			fractional_frames += elapsed_delta * mix_rate;
+			sink.live_available_frames = int64_t(fractional_frames);
+			fractional_frames -= sink.live_available_frames;
+			playback->set_audio_playback_position(double(sink.frames) / mix_rate);
+			playback->update(elapsed_delta);
+			playback->set_audio_playback_position(double(sink.frames) / mix_rate);
 			MessageQueue::get_singleton()->flush();
 			OS::get_singleton()->delay_usec(16000);
 		}
@@ -2641,6 +2656,9 @@ TEST_CASE("[SceneTree][NativeStreaming][Network] Queued PCM cannot advance the c
 	REQUIRE(playback.is_valid());
 	AudioSink sink;
 	playback->set_mix_callback(AudioSink::mix, &sink);
+	// Declare a 200 ms device queue so accepted PCM can exceed 250 ms
+	// while the explicitly supplied audible clock remains at zero.
+	playback->set_audio_output_latency(0.2);
 	playback->play();
 	REQUIRE(wait_ready(playback));
 	for (int i = 0; i < 40; i++) {
@@ -3257,6 +3275,28 @@ TEST_CASE("[SceneTree][HLSEpoch][Local] Dated HLS audio reconciles the captured 
 	CHECK_FALSE(playback->is_playing());
 }
 
+// The mixer accepts a bounded queue ahead of the device's consumed clock.
+// Reuse AudioSink's PCM accounting, but advance audible time independently.
+struct EpochQueuedAudioSink : AudioSink {
+	int64_t consumed_frames = 0;
+	int64_t maximum_queued_frames = 0;
+	static double read_consumed_clock(void *p_self) {
+		const EpochQueuedAudioSink *self = static_cast<const EpochQueuedAudioSink *>(p_self);
+		return self->clock_origin + double(self->consumed_frames) / self->clock_mix_rate;
+	}
+	static int mix(void *p_self, const float *p_samples, int p_frames) {
+		EpochQueuedAudioSink *self = static_cast<EpochQueuedAudioSink *>(p_self);
+		const int capacity = int(MAX(int64_t(0), self->clock_mix_rate / 4 - (self->frames - self->consumed_frames)));
+		const int accepted = AudioSink::mix(self, p_samples, MIN(p_frames, capacity));
+		self->maximum_queued_frames = MAX(self->maximum_queued_frames, self->frames - self->consumed_frames);
+		return accepted;
+	}
+	void consume(double p_seconds) {
+		const int64_t requested = int64_t(Math::round(p_seconds * clock_mix_rate));
+		consumed_frames += MIN(requested, frames - consumed_frames);
+	}
+};
+
 TEST_CASE("[SceneTree][HLSEpoch][Local] Paired dated epochs keep the consumed audio clock" * doctest::skip()) {
 	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_FILE");
 	const String audio_path = OS::get_singleton()->get_environment("GODOT_MEDIA_EPOCH_TEST_AUDIO_FILE");
@@ -3269,38 +3309,48 @@ TEST_CASE("[SceneTree][HLSEpoch][Local] Paired dated epochs keep the consumed au
 		Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancelled, audio_path, Dictionary(), &error);
 		INFO(error.utf8().get_data());
 		REQUIRE(playback.is_valid());
-		AudioSink sink;
+		EpochQueuedAudioSink sink;
 		sink.clock_mix_rate = playback->get_mix_rate();
-		playback->set_mix_callback(AudioSink::mix, &sink);
-		playback->set_audio_playback_position_callback(AudioSink::read_consumed_clock, &sink);
+		playback->set_mix_callback(EpochQueuedAudioSink::mix, &sink);
+		playback->set_audio_playback_position_callback(EpochQueuedAudioSink::read_consumed_clock, &sink);
 		playback->play();
 		if (queued) {
 			REQUIRE(ffmpeg_start_video_read_ahead(playback, &error));
 		}
 		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 15000000;
-		double maximum_skew = 0.0;
+		// Prequeue real PCM without pretending the device has consumed it.
+		playback->update(0.0);
+		CHECK(sink.frames >= sink.clock_mix_rate / 5 - 1);
+		CHECK(sink.consumed_frames == 0);
+		double maximum_skew = Math::abs(playback->get_playback_position() - EpochQueuedAudioSink::read_consumed_clock(&sink));
 		double virtual_time = 0.0;
 		while (playback->is_playing() && int(playback->get(SNAME("stream_error"))) == OK && OS::get_singleton()->get_ticks_usec() < deadline) {
 			const double before = playback->get_playback_position();
 			// Advance the sample clock only after video has caught up. Network
 			// producer scheduling must not masquerade as sustained decode loss.
-			const double audio_clock = AudioSink::read_consumed_clock(&sink);
+			const double audio_clock = EpochQueuedAudioSink::read_consumed_clock(&sink);
 			const double delta = audio_clock - before < 0.06 ? 0.02 : 0.0;
+			// Only device consumption advances the clock; accepted PCM may
+			// remain in the queue during decoder prefill and catch-up.
+			sink.consume(delta);
+			playback->set_audio_playback_position(EpochQueuedAudioSink::read_consumed_clock(&sink));
 			playback->update(delta);
 			virtual_time += delta;
 			if (playback->get_playback_position() > before) {
-				maximum_skew = MAX(maximum_skew, Math::abs(playback->get_playback_position() - AudioSink::read_consumed_clock(&sink)));
+				maximum_skew = MAX(maximum_skew, Math::abs(playback->get_playback_position() - EpochQueuedAudioSink::read_consumed_clock(&sink)));
 			}
 			if (virtual_time > 26.0) {
 				break;
 			}
 		}
 		const Dictionary state = playback->get(SNAME("_ffmpeg_debug_state"));
-		print_line(vformat("Paired HLS epoch: queued %s, PCM %.6fs, video %.6fs, maximum observed skew %.6fs, error %d.", queued, AudioSink::read_consumed_clock(&sink), playback->get_playback_position(), maximum_skew, int(playback->get(SNAME("stream_error")))));
+		print_line(vformat("Paired HLS epoch: queued %s, PCM %.6fs, video %.6fs, maximum observed skew %.6fs, error %d.", queued, EpochQueuedAudioSink::read_consumed_clock(&sink), playback->get_playback_position(), maximum_skew, int(playback->get(SNAME("stream_error")))));
 		CHECK(int(playback->get(SNAME("stream_error"))) == OK);
-		CHECK(AudioSink::read_consumed_clock(&sink) > 19.9);
+		CHECK(EpochQueuedAudioSink::read_consumed_clock(&sink) > 19.9);
 		CHECK(playback->get_playback_position() > 19.0);
 		CHECK(sink.energy > 1.0);
+		CHECK(sink.frames >= sink.consumed_frames);
+		CHECK(sink.maximum_queued_frames <= sink.clock_mix_rate / 4);
 		CHECK(maximum_skew < 0.15);
 		CHECK(int64_t(state.get("negative_frames", 0)) == 0);
 		CHECK_FALSE(playback->is_playing());

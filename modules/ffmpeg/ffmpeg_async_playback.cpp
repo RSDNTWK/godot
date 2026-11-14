@@ -96,8 +96,9 @@ bool resolve_source(const String &p_source, bool p_audio_only, const SafeFlag &p
 			metadata["video_width"] = selected.get("width", 0);
 			metadata["video_height"] = selected.get("height", 0);
 			metadata["video_fps"] = selected.get("fps", 0.0);
-			metadata["video_codec"] = selected.get("vcodec", String());
-			metadata["video_format_id"] = selected.get("format_id", String());
+			// Native formats use YouTube's itag; the opened container supplies
+			// the decoder codec name. yt-dlp's format_id/vcodec keys are absent.
+			metadata["video_format_id"] = itos(int64_t(selected.get("itag", 0)));
 			metadata["quality_limit_height"] = p_max_height;
 			metadata["adaptive_quality"] = true;
 		}
@@ -253,9 +254,10 @@ Error prepare_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double 
 	r_frames.media_seconds = previous_position - measured_origin;
 	r_frames.availability_wait_usec = r_frames.work_usec > r_frames.update_usec + r_frames.sleep_usec ? r_frames.work_usec - r_frames.update_usec - r_frames.sleep_usec : 0;
 	r_frames.measured = r_frames.media_seconds > 0.0 && r_frames.media_seconds <= 3.0;
-	// Frame availability latency includes polling sleeps and time while
-	// asynchronous frames become visible. Judge synchronous decode and
-	// conversion cost only, preserving the existing 70% headroom threshold.
+	// Measure wall time inside update(), excluding explicit polling sleeps.
+	// This includes scheduling and any internal waits; it is not CPU time.
+	// The residual availability_wait_usec field does not identify a wait source.
+	// Preserve the existing 70% policy threshold.
 	r_frames.too_slow = r_frames.measured && r_frames.update_usec > r_frames.media_seconds * 700000.0;
 	return OK;
 }

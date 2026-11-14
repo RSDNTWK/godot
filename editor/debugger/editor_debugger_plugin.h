@@ -80,7 +80,7 @@ protected:
 
 public:
 	void create_session(ScriptEditorDebugger *p_debugger);
-	void clear();
+	virtual void clear();
 
 	virtual void setup_session(int p_idx);
 	virtual bool capture(const String &p_message, const Array &p_data, int p_session);

@@ -77,6 +77,7 @@ protected:
 	static void _bind_methods();
 
 public:
+	void clear() override;
 	virtual bool capture(const String &p_message, const Array &p_data, int p_session) override;
 	virtual bool has_capture(const String &p_capture) const override;
 
