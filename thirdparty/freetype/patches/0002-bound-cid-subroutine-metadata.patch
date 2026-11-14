@@ -1,0 +1,93 @@
+diff --git a/thirdparty/freetype/src/cid/cidload.c b/thirdparty/freetype/src/cid/cidload.c
+index b9ab1b9e05..f0209db3e8 100644
+--- a/thirdparty/freetype/src/cid/cidload.c
++++ b/thirdparty/freetype/src/cid/cidload.c
+@@ -505,6 +505,39 @@
+   }
+ 
+ 
++
++  /* Represent the total in groups of four plus a remainder.  This keeps */
++  /* the overlap limit valid even when four times the stream size would */
++  /* not fit in FT_ULong.                                               */
++  static FT_Bool
++  cid_subrs_budget_add( FT_ULong   value,
++                        FT_ULong   limit,
++                        FT_ULong*  units,
++                        FT_UInt*   remainder )
++  {
++    FT_ULong  part = value / 4;
++    FT_ULong  total;
++    FT_UInt   rest = *remainder + (FT_UInt)( value % 4 );
++
++
++    if ( *units > limit || part > limit - *units )
++      return 0;
++
++    total = *units + part;
++    if ( rest >= 4 )
++    {
++      if ( total == limit )
++        return 0;
++      total++;
++      rest -= 4;
++    }
++
++    *units     = total;
++    *remainder = rest;
++    return 1;
++  }
++
++
+   /* read the subrmap and the subrs of each font dict */
+   static FT_Error
+   cid_read_subrs( CID_Face  face )
+@@ -517,7 +550,8 @@
+     CID_Subrs      subr;
+     FT_UInt        max_offsets = 0;
+     FT_ULong*      offsets = NULL;
+-    FT_ULong       cum_len = 0;
++    FT_ULong       data_budget = 0, entry_budget = 0;
++    FT_UInt        data_remainder = 0, entry_remainder = 0;
+     PSAux_Service  psaux = (PSAux_Service)face->psaux;
+ 
+ 
+@@ -530,13 +564,25 @@
+       CID_FaceDict  dict  = cid->font_dicts + n;
+       FT_Int        lenIV = dict->private_dict.lenIV;
+       FT_UInt       count, num_subrs = dict->num_subrs;
+-      FT_ULong      data_len;
++      FT_ULong      data_len, entry_count;
+       FT_Byte*      p;
+ 
+ 
+       if ( !num_subrs )
+         continue;
+ 
++      /* Bound repeated offset processing and retained code-pointer tables, */
++      /* including dictionaries whose charstring spans are empty or tiny.  */
++      entry_count = (FT_ULong)num_subrs;
++      if ( entry_count == FT_ULONG_MAX ||
++           !cid_subrs_budget_add( entry_count + 1, stream->size,
++                                  &entry_budget, &entry_remainder ) )
++      {
++        FT_ERROR(( "cid_read_subrs: excessive subroutine metadata\n" ));
++        error = FT_THROW( Invalid_File_Format );
++        goto Fail;
++      }
++
+       /* reallocate offsets array if needed */
+       if ( num_subrs + 1 > max_offsets )
+       {
+@@ -585,9 +631,8 @@
+       /* now, compute the size of subrs charstrings, */
+       /* allocate, and read them                     */
+       data_len = offsets[num_subrs] - offsets[0];
+-      cum_len += data_len;
+-
+-      if ( cum_len / 4 > stream->size )
++      if ( !cid_subrs_budget_add( data_len, stream->size,
++                                  &data_budget, &data_remainder ) )
+       {
+         FT_ERROR(( "cid_read_subrs: excessive overlaps\n" ));
+         error = FT_THROW( Invalid_File_Format );

@@ -370,6 +370,7 @@ Files extracted from upstream source:
 Patches:
 
 - `0001-backport-upstream-commit-f3ca71c99.patch` (CVE-2026-95512)
+- `0002-bound-cid-subroutine-metadata.patch` (bound repeated subroutine metadata and avoid overflow in overlap accounting)
 
 
 ## gamepadmotionhelpers
