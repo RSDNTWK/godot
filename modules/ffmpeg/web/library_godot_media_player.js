@@ -48,9 +48,16 @@ const GodotMediaPlayerLibrary = {
 			const reader = GodotMediaPlayer.frameReader;
 			if (!reader) return;
 			reader.pixels = null; reader.dirty = false;
+			const stage = reader.stageCanvas;
+			reader.stageCanvas = null; reader.stageContext = null;
+			let stageFailed = false;
+			if (stage) {
+				try { stage.width = 0; } catch (_) { stageFailed = true; }
+				try { stage.height = 0; } catch (_) { stageFailed = true; }
+			}
 			const framebuffer = reader.framebuffer, texture = reader.texture;
 			reader.framebuffer = null; reader.texture = null;
-			let failed = false;
+			let failed = stageFailed;
 			try { if (framebuffer) reader.gl.deleteFramebuffer(framebuffer); } catch (_) { failed = true; }
 			try { if (texture) reader.gl.deleteTexture(texture); } catch (_) { failed = true; }
 			if (failed) { try { GodotRuntime.error('Browser video scratch storage cleanup failed.'); } catch (_) { } }
@@ -87,6 +94,11 @@ const GodotMediaPlayerLibrary = {
 			const attempt = function (operation) { try { operation(); } catch (error) { if (!failure) failure = error; } };
 			if (reader.framebuffer) attempt(function () { reader.gl.deleteFramebuffer(reader.framebuffer); });
 			if (reader.texture) attempt(function () { reader.gl.deleteTexture(reader.texture); });
+			if (reader.stageCanvas) {
+				attempt(function () { reader.stageCanvas.width = 0; });
+				attempt(function () { reader.stageCanvas.height = 0; });
+			}
+			reader.stageCanvas = null; reader.stageContext = null;
 			attempt(function () { const extension = reader.gl.getExtension('WEBGL_lose_context'); if (extension) extension.loseContext(); });
 			reader.canvas.width = 0; reader.canvas.height = 0;
 			if (failure) throw failure;
@@ -99,6 +111,7 @@ const GodotMediaPlayerLibrary = {
 					if (player.video && player.element && !player.portal && !player.opaque) return;
 				}
 				if (reader.pixels) reader.pixels.fill(0);
+				if (reader.stageContext) reader.stageContext.clearRect(0, 0, 1920, 1080);
 				if (!reader.gl.isContextLost() && reader.framebuffer) {
 					reader.gl.bindFramebuffer(reader.gl.FRAMEBUFFER, reader.framebuffer);
 					reader.gl.clearColor(0, 0, 0, 0);
@@ -132,7 +145,7 @@ const GodotMediaPlayerLibrary = {
 						GodotMediaPlayer.frameReaderDisabled = 'private_webgl2_unavailable';
 						return fallback(GodotMediaPlayer.frameReaderDisabled);
 					}
-					reader = {canvas, gl, texture: null, framebuffer: null, pixels: null, dirty: false};
+					reader = {canvas, gl, texture: null, framebuffer: null, pixels: null, stageCanvas: null, stageContext: null, dirty: false};
 					GodotMediaPlayer.frameReader = reader;
 					canvas.addEventListener('webglcontextlost', GodotMediaPlayer.frameReaderContextLost);
 					reader.texture = gl.createTexture(); reader.framebuffer = gl.createFramebuffer();
@@ -153,6 +166,14 @@ const GodotMediaPlayerLibrary = {
 					gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
 					if ('unpackColorSpace' in gl) gl.unpackColorSpace = 'srgb';
 					gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+					// Preserve the existing Canvas2D video color conversion without
+					// allocating getImageData storage for every frame. Dimensions
+					// stay fixed across players; the GL upload crops the used region.
+					reader.stageCanvas = document.createElement('canvas');
+					reader.stageCanvas.width = 1920; reader.stageCanvas.height = 1080;
+					reader.stageContext = reader.stageCanvas.getContext('2d', {'willReadFrequently': true});
+					if (!reader.stageContext) return failed('scratch_conversion_context_unavailable', false);
+					reader.stageContext.globalCompositeOperation = 'copy';
 					reader.pixels = new Uint8Array(1920 * 1080 * 4);
 				} catch (error) {
 					return failed(error instanceof RangeError ? 'scratch_pixel_allocation' : 'scratch_initialization_exception', error instanceof RangeError);
@@ -161,8 +182,9 @@ const GodotMediaPlayerLibrary = {
 			const gl = reader.gl;
 			if (gl.isContextLost()) return failed('private_context_lost', false);
 			try {
-				gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, r.element);
+				reader.stageContext.drawImage(r.element, 0, 0, width, height);
 				reader.dirty = true;
+				gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, reader.stageCanvas);
 				const uploadError = gl.getError();
 				if (uploadError !== gl.NO_ERROR) return failed('video_upload_gl_' + uploadError, uploadError === gl.OUT_OF_MEMORY);
 				gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, reader.pixels);
@@ -175,6 +197,16 @@ const GodotMediaPlayerLibrary = {
 				// Keep existing origin/security fallback behavior. Unsupported DOM
 				// upload may use the legacy path, but never masquerades as this fix.
 				if (error && (error.name === 'SecurityError' || error.name === 'TypeError')) {
+					if (error.name === 'SecurityError') {
+						// A blocked source must not taint shared conversion storage
+						// for later readable players. Reset only on this error path.
+						try {
+							reader.stageCanvas.width = 1920;
+							reader.stageContext.globalCompositeOperation = 'copy';
+						} catch (resetError) {
+							return failed('scratch_conversion_reset_exception', resetError instanceof RangeError);
+						}
+					}
 					r.frameReaderUnsupported = 'private_upload_' + error.name;
 					return fallback(r.frameReaderUnsupported);
 				}
