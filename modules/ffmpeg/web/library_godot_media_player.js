@@ -30,13 +30,157 @@
 
 /* Browser backends for the engine media controller. Native transport is separate. */
 const GodotMediaPlayerLibrary = {
-	$GodotMediaPlayer__deps: ['$GodotRuntime', '$GodotConfig', '$GodotMedia'],
+	$GodotMediaPlayer__deps: ['$GodotRuntime', '$GodotConfig', '$GodotMedia', '$GodotOS'],
+	$GodotMediaPlayer__postset: 'GodotOS.atexit(function(resolve, reject) { try { GodotMediaPlayer.freeFrameReader(); resolve(); } catch (error) { reject(error); } });',
 	$GodotMediaPlayer: {
 		next: 1,
 		players: new Map(),
 		scripts: new Map(),
 		backdrop: null,
 		canvasStyle: null,
+		// A single page-lifetime scratch context/buffer bounds allocation churn
+		// across all media players. It never accesses the main Godot GL context.
+		frameReader: null,
+		frameReaderDisabled: '',
+		frameReaderFatal: false,
+		frameReaderErrorCode: 1,
+		releaseFrameReaderStorage: function () {
+			const reader = GodotMediaPlayer.frameReader;
+			if (!reader) return;
+			reader.pixels = null; reader.dirty = false;
+			const framebuffer = reader.framebuffer, texture = reader.texture;
+			reader.framebuffer = null; reader.texture = null;
+			let failed = false;
+			try { if (framebuffer) reader.gl.deleteFramebuffer(framebuffer); } catch (_) { failed = true; }
+			try { if (texture) reader.gl.deleteTexture(texture); } catch (_) { failed = true; }
+			if (failed) { try { GodotRuntime.error('Browser video scratch storage cleanup failed.'); } catch (_) { } }
+		},
+		reportFrameReaderFailure: function (r) {
+			r.frameTransfer = 'webgl_reader_error'; r.frameTransferReason = GodotMediaPlayer.frameReaderDisabled;
+			GodotMediaPlayer.error(r, 'Browser video frame reader failed: ' + GodotMediaPlayer.frameReaderDisabled, GodotMediaPlayer.frameReaderErrorCode);
+		},
+		failFrameReader: function (reason, outOfMemory) {
+			GodotMediaPlayer.frameReaderDisabled = reason;
+			GodotMediaPlayer.frameReaderFatal = true;
+			if (outOfMemory) GodotMediaPlayer.frameReaderErrorCode = 6;
+			GodotMediaPlayer.releaseFrameReaderStorage();
+			for (const player of GodotMediaPlayer.players.values()) {
+				if (player.video && player.element && !player.portal && !player.opaque) GodotMediaPlayer.reportFrameReaderFailure(player);
+			}
+			return -2;
+		},
+		frameReaderContextLost: function () {
+			const reader = GodotMediaPlayer.frameReader;
+			if (reader && reader.canvas === this) {
+				GodotMediaPlayer.failFrameReader('private_context_lost', false);
+			}
+		},
+		freeFrameReader: function () {
+			const reader = GodotMediaPlayer.frameReader;
+			GodotMediaPlayer.frameReader = null;
+			GodotMediaPlayer.frameReaderDisabled = 'shutdown';
+			GodotMediaPlayer.frameReaderFatal = true;
+			if (!reader) return;
+			reader.canvas.removeEventListener('webglcontextlost', GodotMediaPlayer.frameReaderContextLost);
+			reader.pixels = null;
+			let failure = null;
+			const attempt = function (operation) { try { operation(); } catch (error) { if (!failure) failure = error; } };
+			if (reader.framebuffer) attempt(function () { reader.gl.deleteFramebuffer(reader.framebuffer); });
+			if (reader.texture) attempt(function () { reader.gl.deleteTexture(reader.texture); });
+			attempt(function () { const extension = reader.gl.getExtension('WEBGL_lose_context'); if (extension) extension.loseContext(); });
+			reader.canvas.width = 0; reader.canvas.height = 0;
+			if (failure) throw failure;
+		},
+		clearFrameReaderIfIdle: function () {
+			const reader = GodotMediaPlayer.frameReader;
+			if (!reader || !reader.dirty) return;
+			try {
+				for (const player of GodotMediaPlayer.players.values()) {
+					if (player.video && player.element && !player.portal && !player.opaque) return;
+				}
+				if (reader.pixels) reader.pixels.fill(0);
+				if (!reader.gl.isContextLost() && reader.framebuffer) {
+					reader.gl.bindFramebuffer(reader.gl.FRAMEBUFFER, reader.framebuffer);
+					reader.gl.clearColor(0, 0, 0, 0);
+					reader.gl.clear(reader.gl.COLOR_BUFFER_BIT);
+				}
+				reader.dirty = false;
+			} catch (_) {
+				GodotMediaPlayer.failFrameReader('scratch_idle_clear_exception', false);
+				try { GodotRuntime.error('Browser video scratch idle clear failed.'); } catch (_) { }
+			}
+		},
+		readFrameReusable: function (r, pointer, capacity, width, height) {
+			const fallback = function (reason) {
+				r.frameTransfer = 'cpu_canvas_readback'; r.frameTransferReason = reason; return -1;
+			};
+			const failed = function (reason, outOfMemory) {
+				return GodotMediaPlayer.failFrameReader(reason, outOfMemory);
+			};
+			if (GodotMediaPlayer.frameReaderDisabled) {
+				if (GodotMediaPlayer.frameReaderFatal) { GodotMediaPlayer.reportFrameReaderFailure(r); return -2; }
+				return fallback(GodotMediaPlayer.frameReaderDisabled);
+			}
+			if (r.frameReaderUnsupported) return fallback(r.frameReaderUnsupported);
+			if (r.element.seeking || r.element.videoWidth !== width || r.element.videoHeight !== height) return 0;
+			let reader = GodotMediaPlayer.frameReader;
+			if (!reader) {
+				try {
+					const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+					const gl = canvas.getContext('webgl2', {'alpha': false, 'depth': false, 'stencil': false, 'antialias': false, 'premultipliedAlpha': false});
+					if (!gl || gl.canvas !== canvas || canvas === GodotConfig.canvas) {
+						GodotMediaPlayer.frameReaderDisabled = 'private_webgl2_unavailable';
+						return fallback(GodotMediaPlayer.frameReaderDisabled);
+					}
+					reader = {canvas, gl, texture: null, framebuffer: null, pixels: null, dirty: false};
+					GodotMediaPlayer.frameReader = reader;
+					canvas.addEventListener('webglcontextlost', GodotMediaPlayer.frameReaderContextLost);
+					reader.texture = gl.createTexture(); reader.framebuffer = gl.createFramebuffer();
+					if (!reader.texture || !reader.framebuffer) return failed('scratch_object_allocation', true);
+					gl.bindTexture(gl.TEXTURE_2D, reader.texture);
+					gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1920, 1080);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+					gl.bindFramebuffer(gl.FRAMEBUFFER, reader.framebuffer);
+					gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, reader.texture, 0);
+					const allocationError = gl.getError();
+					if (allocationError !== gl.NO_ERROR) return failed('scratch_storage_gl_' + allocationError, allocationError === gl.OUT_OF_MEMORY);
+					if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return failed('scratch_framebuffer_incomplete', false);
+					gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+					gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+					gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+					if ('unpackColorSpace' in gl) gl.unpackColorSpace = 'srgb';
+					gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+					reader.pixels = new Uint8Array(1920 * 1080 * 4);
+				} catch (error) {
+					return failed(error instanceof RangeError ? 'scratch_pixel_allocation' : 'scratch_initialization_exception', error instanceof RangeError);
+				}
+			}
+			const gl = reader.gl;
+			if (gl.isContextLost()) return failed('private_context_lost', false);
+			try {
+				gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, r.element);
+				reader.dirty = true;
+				const uploadError = gl.getError();
+				if (uploadError !== gl.NO_ERROR) return failed('video_upload_gl_' + uploadError, uploadError === gl.OUT_OF_MEMORY);
+				gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, reader.pixels);
+				const readError = gl.getError();
+				if (readError !== gl.NO_ERROR || gl.isContextLost()) return failed('pixel_read_gl_' + readError, readError === gl.OUT_OF_MEMORY);
+				HEAPU8.set(reader.pixels.subarray(0, capacity), pointer);
+				r.frameTransfer = 'webgl_reusable_readback'; r.frameTransferReason = '';
+				return 1;
+			} catch (error) {
+				// Keep existing origin/security fallback behavior. Unsupported DOM
+				// upload may use the legacy path, but never masquerades as this fix.
+				if (error && (error.name === 'SecurityError' || error.name === 'TypeError')) {
+					r.frameReaderUnsupported = 'private_upload_' + error.name;
+					return fallback(r.frameReaderUnsupported);
+				}
+				return failed('frame_transfer_exception', error instanceof RangeError);
+			}
+		},
 		loadScript: function (url, ready) {
 			if (ready()) return Promise.resolve();
 			if (!GodotMediaPlayer.scripts.has(url)) {
@@ -55,6 +199,7 @@ const GodotMediaPlayerLibrary = {
 			const r = GodotMediaPlayer.players.get(id);
 			if (!r) return;
 			GodotMediaPlayer.players.delete(id); clearTimeout(r.timer); clearTimeout(r.ytWait);
+			GodotMediaPlayer.clearFrameReaderIfIdle();
 			if (r.hls) r.hls['destroy']();
 			if (r.yt) r.yt['destroy']();
 			if (r.element) { r.element.pause(); r.element.removeAttribute('src'); r.element.load(); }
@@ -280,7 +425,7 @@ const GodotMediaPlayerLibrary = {
 			}
 			return {'ready': r.ready, 'buffering': r.buffering, 'position': position, 'duration': duration, 'width': width, 'height': height, 'portal': r.video && (r.portal || r.opaque), 'ranges': ranges, 'events': events,
 				'metadata': {'title': title, 'title_source': r.yt ? 'youtube_iframe' : 'url', 'source_type': r.portal ? 'youtube' : 'direct', 'duration': duration, 'is_live': live, 'live_status_known': r.liveKnown, 'opened': r.ready},
-				'capabilities': {'backend': r.yt || r.portal ? 'youtube_iframe' : r.hls ? 'browser_hls' : 'browser_media', 'precise_loop': false, 'seek_loop': seekLoop, 'seek': canSeek, 'live_playback': live, 'dvr': dvr, 'pcm_decode': !r.portal && !r.opaque && !live, 'volume': true, 'godot_audio_bus': false, 'native_destination_validation': false, 'network_policy': 'browser', 'buffer_policy': r.hls ? 'bounded_hls_targets' : 'browser_managed', 'buffer_hard_limit': false, 'max_buffer_target_bytes': r.hls ? 33554432 : 0, 'texture_rendering': !r.portal && !r.opaque, 'dom_rendering': r.portal || (r.video && r.opaque), 'dom_axis_aligned_only': r.portal || (r.video && r.opaque), 'dom_subviewport': false, 'live_status_known': r.liveKnown, 'iframe_dvr_ranges': false}};
+				'capabilities': {'backend': r.yt || r.portal ? 'youtube_iframe' : r.hls ? 'browser_hls' : 'browser_media', 'precise_loop': false, 'seek_loop': seekLoop, 'seek': canSeek, 'live_playback': live, 'dvr': dvr, 'pcm_decode': !r.portal && !r.opaque && !live, 'volume': true, 'godot_audio_bus': false, 'native_destination_validation': false, 'network_policy': 'browser', 'buffer_policy': r.hls ? 'bounded_hls_targets' : 'browser_managed', 'buffer_hard_limit': false, 'max_buffer_target_bytes': r.hls ? 33554432 : 0, 'video_frame_transfer': r.frameTransfer || 'pending', 'video_frame_transfer_reason': r.frameTransferReason || '', 'texture_rendering': !r.portal && !r.opaque, 'dom_rendering': r.portal || (r.video && r.opaque), 'dom_axis_aligned_only': r.portal || (r.video && r.opaque), 'dom_subviewport': false, 'live_status_known': r.liveKnown, 'iframe_dvr_ranges': false}};
 		},
 	},
 	godot_web_media_open__proxy: 'sync',
@@ -368,22 +513,38 @@ const GodotMediaPlayerLibrary = {
 	godot_web_media_frame__sig: 'iiiiii',
 	godot_web_media_frame: function (id, pointer, capacity, width, height) {
 		const r = GodotMediaPlayer.players.get(id);
-		if (!r || !r.element || !r.video || r.opaque || r.element.readyState < 2 || capacity !== width * height * 4 || width > 1920 || height > 1080 || r.frameTime === r.element.currentTime) return 0;
+		if (!r || !r.element || !r.video || r.opaque || r.element.readyState < 2 ||
+				!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 ||
+				width > 1920 || height > 1080 || capacity !== width * height * 4) return 0;
+		if (!Number.isInteger(pointer) || pointer < 0 || pointer + capacity > HEAPU8.length) {
+			GodotMediaPlayer.error(r, 'Invalid video frame destination.', 31); return 0;
+		}
+		if (GodotMediaPlayer.frameReaderFatal) { GodotMediaPlayer.reportFrameReaderFailure(r); return 0; }
+		if (r.frameTime === r.element.currentTime && r.frameWidth === width && r.frameHeight === height) return 0;
 		try {
-			if (!r.frameCanvas) { r.frameCanvas = document.createElement('canvas'); r.frameContext = r.frameCanvas.getContext('2d', {'willReadFrequently': true}); }
-			r.frameCanvas.width = width; r.frameCanvas.height = height;
-			r.frameContext.drawImage(r.element, 0, 0, width, height);
-			const data = r.frameContext.getImageData(0, 0, width, height).data;
-			// readyState can precede the first drawable frame, especially while
-			// paused. Do not memoize an empty canvas at an unchanged currentTime.
+			const transfer = GodotMediaPlayer.readFrameReusable(r, pointer, capacity, width, height);
+			if (transfer === -2 || transfer === 0) return 0;
+			let data;
+			if (transfer === 1) {
+				data = HEAPU8.subarray(pointer, pointer + capacity);
+			} else {
+				if (!r.frameCanvas) { r.frameCanvas = document.createElement('canvas'); r.frameContext = r.frameCanvas.getContext('2d', {'willReadFrequently': true}); }
+				r.frameCanvas.width = width; r.frameCanvas.height = height;
+				r.frameContext.drawImage(r.element, 0, 0, width, height);
+				data = r.frameContext.getImageData(0, 0, width, height).data;
+			}
+			// Retain the first-drawable-frame guard, including paused startup.
 			if (r.frameTime < 0) {
 				let drawable = false;
 				for (let i = 3; i < data.length; i += 4) { if (data[i]) { drawable = true; break; } }
 				if (!drawable) return 0;
 			}
-			HEAPU8.set(data, pointer);
-			r.frameTime = r.element.currentTime; return 1;
-		} catch (error) { r.opaque = true; return 0; }
+			if (transfer !== 1) HEAPU8.set(data, pointer);
+			r.frameTime = r.element.currentTime; r.frameWidth = width; r.frameHeight = height;
+			return 1;
+		} catch (error) {
+			r.opaque = true; GodotMediaPlayer.clearFrameReaderIfIdle(); return 0;
+		}
 	},
 	godot_web_media_close__proxy: 'sync',
 	godot_web_media_close__sig: 'vi',
