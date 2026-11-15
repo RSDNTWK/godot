@@ -1,7 +1,7 @@
-prefix=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc
+prefix=C:/godot/build/hardware-backends-20261115/sdk/windows-x86_64-msvc
 exec_prefix=${prefix}
-libdir=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc/lib
-includedir=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc/include
+libdir=C:/godot/build/hardware-backends-20261115/sdk/windows-x86_64-msvc/lib
+includedir=C:/godot/build/hardware-backends-20261115/sdk/windows-x86_64-msvc/include
 
 Name: libswscale
 Description: FFmpeg image rescaling library

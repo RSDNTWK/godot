@@ -1,7 +1,7 @@
-prefix=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc
+prefix=C:/godot/build/hardware-backends-20261115/sdk/windows-x86_64-msvc
 exec_prefix=${prefix}
-libdir=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc/lib
-includedir=/c/godot/build/media-stable-20261005/install/windows-x86_64-msvc/include
+libdir=C:/godot/build/hardware-backends-20261115/sdk/windows-x86_64-msvc/lib
+includedir=C:/godot/build/hardware-backends-20261115/sdk/windows-x86_64-msvc/include
 
 Name: libavutil
 Description: FFmpeg utility library
@@ -9,6 +9,6 @@ Version: 61.1.102
 Requires: 
 Requires.private: 
 Conflicts:
-Libs: -L${libdir}  -lavutil C:/godot/build/libvpl-install/lib/vpl.lib user32.lib bcrypt.lib
+Libs: -L${libdir}  -lavutil C:/godot/build/hardware-backends-20261115/sdk/windows-x86_64-msvc/deps/lib/vpl_static.lib user32.lib bcrypt.lib advapi32.lib ole32.lib user32.lib bcrypt.lib
 Libs.private: 
 Cflags: -I${includedir}
