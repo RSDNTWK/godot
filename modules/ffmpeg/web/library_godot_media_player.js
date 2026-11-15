@@ -38,8 +38,9 @@ const GodotMediaPlayerLibrary = {
 		scripts: new Map(),
 		backdrop: null,
 		canvasStyle: null,
-		// A single page-lifetime scratch context/buffer bounds allocation churn
-		// across all media players. It never accesses the main Godot GL context.
+		// Share one conversion surface across media players. Fresh CPU readback
+		// buffers are explicitly relinquished; a lazy private GL reader remains
+		// available when that transfer is unsupported. Never touch Godot main GL.
 		frameReader: null,
 		frameReaderDisabled: '',
 		frameReaderFatal: false,
@@ -51,6 +52,12 @@ const GodotMediaPlayerLibrary = {
 			const stage = reader.stageCanvas;
 			reader.stageCanvas = null; reader.stageContext = null;
 			let stageFailed = false;
+			if (reader.releasePorts) {
+				const pending = reader.releasePorts; reader.releasePorts = null;
+				for (const port of pending) {
+					try { port.close(); } catch (_) { stageFailed = true; (reader.releasePorts ||= []).push(port); }
+				}
+			}
 			if (stage) {
 				try { stage.width = 0; } catch (_) { stageFailed = true; }
 				try { stage.height = 0; } catch (_) { stageFailed = true; }
@@ -63,7 +70,7 @@ const GodotMediaPlayerLibrary = {
 			if (failed) { try { GodotRuntime.error('Browser video scratch storage cleanup failed.'); } catch (_) { } }
 		},
 		reportFrameReaderFailure: function (r) {
-			r.frameTransfer = 'webgl_reader_error'; r.frameTransferReason = GodotMediaPlayer.frameReaderDisabled;
+			r.frameTransfer = GodotMediaPlayer.frameReader && GodotMediaPlayer.frameReader.gl ? 'webgl_reader_error' : 'canvas_reader_error'; r.frameTransferReason = GodotMediaPlayer.frameReaderDisabled;
 			GodotMediaPlayer.error(r, 'Browser video frame reader failed: ' + GodotMediaPlayer.frameReaderDisabled, GodotMediaPlayer.frameReaderErrorCode);
 		},
 		failFrameReader: function (reason, outOfMemory) {
@@ -88,7 +95,7 @@ const GodotMediaPlayerLibrary = {
 			GodotMediaPlayer.frameReaderDisabled = 'shutdown';
 			GodotMediaPlayer.frameReaderFatal = true;
 			if (!reader) return;
-			reader.canvas.removeEventListener('webglcontextlost', GodotMediaPlayer.frameReaderContextLost);
+			if (reader.canvas) reader.canvas.removeEventListener('webglcontextlost', GodotMediaPlayer.frameReaderContextLost);
 			reader.pixels = null;
 			let failure = null;
 			const attempt = function (operation) { try { operation(); } catch (error) { if (!failure) failure = error; } };
@@ -99,8 +106,10 @@ const GodotMediaPlayerLibrary = {
 				attempt(function () { reader.stageCanvas.height = 0; });
 			}
 			reader.stageCanvas = null; reader.stageContext = null;
-			attempt(function () { const extension = reader.gl.getExtension('WEBGL_lose_context'); if (extension) extension.loseContext(); });
-			reader.canvas.width = 0; reader.canvas.height = 0;
+			if (reader.releasePorts) for (const port of reader.releasePorts) attempt(function () { port.close(); });
+			reader.releasePorts = null;
+			if (reader.gl) attempt(function () { const extension = reader.gl.getExtension('WEBGL_lose_context'); if (extension) extension.loseContext(); });
+			if (reader.canvas) { reader.canvas.width = 0; reader.canvas.height = 0; }
 			if (failure) throw failure;
 		},
 		clearFrameReaderIfIdle: function () {
@@ -112,7 +121,7 @@ const GodotMediaPlayerLibrary = {
 				}
 				if (reader.pixels) reader.pixels.fill(0);
 				if (reader.stageContext) reader.stageContext.clearRect(0, 0, 1920, 1080);
-				if (!reader.gl.isContextLost() && reader.framebuffer) {
+				if (reader.gl && !reader.gl.isContextLost() && reader.framebuffer) {
 					reader.gl.bindFramebuffer(reader.gl.FRAMEBUFFER, reader.framebuffer);
 					reader.gl.clearColor(0, 0, 0, 0);
 					reader.gl.clear(reader.gl.COLOR_BUFFER_BIT);
@@ -123,6 +132,32 @@ const GodotMediaPlayerLibrary = {
 				try { GodotRuntime.error('Browser video scratch idle clear failed.'); } catch (_) { }
 			}
 		},
+		discardOwnedFrameBuffer: function (reader, buffer) {
+			// Only the fresh, exact ImageData buffer validated at the call site
+			// may enter here. In particular, never transfer Wasm or shared memory.
+			if (!(buffer instanceof ArrayBuffer) || buffer === HEAPU8.buffer) return {detached: false, reason: 'pixel_buffer_not_private', cleanupFailed: false, outOfMemory: false, failed: true};
+			let channel = null, detached = false, reason = '', cleanupFailed = false, outOfMemory = false, failed = false;
+			try {
+				channel = new MessageChannel();
+				// The receiver is never started or exposed. Closing both endpoints
+				// discards the transferred payload without creating another JS view.
+				channel.port1.postMessage(buffer, [buffer]);
+				detached = buffer.byteLength === 0;
+				if (!detached) reason = 'pixel_buffer_not_detached';
+			} catch (error) {
+				reason = 'pixel_buffer_transfer_' + String(error && error.name || 'error').slice(0, 64);
+				const name = String(error && error.name || 'Error');
+				outOfMemory = error instanceof RangeError || name === 'RangeError';
+				// Only known capability failures may select another implementation.
+				// Resource, state and unknown errors must not provoke more allocation.
+				failed = outOfMemory || !['TypeError', 'DataCloneError', 'NotSupportedError'].includes(name);
+			} finally {
+				if (channel) for (const port of [channel.port1, channel.port2]) {
+					try { port.close(); } catch (error) { cleanupFailed = true; outOfMemory ||= error instanceof RangeError || (error && error.name === 'RangeError'); (reader.releasePorts ||= []).push(port); }
+				}
+			}
+			return {detached, reason, cleanupFailed, outOfMemory, failed};
+		},
 		readFrameReusable: function (r, pointer, capacity, width, height) {
 			const fallback = function (reason) {
 				r.frameTransfer = 'cpu_canvas_readback'; r.frameTransferReason = reason; return -1;
@@ -130,60 +165,86 @@ const GodotMediaPlayerLibrary = {
 			const failed = function (reason, outOfMemory) {
 				return GodotMediaPlayer.failFrameReader(reason, outOfMemory);
 			};
-			if (GodotMediaPlayer.frameReaderDisabled) {
-				if (GodotMediaPlayer.frameReaderFatal) { GodotMediaPlayer.reportFrameReaderFailure(r); return -2; }
-				return fallback(GodotMediaPlayer.frameReaderDisabled);
-			}
+			if (GodotMediaPlayer.frameReaderFatal) { GodotMediaPlayer.reportFrameReaderFailure(r); return -2; }
 			if (r.frameReaderUnsupported) return fallback(r.frameReaderUnsupported);
 			if (r.element.seeking || r.element.videoWidth !== width || r.element.videoHeight !== height) return 0;
 			let reader = GodotMediaPlayer.frameReader;
-			if (!reader) {
-				try {
-					const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
-					const gl = canvas.getContext('webgl2', {'alpha': false, 'depth': false, 'stencil': false, 'antialias': false, 'premultipliedAlpha': false});
-					if (!gl || gl.canvas !== canvas || canvas === GodotConfig.canvas) {
-						GodotMediaPlayer.frameReaderDisabled = 'private_webgl2_unavailable';
-						return fallback(GodotMediaPlayer.frameReaderDisabled);
-					}
-					reader = {canvas, gl, texture: null, framebuffer: null, pixels: null, stageCanvas: null, stageContext: null, dirty: false};
-					GodotMediaPlayer.frameReader = reader;
-					canvas.addEventListener('webglcontextlost', GodotMediaPlayer.frameReaderContextLost);
-					reader.texture = gl.createTexture(); reader.framebuffer = gl.createFramebuffer();
-					if (!reader.texture || !reader.framebuffer) return failed('scratch_object_allocation', true);
-					gl.bindTexture(gl.TEXTURE_2D, reader.texture);
-					gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1920, 1080);
-					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-					gl.bindFramebuffer(gl.FRAMEBUFFER, reader.framebuffer);
-					gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, reader.texture, 0);
-					const allocationError = gl.getError();
-					if (allocationError !== gl.NO_ERROR) return failed('scratch_storage_gl_' + allocationError, allocationError === gl.OUT_OF_MEMORY);
-					if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return failed('scratch_framebuffer_incomplete', false);
-					gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-					gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-					gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
-					if ('unpackColorSpace' in gl) gl.unpackColorSpace = 'srgb';
-					gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
-					// Preserve the existing Canvas2D video color conversion without
-					// allocating getImageData storage for every frame. Dimensions
-					// stay fixed across players; the GL upload crops the used region.
-					reader.stageCanvas = document.createElement('canvas');
-					reader.stageCanvas.width = 1920; reader.stageCanvas.height = 1080;
-					reader.stageContext = reader.stageCanvas.getContext('2d', {'willReadFrequently': true});
-					if (!reader.stageContext) return failed('scratch_conversion_context_unavailable', false);
-					reader.stageContext.globalCompositeOperation = 'copy';
-					reader.pixels = new Uint8Array(1920 * 1080 * 4);
-				} catch (error) {
-					return failed(error instanceof RangeError ? 'scratch_pixel_allocation' : 'scratch_initialization_exception', error instanceof RangeError);
-				}
-			}
-			const gl = reader.gl;
-			if (gl.isContextLost()) return failed('private_context_lost', false);
+			if (reader && reader.releaseUnsupported && GodotMediaPlayer.frameReaderDisabled) return fallback(GodotMediaPlayer.frameReaderDisabled);
 			try {
+				if (!reader) {
+					try {
+						reader = {canvas: null, gl: null, texture: null, framebuffer: null, pixels: null, stageCanvas: null, stageContext: null, releasePorts: null, releaseUnsupported: typeof MessageChannel === 'function' ? '' : 'message_channel_unavailable', dirty: false};
+						GodotMediaPlayer.frameReader = reader;
+						reader.stageCanvas = document.createElement('canvas');
+						reader.stageCanvas.width = 1920; reader.stageCanvas.height = 1080;
+						reader.stageContext = reader.stageCanvas.getContext('2d', {'willReadFrequently': true});
+						if (!reader.stageContext) return failed('scratch_conversion_context_unavailable', false);
+						reader.stageContext.globalCompositeOperation = 'copy';
+					} catch (error) {
+						return failed('scratch_initialization_exception', error instanceof RangeError);
+					}
+				}
 				reader.stageContext.drawImage(r.element, 0, 0, width, height);
 				reader.dirty = true;
+				if (!reader.releaseUnsupported) {
+					const image = reader.stageContext.getImageData(0, 0, width, height);
+					const data = image.data, buffer = data.buffer;
+					if (!(data instanceof Uint8ClampedArray) || data.byteOffset !== 0 || data.byteLength !== capacity || !(buffer instanceof ArrayBuffer) || buffer.byteLength !== capacity || buffer === HEAPU8.buffer) return failed('unexpected_image_data_buffer', false);
+					let released;
+					try {
+						HEAPU8.set(data, pointer);
+					} finally {
+						// Also release on copy failure. The exported first-alpha guard
+						// reads the completed Wasm copy, never this detached source view.
+						released = GodotMediaPlayer.discardOwnedFrameBuffer(reader, buffer);
+					}
+					if (released.cleanupFailed) return failed('pixel_buffer_transfer_cleanup', released.outOfMemory);
+					if (released.outOfMemory) return failed('pixel_buffer_transfer_allocation', true);
+					if (released.failed) return failed(released.reason, false);
+					if (released.detached) {
+						r.frameTransfer = 'canvas_transfer_readback'; r.frameTransferReason = '';
+						return 1;
+					}
+					// Try this only once per page if unsupported; keep the qualified
+					// reusable GL path rather than reattempting transfers every frame.
+					reader.releaseUnsupported = released.reason || 'pixel_buffer_transfer_unsupported';
+				}
+				if (GodotMediaPlayer.frameReaderDisabled) return fallback(GodotMediaPlayer.frameReaderDisabled);
+				if (!reader.gl) {
+					try {
+						const canvas = document.createElement('canvas'); canvas.width = 1; canvas.height = 1;
+						const gl = canvas.getContext('webgl2', {'alpha': false, 'depth': false, 'stencil': false, 'antialias': false, 'premultipliedAlpha': false});
+						if (!gl || gl.canvas !== canvas || canvas === GodotConfig.canvas) {
+							GodotMediaPlayer.frameReaderDisabled = 'private_webgl2_unavailable';
+							return fallback(GodotMediaPlayer.frameReaderDisabled);
+						}
+						reader.canvas = canvas; reader.gl = gl;
+						canvas.addEventListener('webglcontextlost', GodotMediaPlayer.frameReaderContextLost);
+						reader.texture = gl.createTexture(); reader.framebuffer = gl.createFramebuffer();
+						if (!reader.texture || !reader.framebuffer) return failed('scratch_object_allocation', true);
+						gl.bindTexture(gl.TEXTURE_2D, reader.texture);
+						gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 1920, 1080);
+						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+						gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+						gl.bindFramebuffer(gl.FRAMEBUFFER, reader.framebuffer);
+						gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, reader.texture, 0);
+						const allocationError = gl.getError();
+						if (allocationError !== gl.NO_ERROR) return failed('scratch_storage_gl_' + allocationError, allocationError === gl.OUT_OF_MEMORY);
+						if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return failed('scratch_framebuffer_incomplete', false);
+						gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+						gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+						gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+						if ('unpackColorSpace' in gl) gl.unpackColorSpace = 'srgb';
+						gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+						reader.pixels = new Uint8Array(1920 * 1080 * 4);
+					} catch (error) {
+						return failed(error instanceof RangeError ? 'scratch_pixel_allocation' : 'scratch_initialization_exception', error instanceof RangeError);
+					}
+				}
+				const gl = reader.gl;
+				if (gl.isContextLost()) return failed('private_context_lost', false);
 				gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, reader.stageCanvas);
 				const uploadError = gl.getError();
 				if (uploadError !== gl.NO_ERROR) return failed('video_upload_gl_' + uploadError, uploadError === gl.OUT_OF_MEMORY);
@@ -194,12 +255,8 @@ const GodotMediaPlayerLibrary = {
 				r.frameTransfer = 'webgl_reusable_readback'; r.frameTransferReason = '';
 				return 1;
 			} catch (error) {
-				// Keep existing origin/security fallback behavior. Unsupported DOM
-				// upload may use the legacy path, but never masquerades as this fix.
 				if (error && (error.name === 'SecurityError' || error.name === 'TypeError')) {
-					if (error.name === 'SecurityError') {
-						// A blocked source must not taint shared conversion storage
-						// for later readable players. Reset only on this error path.
+					if (error.name === 'SecurityError' && reader && reader.stageCanvas) {
 						try {
 							reader.stageCanvas.width = 1920;
 							reader.stageContext.globalCompositeOperation = 'copy';
