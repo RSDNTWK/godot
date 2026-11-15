@@ -709,9 +709,11 @@ void ShaderGLES3::_initialize_version(Version *p_version) {
 	p_version->variants.reserve(variant_count);
 	for (int i = 0; i < variant_count; i++) {
 		p_version->variants.push_back(AHashMap<uint64_t, Version::Specialization>());
+#ifndef WEB_ENABLED
 		Version::Specialization spec;
 		_compile_specialization(spec, i, p_version, specialization_default_mask);
 		p_version->variants[i].insert(specialization_default_mask, spec);
+#endif
 	}
 	if (use_cache) {
 		_save_to_cache(p_version);

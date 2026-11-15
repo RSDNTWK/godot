@@ -76,7 +76,7 @@ private:
 
 	// A version is a high-level construct which is a combination of built-in and user-defined shader code, Each user-created Shader makes one version
 	// Variants use #ifdefs to toggle behavior on and off to change behavior of the shader
-	// All variants are compiled each time a new version is created
+	// Native initializes every default variant. Web compiles a variant when it is first bound.
 	// Specializations use #ifdefs to toggle behavior on and off for performance, on supporting hardware, they will compile a version with everything enabled, and then compile more copies to improve performance
 	// Use specializations to enable and disabled advanced features, use variants to toggle behavior when different data may be used (e.g. using a samplerArray vs a sampler, or doing a depth prepass vs a color pass)
 	struct Version {
