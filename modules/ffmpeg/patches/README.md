@@ -4,6 +4,21 @@ Apply these patches to the pinned FFmpeg 9.0.2 source before building SDKs.
 The HLS patches retain the engine's validated custom HTTPS IO and timestamp
 checks.
 
+For desktop SDKs, enable Windows Vulkan decoding with `--enable-vulkan`,
+`--disable-vulkan-static` and the `av1_vulkan`, `h264_vulkan`, `hevc_vulkan`
+and `vp9_vulkan` accelerators. Vulkan headers 1.4.317 or newer are needed for
+the VP9 path. The runtime Vulkan loader remains optional.
+
+For Linux VDPAU, apply `vdpau-optional-runtime.patch` and enable `--enable-vdpau`
+with the available VDPAU accelerators for the SDK's selected codecs. Build
+headers are required, but X11/VDPAU runtimes are loaded only when
+that backend is tried. The patched configure check requires headers without
+adding X11/VDPAU linker dependencies. Missing runtime libraries, symbols,
+displays or devices
+return a device-initialization failure so playback can try another backend or
+software. Device callbacks remain loaded through device teardown. This patch
+does not change the existing decoder preference or software-recovery policy.
+
 `arm32-ndk-neon-syntax.patch` removes GNU-only `.dn` typed-register aliases
 from the two ARM32 RGB-to-NV12 kernels. Register lanes are explicit and the
 multiply instructions carry their existing `.s16` type. The dispatch and

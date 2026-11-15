@@ -1,0 +1,97 @@
+--- a/configure
++++ b/configure
+@@ -7795,7 +7795,7 @@
+     check_cpp_condition vdpau vdpau/vdpau.h "defined VDP_DECODER_PROFILE_MPEG4_PART2_ASP"
+ 
+ enabled vdpau &&
+-    check_lib vdpau_x11 "vdpau/vdpau.h vdpau/vdpau_x11.h" vdp_device_create_x11 -lvdpau -lX11
++    check_cpp_condition vdpau_x11 "vdpau/vdpau.h vdpau/vdpau_x11.h" "defined(VDPAU_VERSION)"
+ 
+ # Check for the Vulkan headers
+ if enabled_all vulkan vulkan_static; then
+--- a/libavutil/hwcontext_vdpau.c
++++ b/libavutil/hwcontext_vdpau.c
+@@ -448,10 +448,19 @@
+ #if HAVE_VDPAU_X11
+ #include <vdpau/vdpau_x11.h>
+ #include <X11/Xlib.h>
++#include <dlfcn.h>
+ 
+ typedef struct VDPAUDevicePriv {
+     VdpDeviceDestroy *device_destroy;
+     Display *dpy;
++    void *libx11;
++    void *libvdpau;
++    Display *(*open_display)(const char *);
++    int (*close_display)(Display *);
++    char *(*display_name)(const char *);
++    char *(*display_string)(Display *);
++    int (*default_screen)(Display *);
++    VdpDeviceCreateX11 *create_device;
+ } VDPAUDevicePriv;
+ 
+ static void vdpau_device_free(AVHWDeviceContext *ctx)
+@@ -462,7 +471,11 @@
+     if (priv->device_destroy)
+         priv->device_destroy(hwctx->device);
+     if (priv->dpy)
+-        XCloseDisplay(priv->dpy);
++        priv->close_display(priv->dpy);
++    if (priv->libvdpau)
++        dlclose(priv->libvdpau);
++    if (priv->libx11)
++        dlclose(priv->libx11);
+     av_freep(&priv);
+ }
+ 
+@@ -483,15 +496,35 @@
+     ctx->user_opaque = priv;
+     ctx->free        = vdpau_device_free;
+ 
+-    priv->dpy = XOpenDisplay(device);
++    /* Optional runtimes must not become startup dependencies of the player. */
++    priv->libx11   = dlopen("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
++    priv->libvdpau = dlopen("libvdpau.so.1", RTLD_NOW | RTLD_LOCAL);
++    if (!priv->libx11 || !priv->libvdpau) {
++        av_log(ctx, AV_LOG_VERBOSE, "Optional VDPAU/X11 runtime unavailable.\n");
++        return AVERROR(ENOSYS);
++    }
++
++    priv->open_display = (Display *(*)(const char *))dlsym(priv->libx11, "XOpenDisplay");
++    priv->close_display = (int (*)(Display *))dlsym(priv->libx11, "XCloseDisplay");
++    priv->display_name = (char *(*)(const char *))dlsym(priv->libx11, "XDisplayName");
++    priv->display_string = (char *(*)(Display *))dlsym(priv->libx11, "XDisplayString");
++    priv->default_screen = (int (*)(Display *))dlsym(priv->libx11, "XDefaultScreen");
++    priv->create_device = (VdpDeviceCreateX11 *)dlsym(priv->libvdpau, "vdp_device_create_x11");
++    if (!priv->open_display || !priv->close_display || !priv->display_name ||
++        !priv->display_string || !priv->default_screen || !priv->create_device) {
++        av_log(ctx, AV_LOG_VERBOSE, "Optional VDPAU/X11 runtime symbols unavailable.\n");
++        return AVERROR(ENOSYS);
++    }
++
++    priv->dpy = priv->open_display(device);
+     if (!priv->dpy) {
+         av_log(ctx, AV_LOG_ERROR, "Cannot open the X11 display %s.\n",
+-               XDisplayName(device));
++               priv->display_name(device));
+         return AVERROR_UNKNOWN;
+     }
+-    display = XDisplayString(priv->dpy);
+-
+-    err = vdp_device_create_x11(priv->dpy, XDefaultScreen(priv->dpy),
++    display = priv->display_string(priv->dpy);
++
++    err = priv->create_device(priv->dpy, priv->default_screen(priv->dpy),
+                                 &hwctx->device, &hwctx->get_proc_address);
+     if (err != VDP_STATUS_OK) {
+         av_log(ctx, AV_LOG_ERROR, "VDPAU device creation on X11 display %s failed.\n",
+@@ -499,8 +532,8 @@
+         return AVERROR_UNKNOWN;
+     }
+ 
++    GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY,         priv->device_destroy);
+     GET_CALLBACK(VDP_FUNC_ID_GET_INFORMATION_STRING, get_information_string);
+-    GET_CALLBACK(VDP_FUNC_ID_DEVICE_DESTROY,         priv->device_destroy);
+ 
+     get_information_string(&vendor);
+     av_log(ctx, AV_LOG_VERBOSE, "Successfully created a VDPAU device (%s) on "
