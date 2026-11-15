@@ -5,7 +5,7 @@
  
  enabled vdpau &&
 -    check_lib vdpau_x11 "vdpau/vdpau.h vdpau/vdpau_x11.h" vdp_device_create_x11 -lvdpau -lX11
-+    check_cpp_condition vdpau_x11 "vdpau/vdpau.h vdpau/vdpau_x11.h" "defined(VDPAU_VERSION)"
++    check_cpp_condition vdpau_x11 "vdpau/vdpau_x11.h" "defined(VDPAU_VERSION)"
  
  # Check for the Vulkan headers
  if enabled_all vulkan vulkan_static; then
