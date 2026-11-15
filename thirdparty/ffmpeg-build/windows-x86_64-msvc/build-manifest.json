@@ -1,0 +1,287 @@
+{
+  "schema_version": 2,
+  "ffmpeg": "9.0.2",
+  "ffmpeg_source_commit": "946fcce07b6dcd0331c8cc609192aeff5e1924f8",
+  "dav1d": "1.5.4",
+  "amf_headers": "1.5.3",
+  "amf_source_commit": "57ee0cfb0e1a08d9041f77435653794c1b012be0",
+  "target": "windows-x86_64-msvc",
+  "static_libraries": true,
+  "decoders": [
+    "h263",
+    "h264",
+    "h264_qsv",
+    "hevc",
+    "hevc_qsv",
+    "mjpeg",
+    "mpeg1video",
+    "mpeg2video",
+    "mpeg4",
+    "mpeg2_qsv",
+    "theora",
+    "vc1",
+    "vc1_qsv",
+    "vp3",
+    "vp8",
+    "vp9",
+    "aac",
+    "flac",
+    "mp3",
+    "opus",
+    "vorbis",
+    "pcm_s16le",
+    "libdav1d",
+    "av1",
+    "av1_cuvid",
+    "av1_qsv",
+    "av1_amf",
+    "h264_amf",
+    "h264_cuvid",
+    "hevc_amf",
+    "hevc_cuvid",
+    "mjpeg_cuvid",
+    "mjpeg_qsv",
+    "mpeg1_cuvid",
+    "mpeg2_cuvid",
+    "mpeg4_cuvid",
+    "vc1_cuvid",
+    "vp8_cuvid",
+    "vp8_qsv",
+    "vp9_amf",
+    "vp9_cuvid",
+    "vp9_qsv"
+  ],
+  "demuxers": [
+    "aac",
+    "ac3",
+    "eac3",
+    "flac",
+    "hls",
+    "matroska,webm",
+    "mov,mp4,m4a,3gp,3g2,mj2",
+    "mp3",
+    "mpegts",
+    "ogg",
+    "wav"
+  ],
+  "hardware_backends": [
+    "CUDA",
+    "NVDEC",
+    "CUVID",
+    "QSV",
+    "AMF",
+    "LIBDAV1D",
+    "VULKAN",
+    "D3D11VA",
+    "D3D12VA",
+    "DXVA2"
+  ],
+  "codec_device_configs": [
+    "h263:cuda:3",
+    "h264:dxva2:11",
+    "h264:d3d11va:3",
+    "h264:d3d12va:3",
+    "h264:cuda:3",
+    "h264:vulkan:11",
+    "h264_qsv:qsv:3",
+    "hevc:dxva2:11",
+    "hevc:d3d11va:3",
+    "hevc:d3d12va:3",
+    "hevc:cuda:3",
+    "hevc:vulkan:11",
+    "hevc_qsv:qsv:3",
+    "mjpeg:cuda:3",
+    "mpeg1video:cuda:3",
+    "mpeg2video:dxva2:11",
+    "mpeg2video:d3d11va:3",
+    "mpeg2video:d3d12va:3",
+    "mpeg2video:cuda:3",
+    "mpeg4:cuda:3",
+    "mpeg2_qsv:qsv:3",
+    "vc1:dxva2:11",
+    "vc1:d3d11va:3",
+    "vc1:d3d12va:3",
+    "vc1:cuda:3",
+    "vc1_qsv:qsv:3",
+    "vp8:cuda:3",
+    "vp9:dxva2:11",
+    "vp9:d3d11va:3",
+    "vp9:d3d12va:3",
+    "vp9:cuda:3",
+    "vp9:vulkan:11",
+    "av1:dxva2:11",
+    "av1:d3d11va:3",
+    "av1:d3d12va:3",
+    "av1:cuda:3",
+    "av1:vulkan:11",
+    "av1_cuvid:cuda:7",
+    "av1_qsv:qsv:3",
+    "av1_amf:amf:3",
+    "h264_amf:amf:3",
+    "h264_cuvid:cuda:7",
+    "hevc_amf:amf:3",
+    "hevc_cuvid:cuda:7",
+    "mjpeg_cuvid:cuda:7",
+    "mjpeg_qsv:qsv:3",
+    "mpeg1_cuvid:cuda:7",
+    "mpeg2_cuvid:cuda:7",
+    "mpeg4_cuvid:cuda:7",
+    "vc1_cuvid:cuda:7",
+    "vp8_cuvid:cuda:7",
+    "vp8_qsv:qsv:3",
+    "vp9_amf:amf:3",
+    "vp9_cuvid:cuda:7",
+    "vp9_qsv:qsv:3"
+  ],
+  "all_previous_registered_components_preserved": true,
+  "config_sha256": "fecd7b5f8e6d64746780cfd77fa7ff5430c625baeb703eec3105b4c4dc3fdde9",
+  "components_sha256": "a7779a1022247855f9b52f35594117a5bf1fadb166db90891bc89410d8066f62",
+  "artifacts": {
+    "lib/avcodec.lib": {
+      "sha256": "57985581a2302003fd465006ebf48e5fd46ac9c5203f7cd93ca4eab3d960241f",
+      "size": 15478134
+    },
+    "lib/avdevice.lib": {
+      "sha256": "537229e0ad8c628b91987100f559b97f6e7297e5f0ec395ff5dc05dd6af3c58a",
+      "size": 33300
+    },
+    "lib/avfilter.lib": {
+      "sha256": "fce45b9996dfea7f012c7b5d0d14af8fcb8dc57fb302491239b44c58e3b7da9d",
+      "size": 501254
+    },
+    "lib/avformat.lib": {
+      "sha256": "f3167366c503148e6806d94e53b485c357cc57d5597c811493faeaf1ac001ef3",
+      "size": 2517566
+    },
+    "lib/avutil.lib": {
+      "sha256": "6ae01f6cf5657fe10049834471db9e5bf78f6627955bf1eb9db3de3b49d12228",
+      "size": 3119896
+    },
+    "lib/swresample.lib": {
+      "sha256": "41bce6ecde5b3e055870ad3410e1ce59be1566b62654a1604ba995af19964723",
+      "size": 410330
+    },
+    "lib/swscale.lib": {
+      "sha256": "7009a79a5fc6389f98eb29622e1cf1d0b3cf64b72329674c6cb6212cf12e4a9b",
+      "size": 3224060
+    },
+    "deps/lib/libdav1d.a": {
+      "sha256": "2a57a711371bd85f70932a63b5bcd6440bfbcada9dbb3f6fd63f2832f4ecf3e5",
+      "size": 3774446
+    },
+    "deps/lib/ogg.lib": {
+      "sha256": "fbb5fe10129f8423c77ebbbded2fa100b2657447f1937b35d1dea3cc799d942e",
+      "size": 50358
+    },
+    "deps/lib/theora.lib": {
+      "sha256": "7cebf9d6640c616991404e6ab699ebc79bbcf0c181ee298bc1b31833ffd3aefb",
+      "size": 346324
+    },
+    "deps/lib/theoradec.lib": {
+      "sha256": "7cebf9d6640c616991404e6ab699ebc79bbcf0c181ee298bc1b31833ffd3aefb",
+      "size": 346324
+    },
+    "deps/lib/theoraenc.lib": {
+      "sha256": "7cebf9d6640c616991404e6ab699ebc79bbcf0c181ee298bc1b31833ffd3aefb",
+      "size": 346324
+    },
+    "deps/lib/vorbis.lib": {
+      "sha256": "09cd2cdf919a58694e7c439f88d49c74ef45077da81c52d40c4517e970199c85",
+      "size": 1131892
+    },
+    "deps/lib/vorbisenc.lib": {
+      "sha256": "09cd2cdf919a58694e7c439f88d49c74ef45077da81c52d40c4517e970199c85",
+      "size": 1131892
+    },
+    "deps/lib/vpl.lib": {
+      "sha256": "60349419fa12d1ffe2089151622f1ee588807bccf503c4a1813eee5b91062a15",
+      "size": 15960
+    },
+    "deps/lib/vpl_static.lib": {
+      "sha256": "e95524241e622f3e1025915afaa202c223e44e9a39ee8378b06a598482cd0db3",
+      "size": 4345382
+    }
+  },
+  "licenses": [
+    {
+      "file": "licenses/dav1d-COPYING.txt",
+      "sha256": "225bbec3afc382f1bb85f7bb01655f3a37ed5e693a4fa18a64c0c5bab48c854e"
+    },
+    {
+      "file": "licenses/FFmpeg-LGPLv2.1.txt",
+      "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+    },
+    {
+      "file": "licenses/FFmpeg-LICENSE.md",
+      "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+    },
+    {
+      "file": "licenses/oneVPL-license.txt",
+      "sha256": "6b53987f5de35662ccbcf2753dc84a713068443acb482fd6fd431ff7cf5da9f9"
+    }
+  ],
+  "component_qualification": {
+    "passed": true,
+    "receipt_sha256": "28e91c794c5e8b2d8a1ce8f0c6068005ca9ed728cda21ba7b5a2159990b0a2ef",
+    "source_configuration_receipt_sha256": "90cecd155977df06608f14bc8185272cb33f28b1c9e1802ab6df9c95be8a1596",
+    "scope": "Registration preserved, actual software frames, unavailable-driver/loader cleanup and optional startup dependency checks. Does not qualify all physical vendor GPUs."
+  },
+  "engine_runtime_evidence": {
+    "source_head": "f5b594f184a00abc49a1c211cb12b5b7ac006e06",
+    "receipt_sha256": "f045e795b61dce1a0f4dd58b75bbd4828fb9130fe438af9761b5beb55ce741be",
+    "scope": "Prior exact-archive engine fallback evidence, not qualification of later engine build IDs."
+  },
+  "generated_utc": "2026-11-15T17:03:11.591683+00:00",
+  "added_hwaccels": [
+    "av1_vulkan",
+    "h264_vulkan",
+    "hevc_vulkan",
+    "vp9_vulkan"
+  ],
+  "hwaccels": [
+    "av1_d3d11va",
+    "av1_d3d11va2",
+    "av1_d3d12va",
+    "av1_dxva2",
+    "av1_nvdec",
+    "av1_vulkan",
+    "h264_d3d11va",
+    "h264_d3d11va2",
+    "h264_d3d12va",
+    "h264_dxva2",
+    "h264_nvdec",
+    "h264_vulkan",
+    "hevc_d3d11va",
+    "hevc_d3d11va2",
+    "hevc_d3d12va",
+    "hevc_dxva2",
+    "hevc_nvdec",
+    "hevc_vulkan",
+    "mjpeg_nvdec",
+    "mpeg1_nvdec",
+    "mpeg2_d3d11va",
+    "mpeg2_d3d11va2",
+    "mpeg2_d3d12va",
+    "mpeg2_dxva2",
+    "mpeg2_nvdec",
+    "mpeg4_nvdec",
+    "vc1_d3d11va",
+    "vc1_d3d11va2",
+    "vc1_d3d12va",
+    "vc1_dxva2",
+    "vc1_nvdec",
+    "vp8_nvdec",
+    "vp9_d3d11va",
+    "vp9_d3d11va2",
+    "vp9_d3d12va",
+    "vp9_dxva2",
+    "vp9_nvdec",
+    "vp9_vulkan"
+  ],
+  "new_backend_adds_no_mandatory_startup_library": true,
+  "source_patches": {
+    "hls-custom-https-io.patch": "9eb7cc8a926011a029fe4a1552a2a99734d9283b217a3c6e0921e2bf22ff0389",
+    "hls-declared-epochs.patch": "302ae91cbba12503b062e5632c755245004682331894ac8fdbc15f0540728a82",
+    "vdpau-optional-runtime.patch": "8f7725c2114ab868fa6f392394c8b6c232c14d10bb2a0aefd6c362d22e7a3779"
+  }
+}

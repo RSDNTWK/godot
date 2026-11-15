@@ -1,0 +1,251 @@
+{
+  "schema_version": 2,
+  "ffmpeg": "9.0.2",
+  "ffmpeg_source_commit": "946fcce07b6dcd0331c8cc609192aeff5e1924f8",
+  "dav1d": "1.5.4",
+  "amf_headers": "1.5.3",
+  "amf_source_commit": "57ee0cfb0e1a08d9041f77435653794c1b012be0",
+  "target": "linux-x86_64",
+  "static_libraries": true,
+  "decoders": [
+    "h263",
+    "h264",
+    "h264_qsv",
+    "hevc",
+    "hevc_qsv",
+    "mjpeg",
+    "mpeg1video",
+    "mpeg2video",
+    "mpeg4",
+    "mpeg2_qsv",
+    "theora",
+    "vc1",
+    "vc1_qsv",
+    "vp3",
+    "vp8",
+    "vp9",
+    "aac",
+    "flac",
+    "mp3",
+    "opus",
+    "vorbis",
+    "pcm_s16le",
+    "libdav1d",
+    "av1",
+    "av1_cuvid",
+    "av1_qsv",
+    "av1_amf",
+    "h264_amf",
+    "h264_cuvid",
+    "hevc_amf",
+    "hevc_cuvid",
+    "mjpeg_cuvid",
+    "mjpeg_qsv",
+    "mpeg1_cuvid",
+    "mpeg2_cuvid",
+    "mpeg4_cuvid",
+    "vc1_cuvid",
+    "vp8_cuvid",
+    "vp8_qsv",
+    "vp9_amf",
+    "vp9_cuvid",
+    "vp9_qsv"
+  ],
+  "demuxers": [
+    "aac",
+    "ac3",
+    "eac3",
+    "flac",
+    "hls",
+    "matroska,webm",
+    "mov,mp4,m4a,3gp,3g2,mj2",
+    "mp3",
+    "mpegts",
+    "ogg",
+    "wav"
+  ],
+  "hardware_backends": [
+    "CUDA",
+    "NVDEC",
+    "CUVID",
+    "QSV",
+    "AMF",
+    "LIBDAV1D",
+    "VULKAN",
+    "VAAPI",
+    "VDPAU"
+  ],
+  "codec_device_configs": [
+    "h263:cuda:3",
+    "h263:vdpau:11",
+    "h264:cuda:3",
+    "h264:vaapi:11",
+    "h264:vdpau:11",
+    "h264:vulkan:11",
+    "h264_qsv:qsv:3",
+    "hevc:cuda:3",
+    "hevc:vaapi:11",
+    "hevc:vdpau:11",
+    "hevc:vulkan:11",
+    "hevc_qsv:qsv:3",
+    "mjpeg:cuda:3",
+    "mjpeg:vaapi:11",
+    "mpeg1video:cuda:3",
+    "mpeg1video:vdpau:11",
+    "mpeg2video:cuda:3",
+    "mpeg2video:vaapi:11",
+    "mpeg2video:vdpau:11",
+    "mpeg4:cuda:3",
+    "mpeg4:vaapi:11",
+    "mpeg4:vdpau:11",
+    "mpeg2_qsv:qsv:3",
+    "vc1:cuda:3",
+    "vc1:vaapi:11",
+    "vc1:vdpau:11",
+    "vc1_qsv:qsv:3",
+    "vp8:vaapi:11",
+    "vp8:cuda:3",
+    "vp9:cuda:3",
+    "vp9:vaapi:11",
+    "vp9:vdpau:11",
+    "vp9:vulkan:11",
+    "av1:cuda:3",
+    "av1:vaapi:11",
+    "av1:vdpau:11",
+    "av1:vulkan:11",
+    "av1_cuvid:cuda:7",
+    "av1_qsv:qsv:3",
+    "av1_amf:amf:3",
+    "h264_amf:amf:3",
+    "h264_cuvid:cuda:7",
+    "hevc_amf:amf:3",
+    "hevc_cuvid:cuda:7",
+    "mjpeg_cuvid:cuda:7",
+    "mjpeg_qsv:qsv:3",
+    "mpeg1_cuvid:cuda:7",
+    "mpeg2_cuvid:cuda:7",
+    "mpeg4_cuvid:cuda:7",
+    "vc1_cuvid:cuda:7",
+    "vp8_cuvid:cuda:7",
+    "vp8_qsv:qsv:3",
+    "vp9_amf:amf:3",
+    "vp9_cuvid:cuda:7",
+    "vp9_qsv:qsv:3"
+  ],
+  "all_previous_registered_components_preserved": true,
+  "config_sha256": "3b781cc2749d258e9fee9fa5c70b95b6e8ce8e1d1cdb3ec8cf7f20f2f1755063",
+  "components_sha256": "f268f239413ba0ad293917dc64e925ea8e0eaf475543483f0ea8c3bae1209eb6",
+  "artifacts": {
+    "lib/libavcodec.a": {
+      "sha256": "f19a5b8ba9958483edc9a37a556c10ac4a48752184d3bef501d5e729417dd12d",
+      "size": 10851328
+    },
+    "lib/libavdevice.a": {
+      "sha256": "db04c7873f1b7832230977e5f5b7cef2e80261a500cce033dbe188be311e8175",
+      "size": 14832
+    },
+    "lib/libavfilter.a": {
+      "sha256": "8951469be38fc48ac2a6d57ae23aa0e4412831c351d67ad710a5a5ed3c844687",
+      "size": 240044
+    },
+    "lib/libavformat.a": {
+      "sha256": "bd6e0a16546f667b3ffbb1d340395899396a4b4815a90d296fd7ea3858901f93",
+      "size": 1296338
+    },
+    "lib/libavutil.a": {
+      "sha256": "025fc35a9f24a2761a7533767bf1fab7efc39c71d500e8b5be6a9d6a3d9f23cb",
+      "size": 1800414
+    },
+    "lib/libswresample.a": {
+      "sha256": "e06fb2e5f4a9079ca93045d6b6b034123090849d8192747da207223b2918eda3",
+      "size": 254666
+    },
+    "lib/libswscale.a": {
+      "sha256": "a828db62d38b8ef2b70e9bc5c50a2ea598cbc017b2611fbce21062f519eaafee",
+      "size": 2847126
+    },
+    "deps/lib/libdav1d.a": {
+      "sha256": "efd264b9d29cb6c25db99c53d0cae955c86def6efacda00098ed88fde5571936",
+      "size": 3608664
+    },
+    "deps/lib/libvpl.a": {
+      "sha256": "593d53656d4b1f8d16ab6bfd94aa5620b28793b5f59afb294dc9d69412269f40",
+      "size": 971706
+    }
+  },
+  "licenses": [
+    {
+      "file": "licenses/dav1d-COPYING.txt",
+      "sha256": "225bbec3afc382f1bb85f7bb01655f3a37ed5e693a4fa18a64c0c5bab48c854e"
+    },
+    {
+      "file": "licenses/FFmpeg-LGPLv2.1.txt",
+      "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+    },
+    {
+      "file": "licenses/FFmpeg-LICENSE.md",
+      "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+    }
+  ],
+  "component_qualification": {
+    "passed": true,
+    "receipt_sha256": "605fdfd6b924b7a1b11e235c722feb21a11b3b1b3f186ea06ad62a9aa809177a",
+    "source_configuration_receipt_sha256": "d2678aba38644c78cbcdc9eaabe080bd5649f1a37c42c61aff11456ee1a62278",
+    "scope": "Registration preserved, actual software frames, unavailable-driver/loader cleanup and optional startup dependency checks. Does not qualify all physical vendor GPUs."
+  },
+  "engine_runtime_evidence": {
+    "source_head": "f5b594f184a00abc49a1c211cb12b5b7ac006e06",
+    "receipt_sha256": "f045e795b61dce1a0f4dd58b75bbd4828fb9130fe438af9761b5beb55ce741be",
+    "scope": "Prior exact-archive engine fallback evidence, not qualification of later engine build IDs."
+  },
+  "generated_utc": "2026-11-15T17:03:11.775650+00:00",
+  "added_hwaccels": [
+    "av1_vdpau",
+    "h264_vdpau",
+    "hevc_vdpau",
+    "mpeg1_vdpau",
+    "mpeg2_vdpau",
+    "mpeg4_vdpau",
+    "vc1_vdpau",
+    "vp9_vdpau"
+  ],
+  "hwaccels": [
+    "av1_nvdec",
+    "av1_vaapi",
+    "av1_vdpau",
+    "av1_vulkan",
+    "h264_nvdec",
+    "h264_vaapi",
+    "h264_vdpau",
+    "h264_vulkan",
+    "hevc_nvdec",
+    "hevc_vaapi",
+    "hevc_vdpau",
+    "hevc_vulkan",
+    "mjpeg_nvdec",
+    "mjpeg_vaapi",
+    "mpeg1_nvdec",
+    "mpeg1_vdpau",
+    "mpeg2_nvdec",
+    "mpeg2_vaapi",
+    "mpeg2_vdpau",
+    "mpeg4_nvdec",
+    "mpeg4_vaapi",
+    "mpeg4_vdpau",
+    "vc1_nvdec",
+    "vc1_vaapi",
+    "vc1_vdpau",
+    "vp8_nvdec",
+    "vp8_vaapi",
+    "vp9_nvdec",
+    "vp9_vaapi",
+    "vp9_vdpau",
+    "vp9_vulkan"
+  ],
+  "new_backend_adds_no_mandatory_startup_library": true,
+  "source_patches": {
+    "hls-custom-https-io.patch": "9eb7cc8a926011a029fe4a1552a2a99734d9283b217a3c6e0921e2bf22ff0389",
+    "hls-declared-epochs.patch": "302ae91cbba12503b062e5632c755245004682331894ac8fdbc15f0540728a82",
+    "vdpau-optional-runtime.patch": "a9883614932fa2dc75b8674322acd2f743fd3bb7de7a7837dd913ba3ccf390c6"
+  }
+}
