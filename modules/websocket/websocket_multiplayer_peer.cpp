@@ -72,6 +72,19 @@ void WebSocketMultiplayerPeer::_clear() {
 	incoming_packets.clear();
 }
 
+void WebSocketMultiplayerPeer::_clear_peer_packets(int p_peer_id) {
+	// Keep the currently borrowed packet alive until the next get_packet().
+	// Only queued packets from the departing peer can no longer be dispatched.
+	for (List<Packet>::Element *E = incoming_packets.front(); E;) {
+		List<Packet>::Element *next = E->next();
+		if (E->get().source == p_peer_id) {
+			memfree(E->get().data);
+			incoming_packets.erase(E);
+		}
+		E = next;
+	}
+}
+
 void WebSocketMultiplayerPeer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("create_client", "url", "tls_client_options"), &WebSocketMultiplayerPeer::create_client, DEFVAL(Ref<TLSOptions>()));
 	ClassDB::bind_method(D_METHOD("create_server", "port", "bind_address", "tls_server_options"), &WebSocketMultiplayerPeer::create_server, DEFVAL("*"), DEFVAL(Ref<TLSOptions>()));
@@ -396,6 +409,7 @@ void WebSocketMultiplayerPeer::_poll_server() {
 
 	// Remove disconnected peers.
 	for (const int &pid : to_remove) {
+		_clear_peer_packets(pid);
 		emit_signal(SNAME("peer_disconnected"), pid);
 		peers_map.erase(pid);
 	}
@@ -483,6 +497,7 @@ int WebSocketMultiplayerPeer::get_peer_port(int p_peer_id) const {
 void WebSocketMultiplayerPeer::disconnect_peer(int p_peer_id, bool p_force) {
 	ERR_FAIL_COND(!peers_map.has(p_peer_id));
 	peers_map[p_peer_id]->close();
+	_clear_peer_packets(p_peer_id);
 	if (p_force) {
 		peers_map.erase(p_peer_id);
 		if (!is_server()) {

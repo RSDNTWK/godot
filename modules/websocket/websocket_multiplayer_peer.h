@@ -85,6 +85,7 @@ protected:
 	void _poll_client();
 	void _poll_server();
 	void _clear();
+	void _clear_peer_packets(int p_peer_id);
 
 public:
 	/* MultiplayerPeer */
