@@ -22,6 +22,15 @@
 
 #include <cstring>
 
+#ifdef ANDROID_ENABLED
+#include "ffmpeg_seek_profile.h"
+#define FFMPEG_SEEK_SESSION(m_target) FFmpegSeekProfileSession seek_profile_session(seek_profile, seek_profile_reports, network_cancel != nullptr, m_target, stream_error, codec && codec->codec ? codec->codec->name : "", hardware_decoding)
+#define FFMPEG_SEEK_SCOPE(m_stage) FFmpegSeekProfile::Scope seek_scope_##m_stage(seek_profile, FFmpegSeekProfile::m_stage)
+#else
+#define FFMPEG_SEEK_SESSION(m_target)
+#define FFMPEG_SEEK_SCOPE(m_stage)
+#endif
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -98,7 +107,13 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	double audio_frames_due = 0.0;
 	bool audio_prefill_started = false;
 	bool parallel_audio_preparation = false;
+#ifdef ANDROID_ENABLED
+	FFmpegSeekProfile *seek_profile = nullptr;
+	uint64_t seek_profile_reports = 0;
+#endif
 	uint64_t parallel_seek_count = 0;
+	uint64_t seek_read_ahead_count = 0;
+	bool seek_read_ahead_active = false;
 #if defined(ANDROID_ENABLED) && defined(__arm__)
 	bool use_parallel_seek = true;
 #else
@@ -121,6 +136,8 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		}
 	};
 #ifdef FFMPEG_TESTS_ENABLED
+	bool test_prefer_warm_seek = false;
+	bool test_seek_read_ahead = false;
 	void (*test_video_seek_prepared)(void *) = nullptr;
 	void *test_video_seek_userdata = nullptr;
 #endif
@@ -410,6 +427,17 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 			return false;
 		}
 		const AVRational time_base = video_time_base;
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (seek_read_ahead_active) {
+			// Preroll must still recover the requested poster from its preceding
+			// keyframe. Join the early producer before the fallback seeks again.
+			packet_reader.stop(false);
+			packet_reader.reset();
+			format->pb->error = 0;
+			format->pb->eof_reached = 0;
+			seek_read_ahead_active = false;
+		}
+#endif
 		if (live_hls
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 				|| packet_reader.is_started()
@@ -562,6 +590,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		pending_audio_offset = 0;
 		packet_pending = false;
 		packet_waiting = false;
+		seek_read_ahead_active = false;
 		last_packet_dts = AV_NOPTS_VALUE;
 		demux_eof = false;
 		decoder_draining = false;
@@ -578,6 +607,14 @@ public:
 	void use_async_frames() { async_frames = true; }
 	bool _set(const StringName &p_name, const Variant &p_value) {
 #ifdef FFMPEG_TESTS_ENABLED
+		if (p_name == SNAME("_ffmpeg_test_seek_read_ahead")) {
+			test_seek_read_ahead = p_value;
+			return true;
+		}
+		if (p_name == SNAME("_ffmpeg_test_warm_seek")) {
+			test_prefer_warm_seek = p_value;
+			return true;
+		}
 		if (p_name == SNAME("_ffmpeg_test_parallel_seek")) {
 			use_parallel_seek = p_value;
 			return true;
@@ -609,6 +646,10 @@ public:
 		}
 		if (p_name == SNAME("_ffmpeg_parallel_seek_count")) {
 			r_result = int64_t(parallel_seek_count);
+			return true;
+		}
+		if (p_name == SNAME("_ffmpeg_seek_read_ahead_count")) {
+			r_result = int64_t(seek_read_ahead_count);
 			return true;
 		}
 		if (p_name == SNAME("_ffmpeg_cpu_frame")) {
@@ -1081,6 +1122,7 @@ public:
 			int receive_error;
 			{
 				FFMPEG_TIMING_SCOPE(RECEIVE);
+				FFMPEG_SEEK_SCOPE(RECEIVE);
 #ifdef DEV_ENABLED
 				DebugMeasure receive_measure(debug_receive_time);
 #endif
@@ -1109,11 +1151,15 @@ public:
 						// that already belongs on the consumed-audio timeline.
 						break;
 					}
-					const int read_error =
+					int read_error;
+					{
+						FFMPEG_SEEK_SCOPE(DEMUX);
+						read_error =
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 							packet_reader.is_started() ? packet_reader.read(packet) :
 #endif
 													   av_read_frame(format, packet);
+					}
 					packet_waiting = read_error == AVERROR(EAGAIN);
 					if (read_error == AVERROR(EAGAIN)) {
 						if (!network_cancel) {
@@ -1198,6 +1244,7 @@ public:
 				int send_error;
 				{
 					FFMPEG_TIMING_SCOPE(SEND);
+					FFMPEG_SEEK_SCOPE(SEND);
 #ifdef DEV_ENABLED
 					DebugMeasure send_measure(debug_send_time);
 #endif
@@ -1327,6 +1374,7 @@ public:
 			return;
 		}
 #endif
+		FFMPEG_SEEK_SCOPE(CONVERT);
 		AVFrame *display_frame = frame;
 		if (_is_hardware_format(static_cast<AVPixelFormat>(frame->format))) {
 			av_frame_unref(software_frame);
@@ -1553,6 +1601,7 @@ public:
 #endif
 	}
 	bool seek_on_worker(double p_position) {
+		FFMPEG_SEEK_SESSION(p_position);
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 #ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
 		frame_converter.clear();
@@ -1571,14 +1620,32 @@ public:
 		const uint64_t began = OS::get_singleton()->get_ticks_usec();
 		const double forward = p_position - position;
 		const bool small_forward = forward >= 0.1 && forward <= 2.0 && decoded_position < p_position;
+		const bool buffered_forward = packet_reader.is_started() && !demux_eof && !decoder_draining && !waiting_for_keyframe &&
+				small_forward && packet_reader.has_prefill(forward + 0.5);
+		bool prefer_warm_decoder = false;
+#ifdef ANDROID_ENABLED
+		// MediaCodec can already hold decoded reference work beyond the last
+		// presented frame. Keep that context and the prefetched packets for a
+		// bounded correction rather than force synchronous container reads.
+		prefer_warm_decoder = hardware_decoding && codec && codec->codec &&
+				String(codec->codec->name).ends_with("_mediacodec");
+#endif
+#ifdef FFMPEG_TESTS_ENABLED
+		prefer_warm_decoder |= test_prefer_warm_seek;
+#endif
+		prefer_warm_decoder = prefer_warm_decoder && Math::is_finite(length) && length > 0.0 && codec &&
+				codec->width > 0 && codec->width <= 1920 && codec->height > 0 && codec->height <= 1080;
 		double indexed_position = 0.0;
-		const bool indexed_seek = small_forward && keyframe_seek_hint.prefer_container_seek(p_position, timestamp_origin, decoded_position, indexed_position);
+		const bool indexed_hint = small_forward && keyframe_seek_hint.prefer_container_seek(p_position, timestamp_origin, decoded_position, indexed_position);
+		const bool indexed_seek = indexed_hint && !(buffered_forward && prefer_warm_decoder);
 		// A small forward correction can consume reference frames already in
 		// the bounded packet queue. Seeking the container backwards to its GOP
 		// keyframe needlessly decodes those earlier frames a second time. The
 		// producer keeps sole demuxer ownership; this path never seeks/flushes it.
-		if (packet_reader.is_started() && !demux_eof && !decoder_draining && !waiting_for_keyframe &&
-				small_forward && !indexed_seek && packet_reader.has_prefill(forward + 0.5)) {
+		if (buffered_forward && !indexed_seek) {
+			if (indexed_hint) {
+				print_verbose("FFmpeg: buffered forward video seek retained the warm decoder and prefetched packets.");
+			}
 			if (audio_playback.is_valid()) {
 				audio_playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
 			}
@@ -1594,7 +1661,10 @@ public:
 		}
 		// The decode worker joins both packet producers before reusing their
 		// formats. Live playlists retain their fresh-manifest reopen path.
-		packet_reader.stop(false);
+		{
+			FFMPEG_SEEK_SCOPE(STOP_READER);
+			packet_reader.stop(false);
+		}
 		packet_reader.reset();
 		if (audio_playback.is_valid()) {
 			audio_playback->set_parameter(small_forward ? SNAME("_ffmpeg_prepare_buffered_forward_seek") : SNAME("_ffmpeg_prepare_reuse_seek"), true);
@@ -1653,6 +1723,7 @@ public:
 	double get_length() const override { return length; }
 	double get_playback_position() const override { return position; }
 	void seek(double p_time) override {
+		FFMPEG_SEEK_SESSION(p_time);
 #ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
 		frame_converter.clear();
 		if (deferred_conversion_frame) {
@@ -1669,11 +1740,19 @@ public:
 		}
 #endif
 		if (format && codec && packet && queued_frame && video_stream >= 0) {
-			if (av_seek_frame(format, video_stream, int64_t((p_time + timestamp_origin) / av_q2d(video_time_base)), AVSEEK_FLAG_BACKWARD) < 0) {
+			int seek_error;
+			{
+				FFMPEG_SEEK_SCOPE(CONTAINER_SEEK);
+				seek_error = av_seek_frame(format, video_stream, int64_t((p_time + timestamp_origin) / av_q2d(video_time_base)), AVSEEK_FLAG_BACKWARD);
+			}
+			if (seek_error < 0) {
 				stream_error = ERR_UNAVAILABLE;
 				return;
 			}
-			avcodec_flush_buffers(codec);
+			{
+				FFMPEG_SEEK_SCOPE(FLUSH);
+				avcodec_flush_buffers(codec);
+			}
 			last_packet_dts = AV_NOPTS_VALUE;
 			av_frame_unref(queued_frame);
 			av_frame_unref(presentation_frame);
@@ -1682,7 +1761,32 @@ public:
 			demux_eof = false;
 			decoder_draining = false;
 			waiting_for_keyframe = false;
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+			bool prefetch_preroll = false;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+			prefetch_preroll = hardware_decoding && codec->codec && String(codec->codec->name).ends_with("_mediacodec");
+#endif
+#ifdef FFMPEG_TESTS_ENABLED
+			prefetch_preroll |= test_seek_read_ahead;
+#endif
+			if (prefetch_preroll && can_seek_on_worker() && Math::is_finite(length) && length > 0.0 &&
+					codec->width > 0 && codec->width <= 1920 && codec->height > 0 && codec->height <= 1080) {
+				// Seeking/flushing is complete. The same bounded producer can now
+				// own the demuxer while preroll consumes packets and feeds the codec.
+				// Do not wait for prefill here: that would serialize the work again.
+				const Error started = packet_reader.start(format, video_stream, network_cancel);
+				if (started != OK) {
+					stream_error = started;
+					stream_error_message = "Could not start video packet read-ahead during seek preparation.";
+					return;
+				}
+				seek_read_ahead_active = true;
+				seek_read_ahead_count++;
+				print_verbose("FFmpeg: bounded video packet read-ahead started before seek preroll.");
+			}
+#endif
 			_prepare_seek_output(p_time);
+			seek_read_ahead_active = false;
 		}
 	}
 	void _prepare_seek_output(double p_time) {
@@ -1727,6 +1831,11 @@ public:
 #endif
 			if (!audio_thread_started) {
 				AudioSeekTask::run(&audio_task);
+#ifdef ANDROID_ENABLED
+				if (seek_profile) {
+					seek_profile->audio_usec = audio_task.elapsed_usec;
+				}
+#endif
 			}
 			if (!audio_thread_started && network_cancel && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK) {
 				stream_error = ERR_UNAVAILABLE;
@@ -1749,6 +1858,12 @@ public:
 			const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 30000000;
 			while (seek_preroll && playing && stream_error == OK && !network_cancel->is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
 				update(0.0);
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+				if (seek_preroll && packet_waiting && packet_reader.is_started()) {
+					// A nonblocking empty queue must leave CPU time for its producer.
+					OS::get_singleton()->delay_usec(1000);
+				}
+#endif
 			}
 			paused = was_paused;
 			playing = was_playing;
@@ -1757,12 +1872,23 @@ public:
 			}
 		}
 		const uint64_t video_elapsed = OS::get_singleton()->get_ticks_usec() - video_begin;
+#ifdef ANDROID_ENABLED
+		if (seek_profile) {
+			seek_profile->video_usec = video_elapsed;
+		}
+#endif
 		if (audio_thread_started) {
 			// Join even after video failure/cancellation: the stack task and its
 			// audio reference must outlive all work. Both existing preroll paths
 			// retain their original finite deadlines and cancellation checks.
 			audio_thread.wait_to_finish();
 			parallel_audio_preparation = false;
+#ifdef ANDROID_ENABLED
+			if (seek_profile) {
+				seek_profile->audio_usec = audio_task.elapsed_usec;
+				seek_profile->parallel_audio = true;
+			}
+#endif
 			if (stream_error == OK && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK) {
 				stream_error = ERR_UNAVAILABLE;
 			}

@@ -287,6 +287,7 @@ const GodotMediaPlayerLibrary = {
 		close: function (id) {
 			const r = GodotMediaPlayer.players.get(id);
 			if (!r) return;
+			GodotMediaPlayer.stopFrameWatch(r);
 			GodotMediaPlayer.players.delete(id); clearTimeout(r.timer); clearTimeout(r.ytWait);
 			GodotMediaPlayer.clearFrameReaderIfIdle();
 			if (r.hls) r.hls['destroy']();
@@ -342,17 +343,45 @@ const GodotMediaPlayerLibrary = {
 		},
 		play: function (r) {
 			if (!GodotMediaPlayer.alive(r)) return;
+			const intent = ++r.playIntent;
 			if (r.portal) { if (r.yt && r.apiReady) r.yt['playVideo'](); r.wantPlay = true; return; }
 			const element = r.element;
 			if (!element) return;
 			const pending = element.play();
 			if (pending && pending.catch) pending.catch(function (error) {
-				if (GodotMediaPlayer.alive(r) && r.element === element && !(error.name === 'AbortError' && !r.wantPlay)) GodotMediaPlayer.error(r, error.message || 'Browser requires a playback gesture.', 4);
+				if (GodotMediaPlayer.alive(r) && r.element === element && r.playIntent === intent && !(error.name === 'AbortError' && !r.wantPlay)) GodotMediaPlayer.error(r, error.message || 'Browser requires a playback gesture.', 4);
 			});
+		},
+		stopFrameWatch: function (r) {
+			const watch = r.frameWatch;
+			r.frameWatch = null;
+			if (watch && watch.handle !== null) {
+				try { watch.element.cancelVideoFrameCallback(watch.handle); } catch (_) { /* Optional optimization; stale callbacks remain identity-guarded. */ }
+			}
+		},
+		startFrameWatch: function (r, element) {
+			GodotMediaPlayer.stopFrameWatch(r);
+			if (!r.video || r.opaque || typeof element.requestVideoFrameCallback !== 'function' || typeof element.cancelVideoFrameCallback !== 'function') return;
+			const watch = {element, handle: null, serial: 0};
+			r.frameWatch = watch;
+			const active = function () { return GodotMediaPlayer.alive(r) && r.element === element && r.frameWatch === watch; };
+			const frame = function () {
+				watch.handle = null;
+				if (!active()) return;
+				watch.serial++;
+				schedule();
+			};
+			const schedule = function () {
+				try { watch.handle = element.requestVideoFrameCallback(frame); }
+				catch (_) { if (active()) r.frameWatch = null; } // Retain currentTime fallback if unavailable.
+			};
+			schedule();
 		},
 		direct: function (r, url) {
 			const element = document.createElement(r.video ? 'video' : 'audio');
 			r.element = element;
+			r.frameTime = -1;
+			GodotMediaPlayer.startFrameWatch(r, element);
 			element.preload = r.video ? 'auto' : 'metadata'; element.playsInline = true; element.volume = r.volume;
 			if (!r.opaque) element.crossOrigin = 'anonymous';
 			if (r.video) GodotMediaPlayer.mount(r, element);
@@ -528,7 +557,7 @@ const GodotMediaPlayerLibrary = {
 			const id = GodotMediaPlayer.next++;
 			let filename = url.pathname.split('/').pop() || url.hostname;
 			try { filename = decodeURIComponent(filename); } catch (error) { /* Metadata must not reject a playable URL. */ }
-			const r = {id, source: text, options: config, ready: false, apiReady: false, buffering: true, events: [], video: !!config['video'], wantPlay: !!config['autoplay'], volume: config['volume'], allowFallback: config['allow_browser_fallback'] !== false, opaque: false, portal: false, element: null, yt: null, holder: null, seeking: null, hls: null, window: null, timer: null, ytWait: null, live: config['timeline_mode'] === 'live', liveKnown: ['live', 'finite'].includes(config['timeline_mode']), title: GodotMedia.title(filename), frameCanvas: null, frameContext: null, frameTime: -1};
+			const r = {id, source: text, options: config, ready: false, apiReady: false, buffering: true, events: [], video: !!config['video'], wantPlay: !!config['autoplay'], playIntent: 0, volume: config['volume'], allowFallback: config['allow_browser_fallback'] !== false, opaque: false, portal: false, element: null, yt: null, holder: null, seeking: null, hls: null, window: null, timer: null, ytWait: null, live: config['timeline_mode'] === 'live', liveKnown: ['live', 'finite'].includes(config['timeline_mode']), title: GodotMedia.title(filename), frameCanvas: null, frameContext: null, frameTime: -1};
 			GodotMediaPlayer.players.set(id, r);
 			allocated = id;
 			r.timer = setTimeout(function () { if (!r.ready && GodotMediaPlayer.alive(r)) GodotMediaPlayer.error(r, 'Browser media opening timed out.', 24); }, Math.min(60000, Math.max(1, Number(config['timeout_msec']) || 30000)));
@@ -559,7 +588,7 @@ const GodotMediaPlayerLibrary = {
 				r.wantPlay = true;
 				GodotMediaPlayer.play(r);
 			}
-			else if (action === 'pause') { r.wantPlay = false; if (r.yt && r.apiReady) r.yt['pauseVideo'](); else if (r.element) r.element.pause(); }
+			else if (action === 'pause') { ++r.playIntent; r.wantPlay = false; if (r.yt && r.apiReady) r.yt['pauseVideo'](); else if (r.element) r.element.pause(); }
 			else if (action === 'volume') { r.volume = Math.min(1, Math.max(0, value)); if (r.yt && r.apiReady) r.yt['setVolume'](r.volume * 100); else if (r.element) r.element.volume = r.volume; }
 			else if (action === 'seek') {
 				r.seeking = {id: request, target: value, deadline: performance.now() + 15000};
@@ -609,7 +638,13 @@ const GodotMediaPlayerLibrary = {
 			GodotMediaPlayer.error(r, 'Invalid video frame destination.', 31); return 0;
 		}
 		if (GodotMediaPlayer.frameReaderFatal) { GodotMediaPlayer.reportFrameReaderFailure(r); return 0; }
-		if (r.frameTime === r.element.currentTime && r.frameWidth === width && r.frameHeight === height) return 0;
+		const watch = r.frameWatch;
+		if (r.frameTime >= 0 && r.frameWidth === width && r.frameHeight === height) {
+			// The playback clock can tick several times for one decoded image.
+			// Copy/upload only newly presented frames where the browser exposes them.
+			if (watch && watch.element === r.element) { if (r.frameSerial === watch.serial) return 0; }
+			else if (r.frameTime === r.element.currentTime) return 0;
+		}
 		try {
 			const transfer = GodotMediaPlayer.readFrameReusable(r, pointer, capacity, width, height);
 			if (transfer === -2 || transfer === 0) return 0;
@@ -630,9 +665,10 @@ const GodotMediaPlayerLibrary = {
 			}
 			if (transfer !== 1) HEAPU8.set(data, pointer);
 			r.frameTime = r.element.currentTime; r.frameWidth = width; r.frameHeight = height;
+			r.frameSerial = watch ? watch.serial : -1;
 			return 1;
 		} catch (error) {
-			r.opaque = true; GodotMediaPlayer.clearFrameReaderIfIdle(); return 0;
+			r.opaque = true; GodotMediaPlayer.stopFrameWatch(r); GodotMediaPlayer.clearFrameReaderIfIdle(); return 0;
 		}
 	},
 	godot_web_media_close__proxy: 'sync',

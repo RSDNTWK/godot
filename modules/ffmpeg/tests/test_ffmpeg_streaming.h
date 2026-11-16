@@ -1027,86 +1027,184 @@ TEST_CASE("[SceneTree][NativeStreaming][IndexedSeek][Local] MP4 I/P and reordere
 	const String directory = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR");
 	initialize_audio();
 	bool tested_resampling = false;
-	for (const bool parallel : { false, true }) {
-		for (const char *name : { "ip.mp4", "bframes.mp4", "bframes-44100.mp4" }) {
-			const String path = directory.path_join(name);
-			REQUIRE(FileAccess::exists(path));
-			SafeFlag cancel;
-			String error;
-			Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
-			REQUIRE(playback.is_valid());
-			playback->set(SNAME("_ffmpeg_test_parallel_seek"), parallel);
-			LookaheadSink sink;
-			sink.rate = playback->get_mix_rate();
-			REQUIRE(sink.rate > 0);
-			playback->set_mix_callback(LookaheadSink::mix, &sink);
-			playback->set_audio_playback_position_callback(LookaheadSink::clock, &sink);
-			playback->play();
-			playback->update(0.0);
-			Ref<AudioStreamPlayback> audio = ffmpeg_test_paired_audio(playback);
-			REQUIRE(audio.is_valid());
-			Dictionary timing = audio->get_parameter(SNAME("_ffmpeg_test_frame_timing"));
-			const int source_rate = timing.get("rate", 0);
-			REQUIRE(source_rate > 0);
-			tested_resampling |= source_rate != sink.rate;
-			INFO("AAC source rate ", source_rate, ", output rate ", sink.rate);
-			// Local fixture paths do not automatically enable network read-ahead.
-			// Explicitly attach the real producer to exercise compressed forward PCM.
-			audio->set_parameter(SNAME("_ffmpeg_start_read_ahead"), 0.5);
-			const uint64_t prefill_deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
-			while (!bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))) && OS::get_singleton()->get_ticks_usec() < prefill_deadline) {
-				OS::get_singleton()->delay_usec(1000);
-			}
-			REQUIRE(bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))));
-			REQUIRE(ffmpeg_start_video_read_ahead(playback, &error));
-			for (const double target : { 1.523, 2.223 }) {
-				CAPTURE(name);
-				CAPTURE(target);
-				const bool pause = target > 2.0;
-				playback->set_paused(pause);
-				sink.origin = target;
-				sink.samples.clear();
-				sink.consumed = 0;
-				const int64_t before = playback->get(SNAME("_ffmpeg_indexed_seek_count"));
-				const int64_t audio_before = audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"));
-				const int64_t parallel_before = playback->get(SNAME("_ffmpeg_parallel_seek_count"));
-				REQUIRE(ffmpeg_seek_video_on_worker(playback, target));
-				CHECK(int64_t(playback->get(SNAME("_ffmpeg_parallel_seek_count"))) == parallel_before + (parallel ? 1 : 0));
-				CHECK(int64_t(playback->get(SNAME("_ffmpeg_indexed_seek_count"))) == before + 1);
-				CHECK(int64_t(audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == audio_before + 1);
-				CHECK(Math::abs(playback->get_playback_position() - Math::ceil(target * 30.0) / 30.0) < 0.000001);
-				CHECK(playback->is_paused() == pause);
-				Ref<Image> poster = playback->get(SNAME("_ffmpeg_cpu_frame"));
-				REQUIRE(poster.is_valid());
-				CHECK_FALSE(poster->is_empty());
-				CHECK(int(playback->get(SNAME("stream_error"))) == OK);
-				SafeFlag reference_cancel;
-				Ref<AudioStreamPlayback> reference = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, path, Ref<AudioStream>(), Dictionary(), &reference_cancel);
-				REQUIRE(reference.is_valid());
-				reference->start();
-				AudioFrame expected[512];
-				int64_t remaining = int64_t(target * sink.rate);
-				while (remaining > 0) {
-					const int count = int(MIN(remaining, int64_t(512)));
-					REQUIRE(reference->mix(expected, 1.0, count) == count);
-					remaining -= count;
+	for (const int mode : { 0, 1, 2 }) {
+		const bool warm = mode == 1;
+		const bool prefetch = mode == 2;
+		for (const bool parallel : { false, true }) {
+			for (const char *name : { "ip.mp4", "bframes.mp4", "bframes-44100.mp4" }) {
+				const String path = directory.path_join(name);
+				REQUIRE(FileAccess::exists(path));
+				SafeFlag cancel;
+				String error;
+				Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
+				REQUIRE(playback.is_valid());
+				playback->set(SNAME("_ffmpeg_test_parallel_seek"), parallel);
+				playback->set(SNAME("_ffmpeg_test_warm_seek"), warm);
+				playback->set(SNAME("_ffmpeg_test_seek_read_ahead"), prefetch);
+				SafeFlag linear_cancel;
+				Ref<VideoStreamPlayback> linear = ffmpeg_open_video_on_worker(path, Dictionary(), &linear_cancel, String(), Dictionary(), &error);
+				REQUIRE(linear.is_valid());
+				linear->play();
+				LookaheadSink sink;
+				sink.rate = playback->get_mix_rate();
+				REQUIRE(sink.rate > 0);
+				playback->set_mix_callback(LookaheadSink::mix, &sink);
+				playback->set_audio_playback_position_callback(LookaheadSink::clock, &sink);
+				playback->play();
+				playback->update(0.0);
+				Ref<AudioStreamPlayback> audio = ffmpeg_test_paired_audio(playback);
+				REQUIRE(audio.is_valid());
+				Dictionary timing = audio->get_parameter(SNAME("_ffmpeg_test_frame_timing"));
+				const int source_rate = timing.get("rate", 0);
+				REQUIRE(source_rate > 0);
+				tested_resampling |= source_rate != sink.rate;
+				INFO("AAC source rate ", source_rate, ", output rate ", sink.rate);
+				// Local fixture paths do not automatically enable network read-ahead.
+				// Explicitly attach the real producer to exercise compressed forward PCM.
+				audio->set_parameter(SNAME("_ffmpeg_start_read_ahead"), 0.5);
+				const uint64_t prefill_deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+				while (!bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))) && OS::get_singleton()->get_ticks_usec() < prefill_deadline) {
+					OS::get_singleton()->delay_usec(1000);
 				}
-				REQUIRE(reference->mix(expected, 1.0, 512) == 512);
-				REQUIRE(sink.samples.size() >= 1024);
-				float maximum_audio_difference = 0.0f;
-				for (int i = 0; i < 512; i++) {
-					maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2] - expected[i].left));
-					maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2 + 1] - expected[i].right));
+				REQUIRE(bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))));
+				REQUIRE(ffmpeg_start_video_read_ahead(playback, &error));
+				for (const double target : { 1.523, 2.223 }) {
+					CAPTURE(name);
+					CAPTURE(target);
+					const bool pause = target > 2.0;
+					playback->set_paused(pause);
+					sink.origin = target;
+					sink.samples.clear();
+					sink.consumed = 0;
+					const int64_t before = playback->get(SNAME("_ffmpeg_indexed_seek_count"));
+					const int64_t forward_before = playback->get(SNAME("_ffmpeg_forward_seek_count"));
+					const int64_t audio_before = audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"));
+					const int64_t parallel_before = playback->get(SNAME("_ffmpeg_parallel_seek_count"));
+					const int64_t prefetch_before = playback->get(SNAME("_ffmpeg_seek_read_ahead_count"));
+					REQUIRE(ffmpeg_seek_video_on_worker(playback, target));
+					CHECK(int64_t(playback->get(SNAME("_ffmpeg_seek_read_ahead_count"))) == prefetch_before + (prefetch ? 1 : 0));
+					CHECK(int64_t(playback->get(SNAME("_ffmpeg_parallel_seek_count"))) == parallel_before + (parallel ? 1 : 0));
+					CHECK(int64_t(playback->get(SNAME("_ffmpeg_indexed_seek_count"))) == before + (warm ? 0 : 1));
+					CHECK(int64_t(playback->get(SNAME("_ffmpeg_forward_seek_count"))) == forward_before + (warm ? 1 : 0));
+					CHECK(int64_t(audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == audio_before + 1);
+					CHECK(Math::abs(playback->get_playback_position() - Math::ceil(target * 30.0) / 30.0) < 0.000001);
+					CHECK(playback->is_paused() == pause);
+					Ref<Image> poster = playback->get(SNAME("_ffmpeg_cpu_frame"));
+					REQUIRE(poster.is_valid());
+					CHECK_FALSE(poster->is_empty());
+					// Independently decode forward from the start without seeking;
+					// timestamps alone cannot detect a damaged reference-frame chain.
+					const double expected_position = Math::ceil(target * 30.0) / 30.0;
+					linear->set_audio_playback_position(target);
+					const uint64_t linear_deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+					while (linear->get_playback_position() < expected_position - 0.000001 && OS::get_singleton()->get_ticks_usec() < linear_deadline) {
+						linear->update(0.0);
+					}
+					CHECK(Math::abs(linear->get_playback_position() - expected_position) < 0.000001);
+					Ref<Image> linear_poster = linear->get(SNAME("_ffmpeg_cpu_frame"));
+					REQUIRE(linear_poster.is_valid());
+					CHECK(poster->get_data() == linear_poster->get_data());
+					CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+					SafeFlag reference_cancel;
+					Ref<AudioStreamPlayback> reference = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, path, Ref<AudioStream>(), Dictionary(), &reference_cancel);
+					REQUIRE(reference.is_valid());
+					reference->start();
+					AudioFrame expected[512];
+					int64_t remaining = int64_t(target * sink.rate);
+					while (remaining > 0) {
+						const int count = int(MIN(remaining, int64_t(512)));
+						REQUIRE(reference->mix(expected, 1.0, count) == count);
+						remaining -= count;
+					}
+					REQUIRE(reference->mix(expected, 1.0, 512) == 512);
+					REQUIRE(sink.samples.size() >= 1024);
+					float maximum_audio_difference = 0.0f;
+					for (int i = 0; i < 512; i++) {
+						maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2] - expected[i].left));
+						maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2 + 1] - expected[i].right));
+					}
+					CHECK(maximum_audio_difference < 0.000001f);
+					REQUIRE(ffmpeg_start_video_read_ahead(playback, &error, true));
 				}
-				CHECK(maximum_audio_difference < 0.000001f);
-				REQUIRE(ffmpeg_start_video_read_ahead(playback, &error, true));
+				cancel.set();
+				CHECK_FALSE(ffmpeg_seek_video_on_worker(playback, 0.5));
+				CHECK(int(playback->get(SNAME("stream_error"))) != OK);
 			}
-			cancel.set();
-			CHECK_FALSE(ffmpeg_seek_video_on_worker(playback, 0.5));
-			CHECK(int(playback->get(SNAME("stream_error"))) != OK);
 		}
 	}
 	CHECK(tested_resampling);
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][WarmSeekFallback][Local] Warm preference preserves missing-prefill, backward and large seek fallback" * doctest::skip()) {
+	initialize_audio();
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR").path_join("bframes.mp4");
+	SafeFlag cancel;
+	String error;
+	Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
+	REQUIRE(playback.is_valid());
+	playback->set(SNAME("_ffmpeg_test_warm_seek"), true);
+	playback->play();
+	playback->update(0.0);
+	playback->set_paused(true);
+	// No producer is attached for the first local seek. Subsequent targets
+	// exercise backwards and >2-second corrections with a real producer.
+	for (const double target : { 1.523, 0.25, 2.8 }) {
+		CAPTURE(target);
+		const int64_t forward_before = playback->get(SNAME("_ffmpeg_forward_seek_count"));
+		const int64_t indexed_before = playback->get(SNAME("_ffmpeg_indexed_seek_count"));
+		REQUIRE(ffmpeg_seek_video_on_worker(playback, target));
+		CHECK(int64_t(playback->get(SNAME("_ffmpeg_forward_seek_count"))) == forward_before);
+		CHECK(int64_t(playback->get(SNAME("_ffmpeg_indexed_seek_count"))) == indexed_before + (target == 1.523 ? 1 : 0));
+		CHECK(playback->is_paused());
+		CHECK(Math::abs(playback->get_playback_position() - Math::ceil(target * 30.0) / 30.0) < 0.000001);
+		CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+		Ref<Image> image = playback->get(SNAME("_ffmpeg_cpu_frame"));
+		REQUIRE(image.is_valid());
+		CHECK_FALSE(image->is_empty());
+		REQUIRE(ffmpeg_start_video_read_ahead(playback, &error, true));
+	}
+	cancel.set();
+	CHECK_FALSE(ffmpeg_seek_video_on_worker(playback, 0.1));
+	CHECK(int(playback->get(SNAME("stream_error"))) != OK);
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][SeekReadAhead][Local] Early packet producer preserves backward, large and near-end seek preparation" * doctest::skip()) {
+	initialize_audio();
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR").path_join("bframes.mp4");
+	SafeFlag cancel;
+	String error;
+	Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
+	REQUIRE(playback.is_valid());
+	playback->set(SNAME("_ffmpeg_test_seek_read_ahead"), true);
+	playback->play();
+	playback->update(0.0);
+	playback->set_paused(true);
+	// The first seek starts without a producer. All targets must prepare the
+	// actual requested poster, including a backward jump and an EOF-adjacent seek.
+	for (const double target : { 1.523, 0.25, 2.8 }) {
+		CAPTURE(target);
+		const int64_t prefetch_before = playback->get(SNAME("_ffmpeg_seek_read_ahead_count"));
+		const int64_t forward_before = playback->get(SNAME("_ffmpeg_forward_seek_count"));
+		const int64_t indexed_before = playback->get(SNAME("_ffmpeg_indexed_seek_count"));
+		REQUIRE(ffmpeg_seek_video_on_worker(playback, target));
+		CHECK(int64_t(playback->get(SNAME("_ffmpeg_seek_read_ahead_count"))) == prefetch_before + 1);
+		CHECK(int64_t(playback->get(SNAME("_ffmpeg_forward_seek_count"))) == forward_before);
+		CHECK(int64_t(playback->get(SNAME("_ffmpeg_indexed_seek_count"))) == indexed_before + (target == 1.523 ? 1 : 0));
+		CHECK(playback->is_paused());
+		CHECK(Math::abs(playback->get_playback_position() - Math::ceil(target * 30.0) / 30.0) < 0.000001);
+		CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+		Ref<Image> image = playback->get(SNAME("_ffmpeg_cpu_frame"));
+		REQUIRE(image.is_valid());
+		CHECK_FALSE(image->is_empty());
+		const bool ready = ffmpeg_start_video_read_ahead(playback, &error, true);
+		CHECK(ready);
+		if (!ready) {
+			break;
+		}
+	}
+	cancel.set();
+	CHECK_FALSE(ffmpeg_seek_video_on_worker(playback, 0.1));
+	CHECK(int(playback->get(SNAME("stream_error"))) != OK);
 }
 
 struct ParallelSeekObserver {
