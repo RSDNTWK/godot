@@ -59,6 +59,17 @@ class VideoStreamPlayer : public Control {
 	double audio_clock_origin = 0;
 	AudioSampleClock audio_sample_clock;
 	bool native_streaming = false;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+	// Bounded verbose-only diagnostics; audio-thread counters are read with
+	// the existing audio lock and never participate in playback decisions.
+	uint64_t clock_trace_callbacks = 0;
+	uint64_t clock_trace_waits = 0;
+	uint64_t clock_trace_requested_frames = 0;
+	uint64_t clock_trace_padding_frames = 0;
+	uint64_t clock_trace_last_usec = 0;
+	uint32_t clock_trace_reports = 0;
+	double clock_trace_process_seconds = 0.0;
+#endif
 
 	bool paused = false;
 	bool paused_from_tree = false;

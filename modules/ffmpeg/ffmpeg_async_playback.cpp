@@ -592,6 +592,12 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 	double position = 0;
 	double length = 0;
 	double pending_delta = 0;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+	double clock_trace_taken_delta = 0.0;
+	uint64_t clock_trace_horizon_checks = 0;
+	uint64_t clock_trace_horizon_zero = 0;
+	uint64_t clock_trace_horizon_limited = 0;
+#endif
 	double audio_position = 0;
 	bool audio_clock_available = false;
 	double audio_output_latency = -1.0;
@@ -732,6 +738,11 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 				anchor = dvr.anchor;
 				go_live = dvr.go_live;
 				delta = pending_delta;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+				if (is_print_verbose_enabled()) {
+					clock_trace_taken_delta += delta;
+				}
+#endif
 				mixed_position = audio_position;
 				has_audio_clock = audio_clock_available;
 				pending_delta = 0;
@@ -1239,6 +1250,92 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 		playback.unref();
 	}
 
+	void _forward_audio(int p_mix_rate, double p_output_latency, bool p_limit_video_audio) {
+		const int mix_rate = p_mix_rate;
+		double output_latency = p_output_latency;
+		const bool limit_video_audio = p_limit_video_audio;
+		{
+			MutexLock lock(mutex);
+			if (paused || !events.ready) {
+				return;
+			}
+		}
+		if (output_latency < 0.0) {
+			output_latency = limit_video_audio ? AudioServer::get_singleton()->get_output_latency() : 0.0;
+		}
+		if (!Math::is_finite(output_latency) || output_latency < 0.0) {
+			output_latency = 0.0;
+		}
+		AudioFrame samples[1024];
+		float interleaved[2048];
+		for (int batch = 0; batch < 16; batch++) {
+			int count;
+			uint64_t current;
+			{
+				MutexLock lock(mutex);
+				current = generation;
+				count = pcm.read(samples, 1024, false);
+				const bool finite_video = cpu_frames && has_audio_track && length > 0.0 && !live_hls;
+				if (audio_clock_available && (live_hls || (finite_video && playing))) {
+					// Samples accepted by the frontend include device output latency.
+					// Keep the audible clock within 100ms of a decoded/queued frame,
+					// holding PCM during slow video fetching or conversion. Finite
+					// sources release this bound at EOF so their audio tail drains.
+					const double allowance_seconds = CLAMP(presentable_position - requested_position + 0.1 + output_latency, 0.0, double(INT32_MAX));
+					const int64_t budget = MAX(int64_t(0), int64_t(allowance_seconds * mix_rate) - frontend_frames_accepted);
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+					if (is_print_verbose_enabled()) {
+						clock_trace_horizon_checks++;
+						clock_trace_horizon_zero += budget == 0 && count > 0;
+						clock_trace_horizon_limited += budget < count;
+					}
+#endif
+					count = int(MIN(int64_t(count), budget));
+					if (!playing && budget == 0) {
+						// No future video frame can extend this terminal live horizon.
+						// Keep partial frontend acceptance until the playable tail is
+						// delivered, then discard only PCM beyond that final horizon.
+						pcm.clear();
+					}
+					// Hold bounded PCM immediately, but a normal frame handoff is
+					// not a buffering transition. Both finite and live sources must
+					// have stopped extending their video horizon for at least 100 ms.
+					const bool video_wait = video_horizon_waiting(finite_video, audio_position, presentable_position, OS::get_singleton()->get_ticks_usec() - presentable_progress_usec);
+					if (budget == 0 && events.ready && playing && video_wait && !live_audio_waiting) {
+						live_audio_waiting = true;
+						if (!events.buffering) {
+#ifdef DEV_ENABLED
+							capture_buffering_debug("video_horizon", mix_rate);
+#endif
+							events.buffering = true;
+							post_event(current, 1);
+						}
+					}
+				}
+			}
+			if (count == 0 || !mix_callback) {
+				break;
+			}
+			for (int i = 0; i < count; i++) {
+				interleaved[i * 2] = samples[i].left;
+				interleaved[i * 2 + 1] = samples[i].right;
+			}
+			int accepted = CLAMP(mix_callback(mix_udata, interleaved, count), 0, count);
+			{
+				MutexLock lock(mutex);
+				if (generation != current) {
+					break;
+				}
+				pcm.advance_read(accepted);
+				frontend_frames_accepted += accepted;
+			}
+			if (accepted < count) {
+				break;
+			}
+		}
+	}
+
+
 public:
 #ifdef FFMPEG_TESTS_ENABLED
 	void set_test_factory(FFmpegTestVideoFactory p_factory, void *p_userdata) {
@@ -1265,6 +1362,27 @@ public:
 	}
 #endif
 	bool _get(const StringName &p_name, Variant &r_result) const {
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		if (p_name == SNAME("_ffmpeg_clock_trace32")) {
+			MutexLock lock(mutex);
+			Dictionary trace;
+			trace["generation"] = int64_t(generation);
+			trace["frontend_timeline"] = frontend_timeline;
+			trace["worker_taken_delta"] = clock_trace_taken_delta;
+			trace["pending_delta"] = pending_delta;
+			trace["audio_position"] = audio_position;
+			trace["requested_position"] = requested_position;
+			trace["presentable_position"] = presentable_position;
+			trace["pcm_frames"] = pcm.data_left();
+			trace["frontend_frames_accepted"] = frontend_frames_accepted;
+			trace["horizon_checks"] = int64_t(clock_trace_horizon_checks);
+			trace["horizon_zero_budget"] = int64_t(clock_trace_horizon_zero);
+			trace["horizon_limited"] = int64_t(clock_trace_horizon_limited);
+			trace["buffering"] = events.buffering;
+			r_result = trace;
+			return true;
+		}
+#endif
 		if (p_name == SNAME("_ffmpeg_generation")) {
 			MutexLock lock(mutex);
 			r_result = int64_t(generation);
@@ -1357,6 +1475,12 @@ public:
 				}
 			}
 		}
+#if !defined(ANDROID_ENABLED) || !defined(__aarch64__)
+		// Keep device audio supplied before a texture upload or its callbacks
+		// can block the main thread. The same real-PCM and video-horizon
+		// limits apply; no decoding or extra buffering occurs here.
+		_forward_audio(mix_rate, output_latency, limit_video_audio);
+#endif
 		if (next_image.is_valid()) {
 			{
 				MutexLock lock(mutex);
@@ -1382,78 +1506,11 @@ public:
 				frontend_texture_usec += OS::get_singleton()->get_ticks_usec() - upload_started;
 			}
 		}
-		{
-			MutexLock lock(mutex);
-			if (paused || !events.ready) {
-				return;
-			}
-		}
-		if (output_latency < 0.0) {
-			output_latency = limit_video_audio ? AudioServer::get_singleton()->get_output_latency() : 0.0;
-		}
-		if (!Math::is_finite(output_latency) || output_latency < 0.0) {
-			output_latency = 0.0;
-		}
-		AudioFrame samples[1024];
-		float interleaved[2048];
-		for (int batch = 0; batch < 16; batch++) {
-			int count;
-			uint64_t current;
-			{
-				MutexLock lock(mutex);
-				current = generation;
-				count = pcm.read(samples, 1024, false);
-				const bool finite_video = cpu_frames && has_audio_track && length > 0.0 && !live_hls;
-				if (audio_clock_available && (live_hls || (finite_video && playing))) {
-					// Samples accepted by the frontend include device output latency.
-					// Keep the audible clock within 100ms of a decoded/queued frame,
-					// holding PCM during slow video fetching or conversion. Finite
-					// sources release this bound at EOF so their audio tail drains.
-					const double allowance_seconds = CLAMP(presentable_position - requested_position + 0.1 + output_latency, 0.0, double(INT32_MAX));
-					const int64_t budget = MAX(int64_t(0), int64_t(allowance_seconds * mix_rate) - frontend_frames_accepted);
-					count = int(MIN(int64_t(count), budget));
-					if (!playing && budget == 0) {
-						// No future video frame can extend this terminal live horizon.
-						// Keep partial frontend acceptance until the playable tail is
-						// delivered, then discard only PCM beyond that final horizon.
-						pcm.clear();
-					}
-					// Hold bounded PCM immediately, but a normal frame handoff is
-					// not a buffering transition. Both finite and live sources must
-					// have stopped extending their video horizon for at least 100 ms.
-					const bool video_wait = video_horizon_waiting(finite_video, audio_position, presentable_position, OS::get_singleton()->get_ticks_usec() - presentable_progress_usec);
-					if (budget == 0 && events.ready && playing && video_wait && !live_audio_waiting) {
-						live_audio_waiting = true;
-						if (!events.buffering) {
-#ifdef DEV_ENABLED
-							capture_buffering_debug("video_horizon", mix_rate);
+#if defined(ANDROID_ENABLED) && defined(__aarch64__)
+		// Restore the last qualified ARM64 order: publish the video frame
+		// before forwarding PCM, with all original acceptance checks intact.
+		_forward_audio(mix_rate, output_latency, limit_video_audio);
 #endif
-							events.buffering = true;
-							post_event(current, 1);
-						}
-					}
-				}
-			}
-			if (count == 0 || !mix_callback) {
-				break;
-			}
-			for (int i = 0; i < count; i++) {
-				interleaved[i * 2] = samples[i].left;
-				interleaved[i * 2 + 1] = samples[i].right;
-			}
-			int accepted = CLAMP(mix_callback(mix_udata, interleaved, count), 0, count);
-			{
-				MutexLock lock(mutex);
-				if (generation != current) {
-					break;
-				}
-				pcm.advance_read(accepted);
-				frontend_frames_accepted += accepted;
-			}
-			if (accepted < count) {
-				break;
-			}
-		}
 	}
 
 	void play() override {

@@ -95,6 +95,7 @@ Ref<AudioStreamPlayback> ffmpeg_test_paired_audio(const Ref<VideoStreamPlayback>
 void ffmpeg_test_set_conversion_gate(const Ref<VideoStreamPlayback> &p_playback, void (*p_callback)(void *), void *p_userdata);
 Dictionary ffmpeg_test_invalid_image_publication(bool p_async, bool p_empty);
 void ffmpeg_test_parallel_seek_gates(const Ref<VideoStreamPlayback> &p_playback, void (*p_audio)(void *), void (*p_video)(void *), void *p_userdata);
+void ffmpeg_test_video_seek_read_ahead_gate(const Ref<VideoStreamPlayback> &p_playback, void (*p_callback)(void *), void *p_userdata);
 Dictionary ffmpeg_test_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double p_fps, const SafeFlag &p_cancel,
 		VideoStreamPlayback::AudioPlaybackPositionCallback p_restore_clock = nullptr, void *p_restore_userdata = nullptr);
 bool ffmpeg_test_video_horizon_waiting(bool p_finite_video, double p_audio_position, double p_presentable_position, uint64_t p_without_progress_usec);
@@ -1207,6 +1208,67 @@ TEST_CASE("[SceneTree][NativeStreaming][SeekReadAhead][Local] Early packet produ
 	CHECK(int(playback->get(SNAME("stream_error"))) != OK);
 }
 
+struct PrefetchSeekCancellation {
+	SafeFlag entered;
+	SafeFlag cancel;
+	Ref<VideoStreamPlayback> playback;
+	bool succeeded = true;
+	static void gate(void *p_self) {
+		PrefetchSeekCancellation *self = static_cast<PrefetchSeekCancellation *>(p_self);
+		self->entered.set();
+		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+		while (!self->cancel.is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
+			OS::get_singleton()->delay_usec(1000);
+		}
+	}
+	static void seek(void *p_self) {
+		PrefetchSeekCancellation *self = static_cast<PrefetchSeekCancellation *>(p_self);
+		self->succeeded = ffmpeg_seek_video_on_worker(self->playback, 1.523);
+	}
+};
+
+TEST_CASE("[SceneTree][NativeStreaming][SeekReadAhead][Local] In-flight packet preparation cancels and failed producer creation can retry" * doctest::skip()) {
+	initialize_audio();
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR").path_join("bframes.mp4");
+	String error;
+	PrefetchSeekCancellation fixture;
+	fixture.playback = ffmpeg_open_video_on_worker(path, Dictionary(), &fixture.cancel, String(), Dictionary(), &error);
+	REQUIRE(fixture.playback.is_valid());
+	fixture.playback->set(SNAME("_ffmpeg_test_seek_read_ahead"), true);
+	fixture.playback->play();
+	ffmpeg_test_video_seek_read_ahead_gate(fixture.playback, PrefetchSeekCancellation::gate, &fixture);
+	Thread seek_thread;
+	REQUIRE(seek_thread.start(PrefetchSeekCancellation::seek, &fixture) != Thread::UNASSIGNED_ID);
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+	while (!fixture.entered.is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(fixture.entered.is_set());
+	fixture.cancel.set();
+	seek_thread.wait_to_finish();
+	CHECK_FALSE(fixture.succeeded);
+	CHECK(int(fixture.playback->get(SNAME("stream_error"))) != OK);
+	CHECK(int64_t(fixture.playback->get(SNAME("_ffmpeg_seek_read_ahead_count"))) == 1);
+	const uint64_t cleanup_begin = OS::get_singleton()->get_ticks_usec();
+	fixture.playback.unref();
+	CHECK(OS::get_singleton()->get_ticks_usec() - cleanup_begin < 2000000);
+
+	SafeFlag retry_cancel;
+	Ref<VideoStreamPlayback> retry = ffmpeg_open_video_on_worker(path, Dictionary(), &retry_cancel, String(), Dictionary(), &error);
+	REQUIRE(retry.is_valid());
+	retry->set(SNAME("_ffmpeg_test_seek_read_ahead"), true);
+	retry->set(SNAME("_ffmpeg_test_seek_read_ahead_start_failure"), true);
+	retry->play();
+	CHECK_FALSE(ffmpeg_seek_video_on_worker(retry, 1.523));
+	CHECK(int(retry->get(SNAME("stream_error"))) == ERR_CANT_CREATE);
+	CHECK(int64_t(retry->get(SNAME("_ffmpeg_seek_read_ahead_count"))) == 0);
+	retry->set(SNAME("_ffmpeg_test_seek_read_ahead_start_failure"), false);
+	CHECK(ffmpeg_seek_video_on_worker(retry, 1.523));
+	CHECK(int(retry->get(SNAME("stream_error"))) == OK);
+	CHECK(Math::abs(retry->get_playback_position() - Math::ceil(1.523 * 30.0) / 30.0) < 0.000001);
+	CHECK(int64_t(retry->get(SNAME("_ffmpeg_seek_read_ahead_count"))) == 1);
+}
+
 struct ParallelSeekObserver {
 	SafeFlag audio_entered, video_prepared, release_audio, both_prepared;
 	SafeFlag *cancel = nullptr;
@@ -2163,6 +2225,121 @@ public:
 		}
 	}
 };
+
+class MixDuringVideoTexture : public RefCounted {
+	GDCLASS(MixDuringVideoTexture, RefCounted);
+
+protected:
+	static void _bind_methods() {}
+
+public:
+	AudioDriverDummy *driver = nullptr;
+	bool called = false;
+	int64_t energy = 0;
+	void changed() {
+		if (called) {
+			return;
+		}
+		called = true;
+		// Simulate device callbacks while a texture upload/notification keeps
+		// the main thread occupied. Only already-decoded PCM may be available.
+		int32_t output[1024] = {};
+		for (int batch = 0; batch < 4; batch++) {
+			driver->mix_audio(512, output);
+			for (int32_t sample : output) {
+				energy += Math::abs(int64_t(sample));
+			}
+			OS::get_singleton()->delay_usec(15000);
+		}
+	}
+};
+
+TEST_CASE("[SceneTree][NativeStreaming][AudioBeforeUpload] Queued PCM reaches the device during a blocked video texture notification") {
+	for (bool paused : { false, true }) {
+		CAPTURE(paused);
+		REQUIRE(AudioServer::get_singleton() == nullptr);
+		ManualAudioDriver audio;
+		FiniteVideoFixture fixture;
+		fixture.live = false;
+		fixture.cpu_frames = true;
+		fixture.prepared_cpu_frame = true;
+		fixture.hold_video = true;
+		fixture.mix_rate = AudioServer::get_singleton()->get_mix_rate();
+		fixture.image = Image::create_empty(16, 16, false, Image::FORMAT_RGBA8);
+		Ref<FiniteVideoStream> stream;
+		stream.instantiate();
+		stream->fixture = &fixture;
+		VideoPlayerOwner owner;
+		VideoStreamPlayer *player = owner.player;
+		SceneTree::get_singleton()->get_root()->add_child(player);
+		player->set_stream(stream);
+		Ref<Texture2D> texture = player->get_video_texture();
+		REQUIRE(texture.is_valid());
+		Ref<MixDuringVideoTexture> recorder;
+		recorder.instantiate();
+		recorder->driver = audio.driver;
+		texture->connect(SNAME("changed"), callable_mp(recorder.ptr(), &MixDuringVideoTexture::changed));
+		player->play();
+		// Hold main-thread delivery until the worker has real PCM queued. This
+		// isolates forwarding order from decoder/network availability.
+		REQUIRE(wait_quality_flag(fixture.filled));
+		player->set_paused(paused);
+		MessageQueue::get_singleton()->flush();
+		CHECK(recorder->called);
+		CHECK((paused ? recorder->energy == 0 : recorder->energy > 0));
+		CHECK(texture->get_width() == 16);
+		CHECK(texture->get_height() == 16);
+		CHECK(int(player->get_stream_playback()->get(SNAME("stream_error"))) == OK);
+		texture->disconnect(SNAME("changed"), callable_mp(recorder.ptr(), &MixDuringVideoTexture::changed));
+		player->stop();
+	}
+}
+
+struct SeekDuringAudioForward {
+	Ref<VideoStreamPlayback> playback;
+	bool called = false;
+	static int mix(void *p_userdata, const float *, int p_frames) {
+		SeekDuringAudioForward *self = static_cast<SeekDuringAudioForward *>(p_userdata);
+		if (!self->called) {
+			self->called = true;
+			self->playback->seek(0.6);
+		}
+		return p_frames;
+	}
+};
+
+TEST_CASE("[SceneTree][NativeStreaming][AudioBeforeUpload] A seek from the audio callback rejects the previously selected image") {
+	initialize_audio();
+	FiniteVideoFixture fixture;
+	fixture.live = false;
+	fixture.cpu_frames = true;
+	fixture.prepared_cpu_frame = true;
+	fixture.hold_video = true;
+	fixture.mix_rate = AudioServer::get_singleton()->get_mix_rate();
+	fixture.image = Image::create_empty(16, 16, false, Image::FORMAT_RGBA8);
+	Ref<VideoStreamPlayback> playback = ffmpeg_test_async_video(FiniteVideoPlayback::create, &fixture);
+	REQUIRE(playback.is_valid());
+	SeekDuringAudioForward sink;
+	sink.playback = playback;
+	playback->set_mix_callback(SeekDuringAudioForward::mix, &sink);
+	playback->set_audio_playback_position(0.0);
+	playback->set_audio_output_latency(0.0);
+	playback->play();
+	REQUIRE(wait_ready(playback, 2000000));
+	REQUIRE(wait_quality_flag(fixture.filled));
+	Ref<Texture2D> texture = playback->get_texture();
+	REQUIRE(texture.is_valid());
+	REQUIRE(texture->get_width() == 0);
+	const int64_t generation = playback->get(SNAME("_ffmpeg_generation"));
+	playback->update(0.0);
+	CHECK(sink.called);
+	CHECK(int64_t(playback->get(SNAME("_ffmpeg_generation"))) > generation);
+	CHECK(texture->get_width() == 0);
+	playback->stop();
+	sink.playback.unref();
+	playback.unref();
+	CHECK(fixture.owners.get() == 0);
+}
 
 TEST_CASE("[SceneTree][NativeStreaming] Publishing a CPU video frame preserves a pause requested by its texture callback") {
 	REQUIRE(AudioServer::get_singleton() == nullptr);

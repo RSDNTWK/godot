@@ -401,6 +401,10 @@ int MediaHTTP::read(uint8_t *p_buffer, int p_size) {
 			if (remaining >= 0) {
 				remaining -= pending.size();
 			}
+			if (!pending.is_empty()) {
+				// Deliver bytes already received before waiting for more network IO.
+				continue;
+			}
 		} else {
 			const bool response_complete = poll_error == OK && (status == HTTPClient::STATUS_CONNECTED || status == HTTPClient::STATUS_DISCONNECTED) && remaining <= 0;
 			if (response_complete && (size < 0 || offset == size)) {

@@ -35,6 +35,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
@@ -138,6 +139,9 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 #ifdef FFMPEG_TESTS_ENABLED
 	bool test_prefer_warm_seek = false;
 	bool test_seek_read_ahead = false;
+	bool test_seek_read_ahead_start_failure = false;
+	void (*test_seek_read_ahead_started)(void *) = nullptr;
+	void *test_seek_read_ahead_userdata = nullptr;
 	void (*test_video_seek_prepared)(void *) = nullptr;
 	void *test_video_seek_userdata = nullptr;
 #endif
@@ -265,7 +269,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		return AV_PIX_FMT_NONE;
 	}
 
-	bool _open_decoder(const AVCodec *p_decoder, AVBufferRef *p_device, bool p_hardware) {
+	bool _open_decoder(const AVCodec *p_decoder, AVBufferRef *p_device, bool p_hardware, bool p_try_operating_hint = true) {
 		if (!p_decoder) {
 			return false;
 		}
@@ -297,9 +301,30 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 				return false;
 			}
 		}
+		int operating_hint = 0;
+#if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
+		if (p_try_operating_hint && p_hardware && network_cancel && async_frames && format && format->duration > 0 &&
+				!String(format->iformat->name).contains("hls") && String(p_decoder->name).ends_with("_mediacodec") &&
+				candidate->width > 0 && candidate->width <= 1920 && candidate->height > 0 && candidate->height <= 1080) {
+			const double source_rate = av_q2d(av_guess_frame_rate(format, format->streams[video_stream], nullptr));
+			if (Math::is_finite(source_rate) && source_rate > 0.0 && source_rate <= 60.0 &&
+					av_opt_set_int(candidate, "operating_rate", 120, AV_OPT_SEARCH_CHILDREN) >= 0) {
+				// Resource-planning hint for bounded preroll/catch-up work. Source
+				// frame rate, presentation clock and output quality stay unchanged.
+				operating_hint = 120;
+			}
+		}
+#endif
 		if (avcodec_open2(candidate, p_decoder, nullptr) < 0) {
 			avcodec_free_context(&candidate);
+			if (operating_hint > 0 && p_try_operating_hint) {
+				print_verbose("FFmpeg: MediaCodec rejected the operating-rate hint; retrying hardware defaults.");
+				return _open_decoder(p_decoder, p_device, p_hardware, false);
+			}
 			return false;
+		}
+		if (operating_hint > 0) {
+			print_verbose(vformat("FFmpeg: MediaCodec operating-rate resource hint %d configured for '%s'.", operating_hint, p_decoder->name));
 		}
 		codec = candidate;
 		hardware_decoding = p_hardware;
@@ -609,6 +634,10 @@ public:
 #ifdef FFMPEG_TESTS_ENABLED
 		if (p_name == SNAME("_ffmpeg_test_seek_read_ahead")) {
 			test_seek_read_ahead = p_value;
+			return true;
+		}
+		if (p_name == SNAME("_ffmpeg_test_seek_read_ahead_start_failure")) {
+			test_seek_read_ahead_start_failure = p_value;
 			return true;
 		}
 		if (p_name == SNAME("_ffmpeg_test_warm_seek")) {
@@ -1763,7 +1792,7 @@ public:
 			waiting_for_keyframe = false;
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 			bool prefetch_preroll = false;
-#if defined(ANDROID_ENABLED) && defined(__arm__)
+#if defined(ANDROID_ENABLED) && (defined(__arm__) || defined(__aarch64__))
 			prefetch_preroll = hardware_decoding && codec->codec && String(codec->codec->name).ends_with("_mediacodec");
 #endif
 #ifdef FFMPEG_TESTS_ENABLED
@@ -1774,7 +1803,11 @@ public:
 				// Seeking/flushing is complete. The same bounded producer can now
 				// own the demuxer while preroll consumes packets and feeds the codec.
 				// Do not wait for prefill here: that would serialize the work again.
+#ifdef FFMPEG_TESTS_ENABLED
+				const Error started = test_seek_read_ahead_start_failure ? ERR_CANT_CREATE : packet_reader.start(format, video_stream, network_cancel);
+#else
 				const Error started = packet_reader.start(format, video_stream, network_cancel);
+#endif
 				if (started != OK) {
 					stream_error = started;
 					stream_error_message = "Could not start video packet read-ahead during seek preparation.";
@@ -1783,6 +1816,11 @@ public:
 				seek_read_ahead_active = true;
 				seek_read_ahead_count++;
 				print_verbose("FFmpeg: bounded video packet read-ahead started before seek preroll.");
+#ifdef FFMPEG_TESTS_ENABLED
+				if (test_seek_read_ahead_started) {
+					test_seek_read_ahead_started(test_seek_read_ahead_userdata);
+				}
+#endif
 			}
 #endif
 			_prepare_seek_output(p_time);
@@ -1909,6 +1947,10 @@ public:
 	}
 	Ref<Texture2D> get_texture() const override { return texture; }
 #ifdef FFMPEG_TESTS_ENABLED
+	void set_test_seek_read_ahead_gate(void (*p_callback)(void *), void *p_userdata) {
+		test_seek_read_ahead_started = p_callback;
+		test_seek_read_ahead_userdata = p_userdata;
+	}
 	Ref<AudioStreamPlayback> get_test_audio_playback() const { return audio_playback; }
 	bool prepare_test_image_publication() {
 		late_frame = av_frame_alloc();
@@ -1972,6 +2014,13 @@ bool ffmpeg_seek_video_on_worker(const Ref<VideoStreamPlayback> &p_playback, dou
 }
 
 #ifdef FFMPEG_TESTS_ENABLED
+void ffmpeg_test_video_seek_read_ahead_gate(const Ref<VideoStreamPlayback> &p_playback, void (*p_callback)(void *), void *p_userdata) {
+	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
+	if (playback.is_valid()) {
+		playback->set_test_seek_read_ahead_gate(p_callback, p_userdata);
+	}
+}
+
 void ffmpeg_test_parallel_seek_gates(const Ref<VideoStreamPlayback> &p_playback, void (*p_audio)(void *), void (*p_video)(void *), void *p_userdata) {
 	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
 	if (playback.is_valid()) {

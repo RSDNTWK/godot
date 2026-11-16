@@ -31,6 +31,10 @@
 #include "video_stream_player.h"
 
 #include "core/config/engine.h"
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+#include "core/io/json.h"
+#include "core/os/os.h"
+#endif
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "scene/main/scene_tree.h"
@@ -111,14 +115,32 @@ void VideoStreamPlayer::_mix_audio() {
 
 	AudioFrame *buffer = mix_buffer.ptrw();
 	int buffer_size = mix_buffer.size();
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+	const bool trace_clock = native_streaming && is_print_verbose_enabled();
+	const int trace_ready_frames = trace_clock ? resampler.get_num_of_ready_frames() : 0;
+	if (trace_clock) {
+		clock_trace_callbacks++;
+		clock_trace_requested_frames += buffer_size;
+	}
+#endif
 
 	// Resample
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 	const int read_before = resampler.rb_read_pos.get();
 #endif
 	if (!mix(buffer, buffer_size)) {
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		if (trace_clock) {
+			clock_trace_waits++;
+		}
+#endif
 		return;
 	}
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+	if (trace_clock) {
+		clock_trace_padding_frames += MAX(0, buffer_size - trace_ready_frames);
+	}
+#endif
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 	// Count source samples actually read, excluding underrun padding. Only the
 	// audio thread moves this cursor; stream/seek resets hold the audio lock.
@@ -199,6 +221,12 @@ void VideoStreamPlayer::_notification(int p_notification) {
 #endif
 			double delta = first_frame ? 0 : get_process_delta_time();
 			first_frame = false;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+			const bool trace_clock = native_streaming && is_print_verbose_enabled() && clock_trace_reports < 128;
+			if (trace_clock) {
+				clock_trace_process_seconds += MAX(0.0, delta * speed_scale);
+			}
+#endif
 
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 			AudioServer::get_singleton()->lock();
@@ -207,6 +235,13 @@ void VideoStreamPlayer::_notification(int p_notification) {
 			const uint64_t scheduled_end_frame = audio_scheduled_frame;
 			const double mixed_source_speed = audio_last_mix_speed;
 			const AudioServer::OutputFrameClock output_clock = AudioServer::get_singleton()->thread_get_output_frame_clock();
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+			const int trace_ready_frames = trace_clock ? resampler.get_num_of_ready_frames() : 0;
+			const uint64_t trace_callbacks = clock_trace_callbacks;
+			const uint64_t trace_waits = clock_trace_waits;
+			const uint64_t trace_requested = clock_trace_requested_frames;
+			const uint64_t trace_padding = clock_trace_padding_frames;
+#endif
 			AudioServer::get_singleton()->unlock();
 			if ((!native_streaming || bool(playback->get(SNAME("stream_ready")))) && playback->get_channels() > 0 && playback->get_mix_rate() > 0) {
 				const double speed = Engine::get_singleton()->get_effective_time_scale() * speed_scale;
@@ -217,6 +252,36 @@ void VideoStreamPlayer::_notification(int p_notification) {
 				const double source_position = audio_clock_origin + mixed_time;
 				const double audible_position = native_streaming ? audio_sample_clock.update_scheduled(source_position, scheduled_end_frame, output_clock.delivered_frames, output_clock.since_mix, output_latency, AudioServer::get_singleton()->get_mix_rate(), mixed_source_speed) : audio_clock_origin + MAX(0.0, mixed_time - source_latency);
 				playback->set_audio_playback_position(audible_position);
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+				const uint64_t trace_now = trace_clock ? OS::get_singleton()->get_ticks_usec() : 0;
+				if (trace_clock && trace_now - clock_trace_last_usec >= 1000000) {
+					clock_trace_last_usec = trace_now;
+					Dictionary trace;
+					trace["sequence"] = int64_t(++clock_trace_reports);
+					trace["player_id"] = uitos(get_instance_id());
+					trace["generation"] = int64_t(audio_generation.get());
+					trace["wall_usec"] = int64_t(trace_now);
+					trace["process_seconds"] = clock_trace_process_seconds;
+					trace["source_frames"] = int64_t(consumed_frames);
+					trace["source_rate"] = playback->get_mix_rate();
+					trace["source_origin"] = audio_clock_origin;
+					trace["source_end"] = source_position;
+					trace["audible_position"] = audible_position;
+					trace["source_speed"] = mixed_source_speed;
+					trace["device_rate"] = AudioServer::get_singleton()->get_mix_rate();
+					trace["delivered_frames"] = int64_t(output_clock.delivered_frames);
+					trace["scheduled_end_frame"] = int64_t(scheduled_end_frame);
+					trace["since_mix"] = output_clock.since_mix;
+					trace["output_latency"] = output_latency;
+					trace["ready_frames"] = trace_ready_frames;
+					trace["callbacks"] = int64_t(trace_callbacks);
+					trace["waits"] = int64_t(trace_waits);
+					trace["requested_frames"] = int64_t(trace_requested);
+					trace["padding_frames"] = int64_t(trace_padding);
+					trace["backend"] = playback->get(SNAME("_ffmpeg_clock_trace32"));
+					print_line("FFMPEG_CLOCK_PROFILE32 " + JSON::stringify(trace));
+				}
+#endif
 			}
 #else
 			resampler.set_playback_speed(Engine::get_singleton()->get_effective_time_scale() * speed_scale);

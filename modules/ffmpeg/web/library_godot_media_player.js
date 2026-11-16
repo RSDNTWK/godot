@@ -362,13 +362,14 @@ const GodotMediaPlayerLibrary = {
 		startFrameWatch: function (r, element) {
 			GodotMediaPlayer.stopFrameWatch(r);
 			if (!r.video || r.opaque || typeof element.requestVideoFrameCallback !== 'function' || typeof element.cancelVideoFrameCallback !== 'function') return;
-			const watch = {element, handle: null, serial: 0};
+			const watch = {element, handle: null, serial: 0, lastFrameAt: 0};
 			r.frameWatch = watch;
 			const active = function () { return GodotMediaPlayer.alive(r) && r.element === element && r.frameWatch === watch; };
 			const frame = function () {
 				watch.handle = null;
 				if (!active()) return;
 				watch.serial++;
+				watch.lastFrameAt = performance.now();
 				schedule();
 			};
 			const schedule = function () {
@@ -642,7 +643,9 @@ const GodotMediaPlayerLibrary = {
 		if (r.frameTime >= 0 && r.frameWidth === width && r.frameHeight === height) {
 			// The playback clock can tick several times for one decoded image.
 			// Copy/upload only newly presented frames where the browser exposes them.
-			if (watch && watch.element === r.element) { if (r.frameSerial === watch.serial) return 0; }
+			// Callbacks are best effort. A silent or throttled callback API must
+			// not freeze the existing clock-based rendering path.
+			if (watch && watch.element === r.element && watch.serial > 0 && performance.now() - watch.lastFrameAt <= 100) { if (r.frameSerial === watch.serial) return 0; }
 			else if (r.frameTime === r.element.currentTime) return 0;
 		}
 		try {
