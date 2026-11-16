@@ -131,6 +131,12 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	uint64_t timeline_padded_frames = 0;
 	bool read_ahead_used = false;
 	double read_ahead_prefill_seconds = 6.0;
+	bool buffered_forward_seek_requested = false;
+#ifdef FFMPEG_TESTS_ENABLED
+	uint64_t buffered_forward_seek_count = 0;
+	void (*test_seek_gate)(void *) = nullptr;
+	void *test_seek_gate_userdata = nullptr;
+#endif
 
 	void close_decoder() {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
@@ -177,6 +183,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 		hls_pdt_timeline = false;
 		timeline_trimmed_frames = timeline_padded_frames = 0;
 		read_ahead_used = false;
+		buffered_forward_seek_requested = false;
 		raw_position = 0;
 		decoded_frames = 0;
 		const AVCodec *decoder = nullptr;
@@ -621,6 +628,12 @@ public:
 #endif
 
 	void set_loop_stream(const Ref<AudioStream> &p_stream) { loop_stream = p_stream; }
+#ifdef FFMPEG_TESTS_ENABLED
+	void set_test_seek_gate(void (*p_callback)(void *), void *p_userdata) {
+		test_seek_gate = p_callback;
+		test_seek_gate_userdata = p_userdata;
+	}
+#endif
 	double get_decoded_length() const { return length; }
 	void start(double p_from_pos = 0.0) override {
 		seek(p_from_pos);
@@ -632,6 +645,15 @@ public:
 	int get_loop_count() const override { return loops; }
 	double get_playback_position() const override { return double(frame_position) / output_sample_rate; }
 	void seek(double p_time) override {
+#ifdef FFMPEG_TESTS_ENABLED
+		if (test_seek_gate) {
+			test_seek_gate(test_seek_gate_userdata);
+		}
+#endif
+#ifdef MODULE_MEDIA_STREAM_ENABLED
+		const bool buffered_forward = buffered_forward_seek_requested;
+		buffered_forward_seek_requested = false;
+#endif
 		if (!Math::is_finite(p_time)) {
 			return;
 		}
@@ -644,6 +666,57 @@ public:
 		test_frame_timing.clear();
 #endif
 #ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (buffered_forward && remote_cancel && format && stream_index >= 0) {
+			const uint64_t buffered_pcm = uint64_t(MAX(0, pcm_frames - pcm_position));
+			const bool forward = target >= frame_position && target - frame_position <= uint64_t(output_sample_rate) * 2;
+			const uint64_t discard = forward ? target - frame_position : 0;
+			if (remote_cancel->is_set()) {
+				failed = true;
+				return;
+			}
+			// Dated HLS reconciles each frame against its UTC timeline and must
+			// retain the timestamp-based seek rather than a sample-count skip.
+			if (forward && !remote_live_hls && !hls_pdt_timeline && !finite_pcm_preparation && !failed && !eof && !rewind_pending &&
+					skip_frames == 0 && silence_frames == 0 && remote_seek_target < 0.0 && packet_reader.is_started() &&
+					(discard < buffered_pcm || packet_reader.has_prefill(double(discard) / output_sample_rate + 0.5))) {
+				// Keep the decoder, resampler and sole demuxer owner. Discard real PCM
+				// rather than container-seeking back to an earlier compressed packet.
+				const uint64_t previous_deadline = live_preroll_deadline;
+				const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 30000000;
+				live_preroll_deadline = previous_deadline ? MIN(previous_deadline, deadline) : deadline;
+				skip_frames = discard;
+				bool prepared = false;
+				while (!remote_cancel->is_set() && OS::get_singleton()->get_ticks_usec() < live_preroll_deadline) {
+					if (ensure_samples()) {
+						prepared = true;
+						break;
+					}
+					if (!packet_waiting || failed || eof) {
+						break;
+					}
+					OS::get_singleton()->delay_usec(1000);
+				}
+				const bool cancelled = remote_cancel->is_set();
+				const bool expired = OS::get_singleton()->get_ticks_usec() >= live_preroll_deadline;
+				live_preroll_deadline = previous_deadline;
+				if (prepared && !cancelled && !expired && !failed && skip_frames == 0) {
+					frame_position = target;
+#ifdef FFMPEG_TESTS_ENABLED
+					buffered_forward_seek_count++;
+#endif
+				} else {
+					failed = true;
+					if (decode_error.is_empty()) {
+						decode_error = cancelled ? "Audio forward seek was cancelled." : "Could not prepare buffered audio at the requested seek position.";
+					}
+				}
+				return;
+			}
+			// Ineligible corrections retain the existing joined-producer seek.
+			packet_reader.stop(false);
+			packet_reader.reset();
+			read_ahead_used = false;
+		}
 		if (remote_cancel && format && stream_index >= 0) {
 			if (read_ahead_used) {
 				// A live format may have an interrupted/queued read in flight.
@@ -697,7 +770,12 @@ public:
 	}
 	void set_parameter(const StringName &p_name, const Variant &p_value) override {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
+		if (p_name == SNAME("_ffmpeg_prepare_buffered_forward_seek")) {
+			buffered_forward_seek_requested = true;
+			return;
+		}
 		if (p_name == SNAME("_ffmpeg_prepare_reuse_seek")) {
+			buffered_forward_seek_requested = false;
 			// Called only by the owning decode worker, before a finite seek.
 			// Join the producer before touching its demuxer or resetting IO.
 			packet_reader.stop(false);
@@ -710,8 +788,10 @@ public:
 				failed = true;
 				return;
 			}
+			// A retained forward seek keeps this producer alive, but still uses
+			// the caller's existing shorter finite-seek prefill policy.
+			read_ahead_prefill_seconds = p_value.get_type() == Variant::FLOAT ? CLAMP(double(p_value), 0.5, 6.0) : 6.0;
 			if (!packet_reader.is_started()) {
-				read_ahead_prefill_seconds = p_value.get_type() == Variant::FLOAT ? CLAMP(double(p_value), 0.5, 6.0) : 6.0;
 				if (read_ahead_used || packet_reader.start(format, stream_index, remote_cancel) != OK) {
 					failed = true;
 					return;
@@ -738,6 +818,9 @@ public:
 	}
 	Variant get_parameter(const StringName &p_name) const override {
 #ifdef FFMPEG_TESTS_ENABLED
+		if (p_name == SNAME("_ffmpeg_test_buffered_forward_seek_count")) {
+			return int64_t(buffered_forward_seek_count);
+		}
 		if (p_name == SNAME("_ffmpeg_test_frame_timing")) {
 			return test_frame_timing.duplicate();
 		}
@@ -796,7 +879,7 @@ public:
 		}
 	}
 #if defined(FFMPEG_TESTS_ENABLED) && defined(MODULE_MEDIA_STREAM_ENABLED)
-	bool attach_test_packet_reader(FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel, double p_seek_from) {
+	bool attach_test_packet_reader(FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel, double p_seek_from, bool p_preserve_prepared_pcm) {
 		// Exercise actual PCM decode/mix recovery with controlled packet supply.
 		// No production path can attach a synthetic packet source.
 		if (!format || !codec || stream_index < 0) {
@@ -808,7 +891,8 @@ public:
 			if (failed) {
 				return false;
 			}
-		} else {
+		}
+		if (!p_seek_cancel || !p_preserve_prepared_pcm) {
 			avcodec_flush_buffers(codec);
 			swr_free(&resampler);
 			av_packet_unref(packet);
@@ -816,6 +900,7 @@ public:
 			pcm_position = pcm_frames = 0;
 			packet_pending = draining = eof = failed = rewind_pending = packet_waiting = false;
 			frame_position = skip_frames = silence_frames = 0;
+			remote_seek_target = -1.0;
 		}
 		read_ahead_used = true;
 		return packet_reader.start_for_test(p_read, p_userdata, stream_index, source_time_base) == OK;
@@ -1030,11 +1115,20 @@ Ref<AudioStreamPlayback> ffmpeg_audio_playback_from_buffer(const Vector<uint8_t>
 	return playback;
 }
 
+#ifdef FFMPEG_TESTS_ENABLED
+void ffmpeg_test_audio_seek_gate(const Ref<AudioStreamPlayback> &p_playback, void (*p_callback)(void *), void *p_userdata) {
+	Ref<AudioStreamPlaybackFFmpeg> playback = p_playback;
+	if (playback.is_valid()) {
+		playback->set_test_seek_gate(p_callback, p_userdata);
+	}
+}
+#endif
+
 #if defined(FFMPEG_TESTS_ENABLED) && defined(MODULE_MEDIA_STREAM_ENABLED)
-Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel, double p_seek_from) {
+Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel, double p_seek_from, bool p_preserve_prepared_pcm) {
 	Ref<AudioStreamPlaybackFFmpeg> playback;
 	playback.instantiate();
-	if (!playback->open_buffer(p_wave, nullptr, String()) || !playback->attach_test_packet_reader(p_read, p_userdata, p_seek_cancel, p_seek_from)) {
+	if (!playback->open_buffer(p_wave, nullptr, String()) || !playback->attach_test_packet_reader(p_read, p_userdata, p_seek_cancel, p_seek_from, p_preserve_prepared_pcm)) {
 		return Ref<AudioStreamPlayback>();
 	}
 	return playback;

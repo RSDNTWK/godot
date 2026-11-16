@@ -54,8 +54,11 @@
 #include "modules/ffmpeg/ffmpeg_file_io.h"
 #include "modules/ffmpeg/ffmpeg_frame_queue.h"
 #include "modules/ffmpeg/ffmpeg_frame_scaler.h"
+#include "modules/ffmpeg/tests/test_ffmpeg_frame_converter.h"
+#include "modules/ffmpeg/ffmpeg_keyframe_seek_hint.h"
 #include "modules/ffmpeg/ffmpeg_media_metadata.h"
 #include "modules/ffmpeg/ffmpeg_packet_reader.h"
+#include "modules/ffmpeg/ffmpeg_packed_frame.h"
 #include "modules/ffmpeg/ffmpeg_quality_lookup.h"
 #include "modules/ffmpeg/media_source_policy.h"
 #include "modules/ffmpeg/media_stream_player.h"
@@ -87,14 +90,33 @@ struct FFmpegRemoteIOTestAccess {
 	}
 };
 
-Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel = nullptr, double p_seek_from = 0.0);
+Ref<AudioStreamPlayback> ffmpeg_test_audio_packet_reader(const Vector<uint8_t> &p_wave, FFmpegPacketReader::TestReadCallback p_read, void *p_userdata, const SafeFlag *p_seek_cancel = nullptr, double p_seek_from = 0.0, bool p_preserve_prepared_pcm = true);
 Ref<AudioStreamPlayback> ffmpeg_test_paired_audio(const Ref<VideoStreamPlayback> &p_playback);
+void ffmpeg_test_set_conversion_gate(const Ref<VideoStreamPlayback> &p_playback, void (*p_callback)(void *), void *p_userdata);
+Dictionary ffmpeg_test_invalid_image_publication(bool p_async, bool p_empty);
+void ffmpeg_test_parallel_seek_gates(const Ref<VideoStreamPlayback> &p_playback, void (*p_audio)(void *), void (*p_video)(void *), void *p_userdata);
 Dictionary ffmpeg_test_startup_frames(const Ref<VideoStreamPlayback> &p_playback, double p_fps, const SafeFlag &p_cancel,
 		VideoStreamPlayback::AudioPlaybackPositionCallback p_restore_clock = nullptr, void *p_restore_userdata = nullptr);
 bool ffmpeg_test_video_horizon_waiting(bool p_finite_video, double p_audio_position, double p_presentable_position, uint64_t p_without_progress_usec);
 bool ffmpeg_test_packet_source_starved(bool p_waiting, int p_queued_pcm, int64_t p_accepted_frames, double p_origin, double p_audible_position, int p_mix_rate, bool p_has_clock = true, bool p_has_audio = true);
 
 namespace TestNativeStreaming {
+
+TEST_CASE("[SceneTree][NativeStreaming][ImagePublication] Invalid images retain the previous frame without advancing playback") {
+	for (bool asynchronous : { false, true }) {
+		for (bool empty : { false, true }) {
+			const Dictionary result = ffmpeg_test_invalid_image_publication(asynchronous, empty);
+			CHECK(bool(result["first"]));
+			CHECK_FALSE(bool(result["second"]));
+			CHECK(double(result["position"]) == 2.0);
+			CHECK(int64_t(result["frames"]) == 1);
+			CHECK(int(result["error"]) == (empty ? ERR_INVALID_DATA : ERR_OUT_OF_MEMORY));
+			CHECK_FALSE(String(result["message"]).is_empty());
+			CHECK_FALSE(bool(result["playing"]));
+			CHECK(bool(result["retained"]));
+		}
+	}
+}
 
 TEST_CASE("[Audio][NativeStreaming][TransportErrors] HTTP failures reach audio and video opening messages") {
 	for (int status : { 403, 429, 503 }) {
@@ -360,69 +382,202 @@ TEST_CASE("[NativeStreaming][AdaptiveQuality] Lower rendition lookup does not bl
 }
 
 TEST_CASE("[NativeStreaming][FrameScaler] Bounded threaded conversion preserves bilinear pixels across strides, slices and frame replacement") {
-	FFmpegFrameScaler converter;
 	const int sizes[][2] = { { 96, 64 }, { 70, 50 }, { 127, 95 }, { 192, 98 } };
+	for (const int workers : { 1, 2 }) {
+		FFmpegFrameScaler converter(workers);
+		for (const auto &size : sizes) {
+			AVFrame *source = av_frame_alloc();
+			AVFrame *reference = av_frame_alloc();
+			AVFrame *converted = av_frame_alloc();
+			REQUIRE(source);
+			REQUIRE(reference);
+			REQUIRE(converted);
+			source->width = reference->width = converted->width = size[0];
+			source->height = reference->height = converted->height = size[1];
+			source->format = AV_PIX_FMT_NV12;
+			reference->format = converted->format = AV_PIX_FMT_RGBA;
+			REQUIRE(av_frame_get_buffer(source, 256) == 0);
+			REQUIRE(av_frame_get_buffer(reference, 32) == 0);
+			REQUIRE(av_frame_get_buffer(converted, 32) == 0);
+			SwsContext *scalar = sws_getContext(size[0], size[1], AV_PIX_FMT_NV12, size[0], size[1], AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+			REQUIRE(scalar);
+			for (int pass = 0; pass < 2; pass++) {
+				for (int y = 0; y < size[1]; y++) {
+					for (int x = 0; x < size[0]; x++) {
+						source->data[0][y * source->linesize[0] + x] = 16 + (x + y + pass * 37) % 220;
+					}
+				}
+				for (int y = 0; y < (size[1] + 1) / 2; y++) {
+					for (int x = 0; x < (size[0] + 1) / 2; x++) {
+						source->data[1][y * source->linesize[1] + x * 2] = 16 + (x * 3 + y + pass * 17) % 225;
+						source->data[1][y * source->linesize[1] + x * 2 + 1] = 16 + (x + y * 3 + pass * 11) % 225;
+					}
+				}
+				REQUIRE(sws_scale(scalar, source->data, source->linesize, 0, size[1], reference->data, reference->linesize) == size[1]);
+				REQUIRE(converter.convert(source, converted) >= 0);
+				CHECK(converter.get_threads() > 0);
+				CHECK(converter.get_threads() <= 2);
+				int maximum_difference = 0;
+				for (int y = 0; y < size[1]; y++) {
+					for (int x = 0; x < size[0] * 4; x++) {
+						const int difference = int(reference->data[0][y * reference->linesize[0] + x]) - int(converted->data[0][y * converted->linesize[0] + x]);
+						maximum_difference = MAX(maximum_difference, difference < 0 ? -difference : difference);
+					}
+				}
+				INFO("Bilinear pixel comparison: ", size[0], "x", size[1], ", pass ", pass, ", maximum difference ", maximum_difference);
+				CHECK(maximum_difference <= 1);
+			}
+			CHECK(converter.convert(nullptr, converted) == AVERROR(EINVAL));
+			converted->width++;
+			CHECK(converter.convert(source, converted) == AVERROR(EINVAL));
+			converted->width--;
+			const int saved_width = source->width;
+			const int saved_height = source->height;
+			source->width = converted->width = 40000;
+			source->height = converted->height = 40000;
+			CHECK(converter.convert(source, converted) == AVERROR(EINVAL));
+			source->width = converted->width = saved_width;
+			source->height = converted->height = saved_height;
+			converter.reset();
+			CHECK(converter.get_threads() == 0);
+			REQUIRE(converter.convert(source, converted) >= 0);
+			sws_freeContext(scalar);
+			av_frame_free(&source);
+			av_frame_free(&reference);
+			av_frame_free(&converted);
+		}
+	}
+}
+
+TEST_CASE("[NativeStreaming][PackedFrame] Direct conversion preserves pixels, queued images and retained FFmpeg references") {
+	CHECK_FALSE(FFmpegPackedFrame::supports(31, 16));
+	CHECK_FALSE(FFmpegPackedFrame::supports(32, 0));
+	CHECK_FALSE(FFmpegPackedFrame::supports(32768, 32768));
+	const int sizes[][2] = { { 32, 2 }, { 96, 31 }, { 1920, 1080 } };
 	for (const auto &size : sizes) {
 		AVFrame *source = av_frame_alloc();
 		AVFrame *reference = av_frame_alloc();
-		AVFrame *converted = av_frame_alloc();
+		AVFrame *direct = av_frame_alloc();
 		REQUIRE(source);
 		REQUIRE(reference);
-		REQUIRE(converted);
-		source->width = reference->width = converted->width = size[0];
-		source->height = reference->height = converted->height = size[1];
+		REQUIRE(direct);
 		source->format = AV_PIX_FMT_NV12;
-		reference->format = converted->format = AV_PIX_FMT_RGBA;
-		REQUIRE(av_frame_get_buffer(source, 256) == 0);
+		source->width = reference->width = size[0];
+		source->height = reference->height = size[1];
+		reference->format = AV_PIX_FMT_RGBA;
+		REQUIRE(av_frame_get_buffer(source, 32) == 0);
 		REQUIRE(av_frame_get_buffer(reference, 32) == 0);
-		REQUIRE(av_frame_get_buffer(converted, 32) == 0);
+		for (int y = 0; y < size[1]; y++) {
+			for (int x = 0; x < size[0]; x++) {
+				source->data[0][y * source->linesize[0] + x] = 16 + (x * 17 + y * 13) % 220;
+			}
+		}
+		for (int y = 0; y < (size[1] + 1) / 2; y++) {
+			for (int x = 0; x < size[0]; x++) {
+				source->data[1][y * source->linesize[1] + x] = 16 + (x * 41 + y * 19) % 225;
+			}
+		}
 		SwsContext *scalar = sws_getContext(size[0], size[1], AV_PIX_FMT_NV12, size[0], size[1], AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
 		REQUIRE(scalar);
-		for (int pass = 0; pass < 2; pass++) {
-			for (int y = 0; y < size[1]; y++) {
-				for (int x = 0; x < size[0]; x++) {
-					source->data[0][y * source->linesize[0] + x] = 16 + (x + y + pass * 37) % 220;
-				}
+		REQUIRE(sws_scale(scalar, source->data, source->linesize, 0, size[1], reference->data, reference->linesize) == size[1]);
+		FFmpegFrameScaler converter(4);
+		Ref<Image> previous;
+		Vector<uint8_t> expected_previous;
+		for (int pass = 0; pass < 3; pass++) {
+			if (pass == 2) {
+				source->data[0] += (size[1] - 1) * source->linesize[0];
+				source->linesize[0] = -source->linesize[0];
+				source->data[1] += ((size[1] + 1) / 2 - 1) * source->linesize[1];
+				source->linesize[1] = -source->linesize[1];
 			}
-			for (int y = 0; y < (size[1] + 1) / 2; y++) {
-				for (int x = 0; x < (size[0] + 1) / 2; x++) {
-					source->data[1][y * source->linesize[1] + x * 2] = 16 + (x * 3 + y + pass * 17) % 225;
-					source->data[1][y * source->linesize[1] + x * 2 + 1] = 16 + (x + y * 3 + pass * 11) % 225;
-				}
-			}
+			source->data[0][0] = pass == 0 ? 32 : 216;
 			REQUIRE(sws_scale(scalar, source->data, source->linesize, 0, size[1], reference->data, reference->linesize) == size[1]);
-			REQUIRE(converter.convert(source, converted) == 0);
+			Vector<uint8_t> pixels;
+			REQUIRE(FFmpegPackedFrame::prepare(direct, size[0], size[1], pixels) == OK);
+			const uint8_t *storage = pixels.ptr();
+			REQUIRE(converter.convert(source, direct) >= 0);
 			CHECK(converter.get_threads() > 0);
-			CHECK(converter.get_threads() <= 2);
+			CHECK(converter.get_threads() <= 4);
+			REQUIRE(FFmpegPackedFrame::finish(direct, pixels) == OK);
+			CHECK(pixels.ptr() == storage);
+			CHECK(pixels.size() == int64_t(size[0]) * size[1] * 4);
 			int maximum_difference = 0;
 			for (int y = 0; y < size[1]; y++) {
 				for (int x = 0; x < size[0] * 4; x++) {
-					const int difference = int(reference->data[0][y * reference->linesize[0] + x]) - int(converted->data[0][y * converted->linesize[0] + x]);
-					maximum_difference = MAX(maximum_difference, difference < 0 ? -difference : difference);
+					const int delta = int(pixels[y * size[0] * 4 + x]) - int(reference->data[0][y * reference->linesize[0] + x]);
+					maximum_difference = MAX(maximum_difference, delta < 0 ? -delta : delta);
 				}
 			}
-			INFO("Bilinear pixel comparison: ", size[0], "x", size[1], ", pass ", pass, ", maximum difference ", maximum_difference);
+			INFO("Direct packed comparison ", size[0], "x", size[1], " max ", maximum_difference);
 			CHECK(maximum_difference <= 1);
+			if (previous.is_valid()) {
+				CHECK(previous->get_data() == expected_previous);
+			}
+			previous = Image::create_from_data(size[0], size[1], false, Image::FORMAT_RGBA8, pixels);
+			expected_previous = pixels;
 		}
-		CHECK(converter.convert(nullptr, converted) == AVERROR(EINVAL));
-		converted->width++;
-		CHECK(converter.convert(source, converted) == AVERROR(EINVAL));
-		converted->width--;
-		const int saved_width = source->width;
-		const int saved_height = source->height;
-		source->width = converted->width = 40000;
-		source->height = converted->height = 40000;
-		CHECK(converter.convert(source, converted) == AVERROR(EINVAL));
-		source->width = converted->width = saved_width;
-		source->height = converted->height = saved_height;
-		converter.reset();
-		CHECK(converter.get_threads() == 0);
-		REQUIRE(converter.convert(source, converted) == 0);
-		sws_freeContext(scalar);
-		av_frame_free(&source);
+		// A retained FFmpeg frame must own its storage after the caller trims
+		// or mutates its Vector. The exceptional sharing path may copy.
+		Vector<uint8_t> pixels;
+		REQUIRE(FFmpegPackedFrame::prepare(direct, size[0], size[1], pixels) == OK);
+		REQUIRE(converter.convert(source, direct) >= 0);
+		AVFrame *retained = av_frame_clone(direct);
+		REQUIRE(retained);
+		const uint8_t saved = retained->data[0][0];
+		REQUIRE(FFmpegPackedFrame::finish(direct, pixels) == OK);
+		pixels.write[0] = saved ^ 255;
+		CHECK(retained->data[0][0] == saved);
+		av_frame_free(&retained);
+		av_frame_free(&direct);
 		av_frame_free(&reference);
-		av_frame_free(&converted);
+		av_frame_free(&source);
+		sws_freeContext(scalar);
 	}
+}
+
+TEST_CASE("[NativeStreaming][SeekIndex] Bounded snapshot only chooses a newer preceding indexed point") {
+	AVFormatContext *format = avformat_alloc_context();
+	REQUIRE(format);
+	AVStream *stream = avformat_new_stream(format, nullptr);
+	REQUIRE(stream);
+	stream->time_base = { 1, 30 };
+	REQUIRE(av_add_index_entry(stream, 0, 0, 1, 0, AVINDEX_KEYFRAME) >= 0);
+	REQUIRE(av_add_index_entry(stream, 100, 30, 1, 0, AVINDEX_KEYFRAME) >= 0);
+	REQUIRE(av_add_index_entry(stream, 200, 60, 1, 0, AVINDEX_KEYFRAME) >= 0);
+	FFmpegKeyframeSeekHint hint;
+	REQUIRE(hint.capture(stream));
+	double position = -1;
+	CHECK(hint.prefer_container_seek(1.5, 0.0, 0.4, position));
+	CHECK(position == 1.0);
+	CHECK_FALSE(hint.prefer_container_seek(1.5, 0.0, 1.1, position));
+	CHECK(hint.prefer_container_seek(0.5, 1.0, -0.5, position));
+	CHECK(position == 0.0);
+	hint.clear();
+	CHECK_FALSE(hint.prefer_container_seek(1.5, 0.0, 0.4, position));
+	REQUIRE(hint.capture(stream));
+	// Captured state is independent of later index mutation or destruction.
+	const_cast<AVIndexEntry *>(avformat_index_get_entry(stream, 1))->timestamp = -10;
+	FFmpegKeyframeSeekHint malformed;
+	CHECK_FALSE(malformed.capture(stream));
+	avformat_free_context(format);
+	CHECK(hint.prefer_container_seek(1.5, 0.0, 0.4, position));
+	CHECK(position == 1.0);
+}
+
+TEST_CASE("[NativeStreaming][SeekIndex] Excess keyframes disable the optimization") {
+	AVFormatContext *format = avformat_alloc_context();
+	REQUIRE(format);
+	AVStream *stream = avformat_new_stream(format, nullptr);
+	REQUIRE(stream);
+	stream->time_base = { 1, 30 };
+	for (int i = 0; i < 4097; i++) {
+		REQUIRE(av_add_index_entry(stream, i, i, 1, 0, AVINDEX_KEYFRAME) >= 0);
+	}
+	FFmpegKeyframeSeekHint hint;
+	CHECK_FALSE(hint.capture(stream));
+	double position = -1;
+	CHECK_FALSE(hint.prefer_container_seek(1.5, 0.0, 0.4, position));
+	avformat_free_context(format);
 }
 
 TEST_CASE("[NativeStreaming][FrameQueue] Presentation waits for timestamps, keeps order, bounds memory and clears on generation change") {
@@ -868,6 +1023,281 @@ TEST_CASE("[SceneTree][NativeStreaming][VideoLookahead][Local] Finite streaming 
 }
 
 #ifdef DEV_ENABLED
+TEST_CASE("[SceneTree][NativeStreaming][IndexedSeek][Local] MP4 I/P and reordered B-frame seeks prepare real posters and preserve pause" * doctest::skip()) {
+	const String directory = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR");
+	initialize_audio();
+	bool tested_resampling = false;
+	for (const bool parallel : { false, true }) {
+		for (const char *name : { "ip.mp4", "bframes.mp4", "bframes-44100.mp4" }) {
+			const String path = directory.path_join(name);
+			REQUIRE(FileAccess::exists(path));
+			SafeFlag cancel;
+			String error;
+			Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
+			REQUIRE(playback.is_valid());
+			playback->set(SNAME("_ffmpeg_test_parallel_seek"), parallel);
+			LookaheadSink sink;
+			sink.rate = playback->get_mix_rate();
+			REQUIRE(sink.rate > 0);
+			playback->set_mix_callback(LookaheadSink::mix, &sink);
+			playback->set_audio_playback_position_callback(LookaheadSink::clock, &sink);
+			playback->play();
+			playback->update(0.0);
+			Ref<AudioStreamPlayback> audio = ffmpeg_test_paired_audio(playback);
+			REQUIRE(audio.is_valid());
+			Dictionary timing = audio->get_parameter(SNAME("_ffmpeg_test_frame_timing"));
+			const int source_rate = timing.get("rate", 0);
+			REQUIRE(source_rate > 0);
+			tested_resampling |= source_rate != sink.rate;
+			INFO("AAC source rate ", source_rate, ", output rate ", sink.rate);
+			// Local fixture paths do not automatically enable network read-ahead.
+			// Explicitly attach the real producer to exercise compressed forward PCM.
+			audio->set_parameter(SNAME("_ffmpeg_start_read_ahead"), 0.5);
+			const uint64_t prefill_deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+			while (!bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))) && OS::get_singleton()->get_ticks_usec() < prefill_deadline) {
+				OS::get_singleton()->delay_usec(1000);
+			}
+			REQUIRE(bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))));
+			REQUIRE(ffmpeg_start_video_read_ahead(playback, &error));
+			for (const double target : { 1.523, 2.223 }) {
+				CAPTURE(name);
+				CAPTURE(target);
+				const bool pause = target > 2.0;
+				playback->set_paused(pause);
+				sink.origin = target;
+				sink.samples.clear();
+				sink.consumed = 0;
+				const int64_t before = playback->get(SNAME("_ffmpeg_indexed_seek_count"));
+				const int64_t audio_before = audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"));
+				const int64_t parallel_before = playback->get(SNAME("_ffmpeg_parallel_seek_count"));
+				REQUIRE(ffmpeg_seek_video_on_worker(playback, target));
+				CHECK(int64_t(playback->get(SNAME("_ffmpeg_parallel_seek_count"))) == parallel_before + (parallel ? 1 : 0));
+				CHECK(int64_t(playback->get(SNAME("_ffmpeg_indexed_seek_count"))) == before + 1);
+				CHECK(int64_t(audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == audio_before + 1);
+				CHECK(Math::abs(playback->get_playback_position() - Math::ceil(target * 30.0) / 30.0) < 0.000001);
+				CHECK(playback->is_paused() == pause);
+				Ref<Image> poster = playback->get(SNAME("_ffmpeg_cpu_frame"));
+				REQUIRE(poster.is_valid());
+				CHECK_FALSE(poster->is_empty());
+				CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+				SafeFlag reference_cancel;
+				Ref<AudioStreamPlayback> reference = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, path, Ref<AudioStream>(), Dictionary(), &reference_cancel);
+				REQUIRE(reference.is_valid());
+				reference->start();
+				AudioFrame expected[512];
+				int64_t remaining = int64_t(target * sink.rate);
+				while (remaining > 0) {
+					const int count = int(MIN(remaining, int64_t(512)));
+					REQUIRE(reference->mix(expected, 1.0, count) == count);
+					remaining -= count;
+				}
+				REQUIRE(reference->mix(expected, 1.0, 512) == 512);
+				REQUIRE(sink.samples.size() >= 1024);
+				float maximum_audio_difference = 0.0f;
+				for (int i = 0; i < 512; i++) {
+					maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2] - expected[i].left));
+					maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2 + 1] - expected[i].right));
+				}
+				CHECK(maximum_audio_difference < 0.000001f);
+				REQUIRE(ffmpeg_start_video_read_ahead(playback, &error, true));
+			}
+			cancel.set();
+			CHECK_FALSE(ffmpeg_seek_video_on_worker(playback, 0.5));
+			CHECK(int(playback->get(SNAME("stream_error"))) != OK);
+		}
+	}
+	CHECK(tested_resampling);
+}
+
+struct ParallelSeekObserver {
+	SafeFlag audio_entered, video_prepared, release_audio, both_prepared;
+	SafeFlag *cancel = nullptr;
+	bool cancel_when_prepared = false;
+	Vector<float> samples;
+	std::atomic<int> early_mix{ 0 }, early_clock{ 0 };
+	double origin = 0.0;
+	static void audio_gate(void *p_self) {
+		ParallelSeekObserver *self = static_cast<ParallelSeekObserver *>(p_self);
+		self->audio_entered.set();
+		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 4000000;
+		while (!self->release_audio.is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
+			OS::get_singleton()->delay_usec(1000);
+		}
+	}
+	static void video_gate(void *p_self) {
+		ParallelSeekObserver *self = static_cast<ParallelSeekObserver *>(p_self);
+		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
+		while (!self->audio_entered.is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
+			OS::get_singleton()->delay_usec(1000);
+		}
+		self->video_prepared.set();
+	}
+	static void release(void *p_self) {
+		ParallelSeekObserver *self = static_cast<ParallelSeekObserver *>(p_self);
+		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 3000000;
+		while (!(self->audio_entered.is_set() && self->video_prepared.is_set()) && OS::get_singleton()->get_ticks_usec() < deadline) {
+			OS::get_singleton()->delay_usec(1000);
+		}
+		if (self->audio_entered.is_set() && self->video_prepared.is_set()) {
+			self->both_prepared.set();
+		}
+		if (self->cancel_when_prepared) {
+			self->cancel->set();
+		}
+		self->release_audio.set();
+	}
+	static double clock(void *p_self) {
+		ParallelSeekObserver *self = static_cast<ParallelSeekObserver *>(p_self);
+		if (self->audio_entered.is_set() && !self->release_audio.is_set()) {
+			self->early_clock.fetch_add(1);
+		}
+		return self->origin;
+	}
+	static int mix(void *p_self, const float *p_data, int p_frames) {
+		ParallelSeekObserver *self = static_cast<ParallelSeekObserver *>(p_self);
+		if (self->audio_entered.is_set() && !self->release_audio.is_set()) {
+			self->early_mix.fetch_add(1);
+		}
+		const int before = self->samples.size();
+		self->samples.resize(before + p_frames * 2);
+		memcpy(self->samples.ptrw() + before, p_data, p_frames * 2 * sizeof(float));
+		return p_frames;
+	}
+};
+
+TEST_CASE("[SceneTree][NativeStreaming][ParallelSeek][Local] Real video prepares while audio waits and late cancellation cannot report success" * doctest::skip()) {
+	initialize_audio();
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR").path_join("bframes.mp4");
+	for (const bool cancel_during_join : { false, true }) {
+		SafeFlag cancel;
+		ParallelSeekObserver observer;
+		observer.cancel = &cancel;
+		observer.cancel_when_prepared = cancel_during_join;
+		String error;
+		Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
+		REQUIRE(playback.is_valid());
+		playback->set(SNAME("_ffmpeg_test_parallel_seek"), true);
+		playback->set_mix_callback(ParallelSeekObserver::mix, &observer);
+		playback->set_audio_playback_position_callback(ParallelSeekObserver::clock, &observer);
+		playback->play();
+		const uint64_t initial_deadline = OS::get_singleton()->get_ticks_usec() + 1000000;
+		while (int64_t(playback->get(SNAME("_ffmpeg_presented_frames"))) == 0 && OS::get_singleton()->get_ticks_usec() < initial_deadline) {
+			playback->update(0.0);
+		}
+		REQUIRE(int64_t(playback->get(SNAME("_ffmpeg_presented_frames"))) > 0);
+		observer.samples.clear();
+		observer.origin = 1.523;
+		ffmpeg_test_parallel_seek_gates(playback, ParallelSeekObserver::audio_gate, ParallelSeekObserver::video_gate, &observer);
+		Thread release;
+		REQUIRE(release.start(ParallelSeekObserver::release, &observer) != Thread::UNASSIGNED_ID);
+		playback->set_paused(true);
+		const int64_t before = playback->get(SNAME("_ffmpeg_parallel_seek_count"));
+		const bool result = ffmpeg_seek_video_on_worker(playback, observer.origin);
+		release.wait_to_finish();
+		CHECK(observer.both_prepared.is_set());
+		CHECK(observer.early_mix.load() == 0);
+		CHECK(observer.early_clock.load() == 0);
+		CHECK(playback->is_paused());
+		CHECK(int64_t(playback->get(SNAME("_ffmpeg_parallel_seek_count"))) == before + 1);
+		if (cancel_during_join) {
+			CHECK_FALSE(result);
+			CHECK(int(playback->get(SNAME("stream_error"))) != OK);
+			CHECK(observer.samples.is_empty());
+		} else {
+			CHECK(result);
+			CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+			CHECK(Math::abs(playback->get_playback_position() - 46.0 / 30.0) < 0.000001);
+			CHECK(observer.samples.size() >= 1024);
+		}
+	}
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][ConversionPipeline][Local] Pending conversion preserves paused seek identity and the complete EOF tail" * doctest::skip()) {
+	initialize_audio();
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR").path_join("bframes.mp4");
+	REQUIRE(FileAccess::exists(path));
+	SafeFlag cancel;
+	String error;
+	TestFFmpegFrameConverter::WorkGate gate;
+	Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
+	REQUIRE(playback.is_valid());
+	playback->set(SNAME("_ffmpeg_test_conversion_worker"), false);
+	playback->set(SNAME("_ffmpeg_test_parallel_seek"), true);
+	ffmpeg_test_set_conversion_gate(playback, TestFFmpegFrameConverter::WorkGate::block, &gate);
+	playback->play();
+	REQUIRE(int(playback->get(SNAME("stream_error"))) == OK);
+	const uint64_t initial_deadline = OS::get_singleton()->get_ticks_usec() + 1000000;
+	while (int64_t(playback->get(SNAME("_ffmpeg_presented_frames"))) == 0 && OS::get_singleton()->get_ticks_usec() < initial_deadline) {
+		playback->update(0.0);
+	}
+	Ref<Image> initial = playback->get(SNAME("_ffmpeg_cpu_frame"));
+	CHECK(initial.is_valid());
+	if (initial.is_null()) {
+		playback.unref();
+		return;
+	}
+	playback->set(SNAME("_ffmpeg_test_conversion_worker"), true);
+	playback->set_audio_playback_position(0.1);
+	const uint64_t queued_deadline = OS::get_singleton()->get_ticks_usec() + 1000000;
+	while (int(playback->get(SNAME("_ffmpeg_conversion_outstanding"))) == 0 && OS::get_singleton()->get_ticks_usec() < queued_deadline) {
+		playback->update(0.0);
+	}
+	REQUIRE(int(playback->get(SNAME("_ffmpeg_conversion_outstanding"))) > 0);
+	gate.wait_entered();
+	playback->set_paused(true);
+	const double before_pause = playback->get_playback_position();
+	const int64_t before_serial = playback->get(SNAME("_ffmpeg_presented_frames"));
+	for (int i = 0; i < 10; ++i) {
+		playback->update(0.1);
+	}
+	CHECK(playback->get_playback_position() == before_pause);
+	CHECK(int64_t(playback->get(SNAME("_ffmpeg_presented_frames"))) == before_serial);
+	const int64_t parallel_before = playback->get(SNAME("_ffmpeg_parallel_seek_count"));
+	REQUIRE(ffmpeg_seek_video_on_worker(playback, 1.523));
+	CHECK(int64_t(playback->get(SNAME("_ffmpeg_parallel_seek_count"))) == parallel_before + 1);
+	CHECK(playback->is_paused());
+	CHECK(Math::abs(playback->get_playback_position() - 46.0 / 30.0) < 0.000001);
+	Ref<Image> poster = playback->get(SNAME("_ffmpeg_cpu_frame"));
+	REQUIRE(poster.is_valid());
+	CHECK(poster->get_data() != initial->get_data());
+	gate.release.set();
+	const int64_t seek_serial = playback->get(SNAME("_ffmpeg_presented_frames"));
+	const uint64_t retirement_deadline = OS::get_singleton()->get_ticks_usec() + 1000000;
+	while (int(playback->get(SNAME("_ffmpeg_conversion_outstanding"))) > 0 && OS::get_singleton()->get_ticks_usec() < retirement_deadline) {
+		playback->update(0.1);
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK(int(playback->get(SNAME("_ffmpeg_conversion_outstanding"))) == 0);
+	CHECK(int64_t(playback->get(SNAME("_ffmpeg_presented_frames"))) == seek_serial);
+	CHECK(Math::abs(playback->get_playback_position() - 46.0 / 30.0) < 0.000001);
+	playback->set_paused(false);
+	double previous = playback->get_playback_position();
+	double fallback_clock = 1.523;
+	int publications = 0;
+	int64_t serial = seek_serial;
+	const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 5000000;
+	while (playback->is_playing() && OS::get_singleton()->get_ticks_usec() < deadline) {
+		const double requested = previous + 0.05;
+		playback->set_audio_playback_position(requested);
+		playback->update(MAX(0.0, requested - fallback_clock));
+		fallback_clock = requested;
+		const int64_t current_serial = playback->get(SNAME("_ffmpeg_presented_frames"));
+		if (current_serial != serial) {
+			CHECK(current_serial == serial + 1);
+			CHECK(Math::abs(playback->get_playback_position() - previous - 1.0 / 30.0) < 0.000001);
+			previous = playback->get_playback_position();
+			serial = current_serial;
+			publications++;
+		}
+		OS::get_singleton()->delay_usec(1000);
+	}
+	CHECK_FALSE(playback->is_playing());
+	CHECK(publications == 49);
+	CHECK(Math::abs(playback->get_playback_position() - 95.0 / 30.0) < 0.000001);
+	CHECK(int(playback->get(SNAME("_ffmpeg_conversion_outstanding"))) == 0);
+	CHECK(int(playback->get(SNAME("stream_error"))) == OK);
+}
+
 TEST_CASE("[SceneTree][NativeStreaming][VideoCatchup][Local] Async catch-up preserves moving-clock publication, seek images and EOF tails" * doctest::skip()) {
 	const String directory = OS::get_singleton()->get_environment("GODOT_MEDIA_CATCHUP_DIR");
 	initialize_audio();
@@ -2334,6 +2764,167 @@ TEST_CASE("[SceneTree][NativeStreaming][MediaMetadata] Direct media titles come 
 static Vector<Dictionary> metadata_events;
 static void record_metadata(Dictionary p_metadata) {
 	metadata_events.push_back(p_metadata);
+}
+
+// Draft: insert after PacketReadFixture, packet_test_wave and wait_packet_calls.
+// These tests have not been compiled or run. They use the real PCM seek/mix code.
+struct ForwardPCMFixture : PacketReadFixture {
+	static int read(void *p_self, AVPacket *p_packet, const SafeFlag *p_stop, const SafeFlag *p_external) {
+		const int result = PacketReadFixture::read(p_self, p_packet, p_stop, p_external);
+		if (result != 0) {
+			return result;
+		}
+		for (int i = 0; i < p_packet->size / 4; i++) {
+			const int16_t value = int16_t((p_packet->pts + i) % 8192 - 4096);
+			p_packet->data[i * 4] = uint16_t(value) & 255;
+			p_packet->data[i * 4 + 1] = uint16_t(value) >> 8;
+			p_packet->data[i * 4 + 2] = uint16_t(-value) & 255;
+			p_packet->data[i * 4 + 3] = uint16_t(-value) >> 8;
+		}
+		return 0;
+	}
+};
+
+TEST_CASE("[SceneTree][NativeStreaming][BufferedForward] Exact PCM discard keeps reader and paused state") {
+	initialize_audio();
+	const int rate = AudioServer::get_singleton()->get_mix_rate();
+	SafeFlag cancel;
+	ForwardPCMFixture fixture;
+	fixture.total = 4;
+	fixture.payload = 1024 * 4;
+	fixture.allowed.set(1);
+	Ref<AudioStreamPlayback> playback = ffmpeg_test_audio_packet_reader(packet_test_wave(rate, 4096), ForwardPCMFixture::read, &fixture, &cancel, 0.0, false);
+	REQUIRE(playback.is_valid());
+	playback->start();
+	REQUIRE(wait_packet_calls(fixture, 2));
+	AudioFrame output[128];
+	REQUIRE(playback->mix(output, 1.0, 128) == 128);
+	playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
+	playback->seek(384.25 / rate);
+	CHECK(int64_t(playback->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == 1);
+	CHECK_FALSE(fixture.cancel_observed.is_set());
+	CHECK(playback->is_playing());
+	CHECK(Math::abs(playback->get_playback_position() - 384.0 / rate) < 0.5 / rate);
+	REQUIRE(playback->mix(output, 1.0, 128) == 128);
+	for (int i = 0; i < 128; i++) {
+		CHECK(Math::abs(output[i].left - float(384 + i - 4096) / 32768.0f) < 0.000001f);
+		CHECK(Math::abs(output[i].right + float(384 + i - 4096) / 32768.0f) < 0.000001f);
+	}
+	playback->stop();
+	playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
+	playback->seek(640.25 / rate);
+	CHECK_FALSE(playback->is_playing());
+	CHECK(int64_t(playback->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == 2);
+	CHECK(Math::abs(playback->get_playback_position() - 640.0 / rate) < 0.5 / rate);
+	CHECK_FALSE(fixture.cancel_observed.is_set());
+	CHECK(int(playback->get_parameter(SNAME("stream_error"))) == OK);
+	// A later backward seek must use the old joined-reader/container path.
+	fixture.allowed.set(fixture.total);
+	playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
+	playback->seek(16.25 / rate);
+	CHECK(int64_t(playback->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == 2);
+	CHECK_FALSE(fixture.cancel_observed.is_set());
+	CHECK(int(playback->get_parameter(SNAME("stream_error"))) == OK);
+	CHECK(Math::abs(playback->get_playback_position() - 16.0 / rate) < 0.5 / rate);
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][BufferedForward] Cancellation cannot report prepared audio") {
+	initialize_audio();
+	const int rate = AudioServer::get_singleton()->get_mix_rate();
+	SafeFlag cancel;
+	ForwardPCMFixture fixture;
+	fixture.total = 4;
+	fixture.payload = 1024 * 4;
+	fixture.allowed.set(1);
+	Ref<AudioStreamPlayback> playback = ffmpeg_test_audio_packet_reader(packet_test_wave(rate, 4096), ForwardPCMFixture::read, &fixture, &cancel, 0.0, false);
+	REQUIRE(playback.is_valid());
+	playback->start();
+	REQUIRE(wait_packet_calls(fixture, 2));
+	AudioFrame output[128];
+	REQUIRE(playback->mix(output, 1.0, 128) == 128);
+	cancel.set();
+	playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
+	playback->seek(384.25 / rate);
+	CHECK(int64_t(playback->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == 0);
+	CHECK(int(playback->get_parameter(SNAME("stream_error"))) != OK);
+	CHECK(Math::abs(playback->get_playback_position() - 128.0 / rate) < 0.5 / rate);
+}
+
+struct ForwardGapFixture : ForwardPCMFixture {
+	int rate = 48000;
+	static int read(void *p_self, AVPacket *p_packet, const SafeFlag *p_stop, const SafeFlag *p_external) {
+		const int result = ForwardPCMFixture::read(p_self, p_packet, p_stop, p_external);
+		if (result == 0) {
+			// Prefill timestamps intentionally overstate decoded PCM coverage.
+			// The seek must still discard actual samples, not trust that hint.
+			ForwardGapFixture *self = static_cast<ForwardGapFixture *>(p_self);
+			p_packet->pts = p_packet->dts = p_packet->pts / 1024 * self->rate;
+		}
+		return result;
+	}
+};
+
+struct ReleaseForwardPackets {
+	ForwardGapFixture *fixture = nullptr;
+	SafeFlag *cancel = nullptr;
+	static void run(void *p_self) {
+		ReleaseForwardPackets *self = static_cast<ReleaseForwardPackets *>(p_self);
+		OS::get_singleton()->delay_usec(20000);
+		if (self->cancel) {
+			self->cancel->set();
+		} else {
+			self->fixture->allowed.set(self->fixture->total);
+		}
+	}
+};
+
+TEST_CASE("[SceneTree][NativeStreaming][BufferedForward] Transient starvation, cancellation, EOF and deadline preserve real sample position") {
+	initialize_audio();
+	const int rate = AudioServer::get_singleton()->get_mix_rate();
+	for (int action = 0; action < 4; action++) {
+		CAPTURE(action);
+		SafeFlag cancel;
+		ForwardGapFixture fixture;
+		fixture.rate = rate;
+		fixture.total = action == 2 ? 3 : 8;
+		fixture.payload = 1024 * 4;
+		fixture.allowed.set(3);
+		Ref<AudioStreamPlayback> playback = ffmpeg_test_audio_packet_reader(packet_test_wave(rate, 8192), ForwardGapFixture::read, &fixture, &cancel, 0.0, false);
+		REQUIRE(playback.is_valid());
+		playback->start();
+		REQUIRE(wait_packet_calls(fixture, 4));
+		AudioFrame output[128];
+		REQUIRE(playback->mix(output, 1.0, 128) == 128);
+		ReleaseForwardPackets release{ &fixture, action == 1 ? &cancel : nullptr };
+		Thread releaser;
+		if (action < 2) {
+			REQUIRE(releaser.start(ReleaseForwardPackets::run, &release) != Thread::UNASSIGNED_ID);
+		}
+		playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
+		const uint64_t began = OS::get_singleton()->get_ticks_usec();
+		playback->seek(3584.25 / rate);
+		const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - began;
+		if (releaser.is_started()) {
+			releaser.wait_to_finish();
+		}
+		if (action == 0) {
+			CHECK(int64_t(playback->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == 1);
+			CHECK(int(playback->get_parameter(SNAME("stream_error"))) == OK);
+			CHECK(Math::abs(playback->get_playback_position() - 3584.0 / rate) < 0.5 / rate);
+			REQUIRE(playback->mix(output, 1.0, 128) == 128);
+			for (int i = 0; i < 128; i++) {
+				CHECK(Math::abs(output[i].left - float(3584 + i - 4096) / 32768.0f) < 0.000001f);
+			}
+		} else {
+			CHECK(int64_t(playback->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == 0);
+			CHECK(int(playback->get_parameter(SNAME("stream_error"))) != OK);
+			CHECK(Math::abs(playback->get_playback_position() - 128.0 / rate) < 0.5 / rate);
+		}
+		if (action == 3) {
+			CHECK(elapsed >= 30000000);
+			CHECK(elapsed < 35000000);
+		}
+	}
 }
 
 TEST_CASE("[SceneTree][NativeStreaming][PacketReadAhead] Audio preserves playing and partial PCM across packet starvation") {

@@ -2,7 +2,9 @@
 
 #include "ffmpeg_file_io.h"
 #include "ffmpeg_hardware_lifetime.h"
+#include "ffmpeg_keyframe_seek_hint.h"
 #include "ffmpeg_media_metadata.h"
+#include "ffmpeg_packed_frame.h"
 
 #include "core/error/error_macros.h"
 #include "core/io/file_access.h"
@@ -10,6 +12,7 @@
 #include "core/object/class_db.h"
 #include "core/os/memory.h"
 #include "core/os/os.h"
+#include "core/os/thread.h"
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 #include "ffmpeg_async_playback.h"
 #include "ffmpeg_packet_reader.h"
@@ -27,8 +30,21 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#if (defined(ANDROID_ENABLED) && defined(__arm__)) || defined(FFMPEG_TESTS_ENABLED)
+#include "ffmpeg_frame_converter.h"
+#define FFMPEG_FRAME_CONVERTER_AVAILABLE
+#endif
+
 #if defined(ANDROID_ENABLED) && defined(__arm__)
 #include "ffmpeg_frame_scaler.h"
+#include "ffmpeg_video_timing.h"
+#define FFMPEG_TIMING_SCOPE(m_stage) FFmpegVideoTiming::Scope timing_##m_stage(video_timing, FFmpegVideoTiming::m_stage)
+#else
+#define FFMPEG_TIMING_SCOPE(m_stage)
+#endif
+
+#ifdef FFMPEG_TESTS_ENABLED
+void ffmpeg_test_audio_seek_gate(const Ref<AudioStreamPlayback> &p_playback, void (*p_callback)(void *), void *p_userdata);
 #endif
 
 class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
@@ -38,6 +54,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	AVFormatContext *format = nullptr;
 	AVCodecParameters *video_parameters = nullptr;
 	AVRational video_time_base = { 0, 1 };
+	FFmpegKeyframeSeekHint keyframe_seek_hint;
 	int64_t input_start_time = AV_NOPTS_VALUE;
 	bool live_hls = false;
 #ifdef MODULE_MEDIA_STREAM_ENABLED
@@ -51,10 +68,22 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	AVFrame *late_frame = nullptr;
 	AVFrame *software_frame = nullptr;
 	AVFrame *rgba_frame = nullptr;
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+	FFmpegFrameConverter frame_converter;
+	AVFrame *deferred_conversion_frame = nullptr;
+	double deferred_conversion_position = 0.0;
+	bool conversion_eof = false;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+	bool use_conversion_worker = true;
+#else
+	bool use_conversion_worker = false;
+#endif
+#endif
 	AVBufferRef *hardware_device = nullptr;
 	SwsContext *scale = nullptr;
 #if defined(ANDROID_ENABLED) && defined(__arm__)
-	FFmpegFrameScaler threaded_scale;
+	FFmpegFrameScaler threaded_scale{ MIN(2, MAX(1, OS::get_singleton()->get_processor_count())) };
+	FFmpegVideoTiming video_timing;
 #endif
 	int video_stream = -1;
 	bool playing = false;
@@ -68,6 +97,33 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	double playback_clock = 0.0;
 	double audio_frames_due = 0.0;
 	bool audio_prefill_started = false;
+	bool parallel_audio_preparation = false;
+	uint64_t parallel_seek_count = 0;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+	bool use_parallel_seek = true;
+#else
+	bool use_parallel_seek = false;
+#endif
+	struct AudioSeekTask {
+		Ref<AudioStreamPlayback> playback;
+		double position = 0.0;
+		bool start = false;
+		uint64_t elapsed_usec = 0;
+		static void run(void *p_userdata) {
+			AudioSeekTask *self = static_cast<AudioSeekTask *>(p_userdata);
+			const uint64_t began = OS::get_singleton()->get_ticks_usec();
+			if (self->start) {
+				self->playback->start_playback(self->position);
+			} else {
+				self->playback->seek(self->position);
+			}
+			self->elapsed_usec = OS::get_singleton()->get_ticks_usec() - began;
+		}
+	};
+#ifdef FFMPEG_TESTS_ENABLED
+	void (*test_video_seek_prepared)(void *) = nullptr;
+	void *test_video_seek_userdata = nullptr;
+#endif
 	double audio_position = 0.0;
 	bool audio_clock_available = false;
 	AudioPlaybackPositionCallback audio_clock_callback = nullptr;
@@ -75,6 +131,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	bool seek_preroll = false;
 	double seek_target = 0.0;
 	uint64_t forward_seek_count = 0;
+	uint64_t indexed_seek_count = 0;
 	bool live_start_prepared = false;
 	bool preparing_live_start = false;
 	Vector<float> pending_audio;
@@ -168,7 +225,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	}
 
 	double _get_target_clock() const {
-		if (network_cancel && _audio_is_active() && !seek_preroll) {
+		if (network_cancel && !seek_preroll && !parallel_audio_preparation && _audio_is_active()) {
 			const double current = audio_clock_callback ? audio_clock_callback(audio_clock_userdata) : (audio_clock_available ? audio_position : -1.0);
 			if (Math::is_finite(current) && current >= 0.0) {
 				return current;
@@ -331,6 +388,14 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 			return false;
 		}
 		hardware_decoding = false;
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		frame_converter.clear();
+		if (deferred_conversion_frame) {
+			av_frame_unref(deferred_conversion_frame);
+		}
+		conversion_eof = false;
+#endif
+		keyframe_seek_hint.clear();
 		print_verbose(vformat("FFmpeg: %s; falling back to software at %.3f seconds.", p_reason, position));
 		av_frame_unref(frame);
 		av_frame_unref(queued_frame);
@@ -373,7 +438,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 	}
 
 	void _mix_audio(double p_delta) {
-		if (!audio_playback.is_valid() || !mix_callback) {
+		if (parallel_audio_preparation || !audio_playback.is_valid() || !mix_callback) {
 			return;
 		}
 		audio_frames_due += MAX(p_delta, 0.0) * AudioServer::get_singleton()->get_mix_rate();
@@ -431,6 +496,15 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		}
 	}
 	void close() {
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		frame_converter.stop();
+		av_frame_free(&deferred_conversion_frame);
+		conversion_eof = false;
+#endif
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		video_timing.finish();
+#endif
+		keyframe_seek_hint.clear();
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		packet_reader.stop();
 #endif
@@ -503,6 +577,16 @@ public:
 	Dictionary get_stream_metadata() const override { return stream_metadata.duplicate(); }
 	void use_async_frames() { async_frames = true; }
 	bool _set(const StringName &p_name, const Variant &p_value) {
+#ifdef FFMPEG_TESTS_ENABLED
+		if (p_name == SNAME("_ffmpeg_test_parallel_seek")) {
+			use_parallel_seek = p_value;
+			return true;
+		}
+		if (p_name == SNAME("_ffmpeg_test_conversion_worker")) {
+			use_conversion_worker = p_value;
+			return true;
+		}
+#endif
 		if (p_name == SNAME("_ffmpeg_frame_queue_full")) {
 			frame_queue_full = p_value;
 			return true;
@@ -519,10 +603,24 @@ public:
 			r_result = int64_t(forward_seek_count);
 			return true;
 		}
+		if (p_name == SNAME("_ffmpeg_indexed_seek_count")) {
+			r_result = int64_t(indexed_seek_count);
+			return true;
+		}
+		if (p_name == SNAME("_ffmpeg_parallel_seek_count")) {
+			r_result = int64_t(parallel_seek_count);
+			return true;
+		}
 		if (p_name == SNAME("_ffmpeg_cpu_frame")) {
 			r_result = decoded_image;
 			return true;
 		}
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		if (p_name == SNAME("_ffmpeg_conversion_outstanding")) {
+			r_result = frame_converter.outstanding();
+			return true;
+		}
+#endif
 		if (p_name == SNAME("_ffmpeg_audio_active")) {
 			r_result = _audio_is_active();
 			return true;
@@ -825,6 +923,12 @@ public:
 		}
 #endif
 		length = format->duration > 0 ? double(format->duration) / AV_TIME_BASE : 0.0;
+		if (length > 0.0 && can_seek_on_worker() && String(format->iformat->name).get_slice(",", 0) == "mov") {
+			// MP4's index is discovered before the producer owns the demuxer.
+			// This immutable bounded snapshot is only a route hint; real decoded
+			// poster/audio preparation still establishes seek completion.
+			keyframe_seek_hint.capture(format->streams[video_stream]);
+		}
 		stream_metadata = FFmpegMediaMetadata::container(format, video_stream, p_path, length, live_hls);
 		if (!packet || !frame || !queued_frame || !presentation_frame || !software_frame || !rgba_frame) {
 			return _open_failed(r_error, "The video playback frames became unavailable during opening.");
@@ -878,6 +982,10 @@ public:
 			return;
 		}
 		const bool preparing_poster = seek_preroll || preparing_live_start;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		video_timing.observe(get_instance_id(), position, decoded_position);
+#endif
+		FFMPEG_TIMING_SCOPE(UPDATE);
 #ifdef DEV_ENABLED
 		DebugMeasure update_measure(debug_update_time);
 		if (test_delay_above_height > 0 && codec->height > test_delay_above_height && test_video_delay_usec > 0) {
@@ -897,12 +1005,57 @@ public:
 		if (async_frames && frame_queue_full && !seek_preroll && !preparing_live_start) {
 			return;
 		}
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		const bool parallel_conversion = use_conversion_worker && network_cancel && async_frames && !live_hls && length > 0.0 && !preparing_poster;
+		if (parallel_conversion) {
+			FFmpegFrameConverter::Result converted;
+			if (frame_converter.take(converted)) {
+				if (converted.error != OK || converted.image.is_null()) {
+					stream_error = converted.error == OK ? ERR_INVALID_DATA : converted.error;
+					playing = false;
+					return;
+				}
+				if (!_publish_image(converted.image, converted.position)) {
+					return;
+				}
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+				video_timing.converted(converted.image->get_width(), converted.image->get_height(), 2);
+				video_timing.converted_on_worker(converted.scale_usec, converted.total_usec);
+				video_timing.observe(get_instance_id(), position, decoded_position);
+#endif
+				return;
+			}
+			if (conversion_eof) {
+				if (frame_converter.outstanding() == 0) {
+					playing = false;
+				}
+				return;
+			}
+			if (frame_converter.outstanding() >= 2) {
+				return;
+			}
+		}
+#endif
 		const double lead = async_frames && !seek_preroll && !preparing_live_start ? decode_ahead_seconds : 0.0;
 		double target_clock = _get_target_clock() + lead;
 		av_frame_unref(presentation_frame);
 		const uint64_t decode_start = OS::get_singleton()->get_ticks_usec();
 		bool frame_ready = false;
 		double frame_position = position;
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		if (deferred_conversion_frame && deferred_conversion_frame->format >= 0) {
+			if (frame_converter.outstanding() > 0) {
+				return;
+			}
+			av_frame_unref(frame);
+			av_frame_move_ref(frame, deferred_conversion_frame);
+			frame_position = deferred_conversion_position;
+			frame_ready = true;
+			if (network_cancel) {
+				av_frame_ref(presentation_frame, frame);
+			}
+		} else
+#endif
 		if (queued_frame->format >= 0) {
 			const double queued_position = queued_frame->best_effort_timestamp == AV_NOPTS_VALUE ? position : queued_frame->best_effort_timestamp * av_q2d(video_time_base) - timestamp_origin;
 			if (queued_position > target_clock) {
@@ -927,13 +1080,21 @@ public:
 			}
 			int receive_error;
 			{
+				FFMPEG_TIMING_SCOPE(RECEIVE);
 #ifdef DEV_ENABLED
 				DebugMeasure receive_measure(debug_receive_time);
 #endif
 				receive_error = avcodec_receive_frame(codec, frame);
 			}
 			if (receive_error == AVERROR_EOF) {
-				playing = false;
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+				if (parallel_conversion && frame_converter.outstanding() > 0) {
+					conversion_eof = true;
+				} else
+#endif
+				{
+					playing = false;
+				}
 				if (!network_cancel) {
 					return;
 				}
@@ -994,6 +1155,10 @@ public:
 						}
 						size_t extra_size = 0;
 						const uint8_t *extra = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &extra_size);
+						size_t changed_size = 0;
+						if ((extra && extra_size) || av_packet_get_side_data(packet, AV_PKT_DATA_PARAM_CHANGE, &changed_size)) {
+							keyframe_seek_hint.clear();
+						}
 						if (extra && extra_size) {
 							// Keep fallback initialization consistent with the
 							// new HLS MAP if hardware fails in a later epoch.
@@ -1032,6 +1197,7 @@ public:
 				}
 				int send_error;
 				{
+					FFMPEG_TIMING_SCOPE(SEND);
 #ifdef DEV_ENABLED
 					DebugMeasure send_measure(debug_send_time);
 #endif
@@ -1112,7 +1278,11 @@ public:
 			frame_position = frame->best_effort_timestamp == AV_NOPTS_VALUE ? position : frame->best_effort_timestamp * av_q2d(video_time_base) - timestamp_origin;
 			frame_ready = true;
 		}
-		if (!frame_ready && !playing && stream_error == OK && late_frame->format >= 0) {
+		if (!frame_ready && (!playing
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+								|| conversion_eof
+#endif
+								) && stream_error == OK && late_frame->format >= 0) {
 			// EOF can follow fewer than a full catch-up burst. Preserve the
 			// true final decoded image rather than leaving an older texture.
 			av_frame_unref(frame);
@@ -1162,6 +1332,7 @@ public:
 			av_frame_unref(software_frame);
 			int transfer_error;
 			{
+				FFMPEG_TIMING_SCOPE(TRANSFER);
 #ifdef DEV_ENABLED
 				DebugMeasure transfer_measure(debug_transfer_time);
 #endif
@@ -1177,6 +1348,50 @@ public:
 			}
 			display_frame = software_frame;
 		}
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		if (parallel_conversion && playing) {
+			bool eligible_format = display_frame->format == AV_PIX_FMT_NV12;
+#ifdef FFMPEG_TESTS_ENABLED
+			// Software-decoded local fixtures exercise the real queue/EOF path.
+			eligible_format |= display_frame->format == AV_PIX_FMT_YUV420P;
+#endif
+			if (eligible_format && FFmpegFrameConverter::supports(display_frame)) {
+				const Error queued = frame_converter.submit(display_frame, frame_position);
+				if (queued == OK) {
+					if (late_frame_position <= frame_position) {
+						av_frame_unref(late_frame);
+					}
+					late_frame_skips = 0;
+					return;
+				}
+				if (queued != ERR_BUSY && queued != ERR_CANT_CREATE) {
+					stream_error = queued;
+					playing = false;
+					return;
+				}
+				if (queued == ERR_CANT_CREATE) {
+					// Preserve the original synchronous converter if the OS cannot
+					// create this optional performance worker.
+					use_conversion_worker = false;
+				}
+			}
+			if (frame_converter.outstanding() > 0) {
+				// A changed size/format must follow every older completed image.
+				// Keep the real frame separately from the decoder's future frame.
+				if (!deferred_conversion_frame) {
+					deferred_conversion_frame = av_frame_alloc();
+				}
+				if (!deferred_conversion_frame) {
+					stream_error = ERR_OUT_OF_MEMORY;
+					playing = false;
+					return;
+				}
+				av_frame_move_ref(deferred_conversion_frame, frame);
+				deferred_conversion_position = frame_position;
+				return;
+			}
+		}
+#endif
 #ifdef DEV_ENABLED
 		DebugMeasure convert_measure(debug_convert_time);
 #endif
@@ -1191,7 +1406,22 @@ public:
 		// swscale can write complete SIMD blocks past a tightly packed row.
 		// Use FFmpeg's aligned, padded allocation rather than the Godot image
 		// vector, and keep the full data/linesize arrays required by sws_scale.
-		if (rgba_frame->width != width || rgba_frame->height != height) {
+		Vector<uint8_t> data;
+		bool packed_output = false;
+#if defined(ANDROID_ENABLED)
+		// Only use tightly packed SIMD rows where no per-row padding is
+		// required. Other sizes/formats retain FFmpeg's aligned allocation.
+		packed_output = network_cancel && display_frame->format == AV_PIX_FMT_NV12 &&
+				pixels >= 262144 && FFmpegPackedFrame::supports(width, height);
+#endif
+		if (packed_output) {
+			FFMPEG_TIMING_SCOPE(PACK_PREPARE);
+			if (FFmpegPackedFrame::prepare(rgba_frame, width, height, data) != OK) {
+				stream_error = ERR_OUT_OF_MEMORY;
+				playing = false;
+				return;
+			}
+		} else if (rgba_frame->width != width || rgba_frame->height != height) {
 			av_frame_unref(rgba_frame);
 			rgba_frame->format = AV_PIX_FMT_RGBA;
 			rgba_frame->width = width;
@@ -1210,7 +1440,11 @@ public:
 		bool frame_scaled = false;
 #if defined(ANDROID_ENABLED) && defined(__arm__)
 		if (network_cancel && display_frame->format == AV_PIX_FMT_NV12 && pixels >= 262144) {
-			const int converted = threaded_scale.convert(display_frame, rgba_frame);
+			int converted;
+			{
+				FFMPEG_TIMING_SCOPE(SCALE);
+				converted = threaded_scale.convert(display_frame, rgba_frame);
+			}
 			if (converted < 0) {
 				stream_error = converted == AVERROR(ENOMEM) ? ERR_OUT_OF_MEMORY : ERR_INVALID_DATA;
 				playing = false;
@@ -1227,8 +1461,7 @@ public:
 				return;
 			}
 		}
-		Vector<uint8_t> data;
-		if (data.resize(int(pixels * 4)) != OK) {
+		if (!packed_output && data.resize(int(pixels * 4)) != OK) {
 			stream_error = ERR_OUT_OF_MEMORY;
 			playing = false;
 			return;
@@ -1238,31 +1471,78 @@ public:
 			playing = false;
 			return;
 		}
-		uint8_t *packed = data.ptrw();
-		for (int y = 0; y < height; y++) {
-			memcpy(packed + int64_t(y) * width * 4, rgba_frame->data[0] + int64_t(y) * rgba_frame->linesize[0], width * 4);
+		if (packed_output) {
+			FFMPEG_TIMING_SCOPE(PACK_FINISH);
+			if (FFmpegPackedFrame::finish(rgba_frame, data) != OK) {
+				stream_error = ERR_OUT_OF_MEMORY;
+				playing = false;
+				return;
+			}
+		} else {
+			FFMPEG_TIMING_SCOPE(ROW_PACK);
+			uint8_t *packed = data.ptrw();
+			for (int y = 0; y < height; y++) {
+				memcpy(packed + int64_t(y) * width * 4, rgba_frame->data[0] + int64_t(y) * rgba_frame->linesize[0], width * 4);
+			}
 		}
-		Ref<Image> image = Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, data);
+		if (packed_output && presented_frames == 0) {
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+			const int conversion_threads = threaded_scale.get_threads();
+#else
+			const int conversion_threads = 1;
+#endif
+			print_verbose(vformat("FFmpeg: Android direct packed RGBA %dx%d conversion_threads=%d.", width, height, conversion_threads));
+		}
+		Ref<Image> image;
+		{
+			FFMPEG_TIMING_SCOPE(IMAGE_CREATE);
+			image = Image::create_from_data(width, height, false, Image::FORMAT_RGBA8, data);
+		}
 #ifdef DEV_ENABLED
 		convert_measure.stop();
 		DebugMeasure texture_measure(debug_texture_time);
 #endif
-		if (async_frames) {
-			decoded_image = image;
-		} else if (texture.is_valid() && texture->get_width() == width && texture->get_height() == height) {
-			texture->update(image);
-		} else {
-			texture = ImageTexture::create_from_image(image);
+		if (!_publish_image(image, frame_position)) {
+			return;
 		}
-		position = frame_position;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		video_timing.converted(width, height, frame_scaled ? threaded_scale.get_threads() : 1);
+		video_timing.observe(get_instance_id(), position, decoded_position);
+#endif
+	}
+
+	bool _publish_image(const Ref<Image> &p_image, double p_position) {
+		if (p_image.is_null() || p_image->is_empty()) {
+			stream_error = p_image.is_null() ? ERR_OUT_OF_MEMORY : ERR_INVALID_DATA;
+			stream_error_message = "Could not prepare a valid video image.";
+			playing = false;
+			return false;
+		}
+		FFMPEG_TIMING_SCOPE(TEXTURE);
+		if (async_frames) {
+			decoded_image = p_image;
+		} else if (texture.is_valid() && texture->get_width() == p_image->get_width() && texture->get_height() == p_image->get_height()) {
+			texture->update(p_image);
+		} else {
+			texture = ImageTexture::create_from_image(p_image);
+		}
+		position = p_position;
 		presented_frames++;
-		av_frame_unref(late_frame);
+		if (late_frame_position <= p_position) {
+			av_frame_unref(late_frame);
+		}
 		late_frame_skips = 0;
-#ifdef DEV_ENABLED
-		if (debug_first_presented_position < 0.0) {
-			debug_first_presented_position = frame_position;
+#ifdef FFMPEG_TESTS_ENABLED
+		if (parallel_audio_preparation && test_video_seek_prepared) {
+			test_video_seek_prepared(test_video_seek_userdata);
 		}
 #endif
+#ifdef DEV_ENABLED
+		if (debug_first_presented_position < 0.0) {
+			debug_first_presented_position = p_position;
+		}
+#endif
+		return true;
 	}
 
 	bool can_seek_on_worker() const {
@@ -1274,20 +1554,33 @@ public:
 	}
 	bool seek_on_worker(double p_position) {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		frame_converter.clear();
+		if (deferred_conversion_frame) {
+			av_frame_unref(deferred_conversion_frame);
+		}
+		conversion_eof = false;
+#endif
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		video_timing.seek();
+#endif
 		if (!can_seek_on_worker()) {
 			print_verbose("FFmpeg: video seek requires a fresh input.");
 			return false;
 		}
 		const uint64_t began = OS::get_singleton()->get_ticks_usec();
 		const double forward = p_position - position;
+		const bool small_forward = forward >= 0.1 && forward <= 2.0 && decoded_position < p_position;
+		double indexed_position = 0.0;
+		const bool indexed_seek = small_forward && keyframe_seek_hint.prefer_container_seek(p_position, timestamp_origin, decoded_position, indexed_position);
 		// A small forward correction can consume reference frames already in
 		// the bounded packet queue. Seeking the container backwards to its GOP
 		// keyframe needlessly decodes those earlier frames a second time. The
 		// producer keeps sole demuxer ownership; this path never seeks/flushes it.
 		if (packet_reader.is_started() && !demux_eof && !decoder_draining && !waiting_for_keyframe &&
-				forward >= 0.1 && forward <= 2.0 && decoded_position < p_position && packet_reader.has_prefill(forward + 0.5)) {
+				small_forward && !indexed_seek && packet_reader.has_prefill(forward + 0.5)) {
 			if (audio_playback.is_valid()) {
-				audio_playback->set_parameter(SNAME("_ffmpeg_prepare_reuse_seek"), true);
+				audio_playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
 			}
 			av_frame_unref(queued_frame);
 			av_frame_unref(presentation_frame);
@@ -1304,7 +1597,7 @@ public:
 		packet_reader.stop(false);
 		packet_reader.reset();
 		if (audio_playback.is_valid()) {
-			audio_playback->set_parameter(SNAME("_ffmpeg_prepare_reuse_seek"), true);
+			audio_playback->set_parameter(small_forward ? SNAME("_ffmpeg_prepare_buffered_forward_seek") : SNAME("_ffmpeg_prepare_reuse_seek"), true);
 		}
 		format->pb->error = 0;
 		format->pb->eof_reached = 0;
@@ -1312,6 +1605,10 @@ public:
 		stream_error_message = String();
 		playing = true;
 		seek(p_position);
+		if (indexed_seek && stream_error == OK) {
+			indexed_seek_count++;
+			print_verbose(vformat("FFmpeg: indexed forward video seek used hint %.6f for target %.6f, prepared in %d ms.", indexed_position, p_position, (OS::get_singleton()->get_ticks_usec() - began) / 1000));
+		}
 		print_verbose(vformat("FFmpeg: retained video seek prepared in %d ms (error %d).", (OS::get_singleton()->get_ticks_usec() - began) / 1000, int(stream_error)));
 		return stream_error == OK;
 #else
@@ -1356,6 +1653,13 @@ public:
 	double get_length() const override { return length; }
 	double get_playback_position() const override { return position; }
 	void seek(double p_time) override {
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		frame_converter.clear();
+		if (deferred_conversion_frame) {
+			av_frame_unref(deferred_conversion_frame);
+		}
+		conversion_eof = false;
+#endif
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		if (packet_reader.is_started()) {
 			// Public asynchronous seeks reopen a fresh generation. Never seek
@@ -1382,6 +1686,20 @@ public:
 		}
 	}
 	void _prepare_seek_output(double p_time) {
+		const uint64_t preparation_begin = OS::get_singleton()->get_ticks_usec();
+		Thread audio_thread;
+		AudioSeekTask audio_task;
+		bool audio_thread_started = false;
+		struct JoinAudio {
+			Thread &thread;
+			bool &active;
+			~JoinAudio() {
+				if (thread.is_started()) {
+					thread.wait_to_finish();
+				}
+				active = false;
+			}
+		} join_audio{ audio_thread, parallel_audio_preparation };
 		av_frame_unref(late_frame);
 		late_frame_skips = 0;
 		pending_audio.clear();
@@ -1391,16 +1709,31 @@ public:
 		if (audio_playback.is_valid()) {
 			// A shorter soundtrack may already have reached EOF. A seek in
 			// an active video must reactivate it, without unpausing output.
-			if (playing) {
-				audio_playback->start_playback(p_time);
-			} else {
-				audio_playback->seek(p_time);
+			audio_task.playback = audio_playback;
+			audio_task.position = p_time;
+			audio_task.start = playing;
+#if defined(THREADS_ENABLED) && defined(MODULE_MEDIA_STREAM_ENABLED)
+			if (use_parallel_seek && can_seek_on_worker() && length > 0.0 && !network_cancel->is_set() &&
+					bool(audio_playback->get_parameter(SNAME("_ffmpeg_reusable_seek")))) {
+				// These are independent codec/demuxer instances. The parent must
+				// not read or mix audio until the task has joined below.
+				parallel_audio_preparation = true;
+				audio_thread_started = audio_thread.start(AudioSeekTask::run, &audio_task) != Thread::UNASSIGNED_ID;
+				parallel_seek_count += audio_thread_started;
+				if (!audio_thread_started) {
+					parallel_audio_preparation = false;
+				}
 			}
-			if (network_cancel && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK) {
+#endif
+			if (!audio_thread_started) {
+				AudioSeekTask::run(&audio_task);
+			}
+			if (!audio_thread_started && network_cancel && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK) {
 				stream_error = ERR_UNAVAILABLE;
 				return;
 			}
 		}
+		const uint64_t video_begin = OS::get_singleton()->get_ticks_usec();
 		position = p_time;
 		playback_clock = p_time;
 		if (network_cancel) {
@@ -1423,10 +1756,43 @@ public:
 				stream_error = ERR_UNAVAILABLE;
 			}
 		}
+		const uint64_t video_elapsed = OS::get_singleton()->get_ticks_usec() - video_begin;
+		if (audio_thread_started) {
+			// Join even after video failure/cancellation: the stack task and its
+			// audio reference must outlive all work. Both existing preroll paths
+			// retain their original finite deadlines and cancellation checks.
+			audio_thread.wait_to_finish();
+			parallel_audio_preparation = false;
+			if (stream_error == OK && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK) {
+				stream_error = ERR_UNAVAILABLE;
+			}
+		}
+		if (network_cancel && network_cancel->is_set() && stream_error == OK) {
+			stream_error = ERR_UNAVAILABLE;
+			stream_error_message = "Video seek preparation was cancelled.";
+		}
+		if (audio_thread_started) {
+			if (stream_error == OK) {
+				// Restore the same bounded real-PCM prefill that serial video
+				// preroll normally prepares; no buffering silence is introduced.
+				_mix_audio(0.0);
+			}
+			print_verbose(vformat("FFmpeg: parallel seek preparation audio=%d ms video=%d ms total=%d ms error=%d.",
+					audio_task.elapsed_usec / 1000, video_elapsed / 1000, (OS::get_singleton()->get_ticks_usec() - preparation_begin) / 1000, int(stream_error)));
+		}
 	}
 	Ref<Texture2D> get_texture() const override { return texture; }
 #ifdef FFMPEG_TESTS_ENABLED
 	Ref<AudioStreamPlayback> get_test_audio_playback() const { return audio_playback; }
+	bool prepare_test_image_publication() {
+		late_frame = av_frame_alloc();
+		return late_frame != nullptr;
+	}
+	void set_test_conversion_gate(void (*p_callback)(void *), void *p_userdata) { frame_converter.set_work_gate(p_callback, p_userdata); }
+	void set_test_video_seek_prepared(void (*p_callback)(void *), void *p_userdata) {
+		test_video_seek_prepared = p_callback;
+		test_video_seek_userdata = p_userdata;
+	}
 #endif
 	int get_channels() const override { return audio_playback.is_valid() ? 2 : 0; }
 	int get_mix_rate() const override { return audio_playback.is_valid() ? int(AudioServer::get_singleton()->get_mix_rate()) : 0; }
@@ -1480,6 +1846,53 @@ bool ffmpeg_seek_video_on_worker(const Ref<VideoStreamPlayback> &p_playback, dou
 }
 
 #ifdef FFMPEG_TESTS_ENABLED
+void ffmpeg_test_parallel_seek_gates(const Ref<VideoStreamPlayback> &p_playback, void (*p_audio)(void *), void (*p_video)(void *), void *p_userdata) {
+	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
+	if (playback.is_valid()) {
+		playback->set_test_video_seek_prepared(p_video, p_userdata);
+		ffmpeg_test_audio_seek_gate(playback->get_test_audio_playback(), p_audio, p_userdata);
+	}
+}
+
+Dictionary ffmpeg_test_invalid_image_publication(bool p_async, bool p_empty) {
+	Ref<VideoStreamPlaybackFFmpeg> playback;
+	playback.instantiate();
+	const bool prepared = playback->prepare_test_image_publication();
+	if (p_async) {
+		playback->use_async_frames();
+	}
+	Vector<uint8_t> bytes;
+	bytes.resize(16);
+	bytes.fill(255);
+	Ref<Image> image = Image::create_from_data(2, 2, false, Image::FORMAT_RGBA8, bytes);
+	const bool first = prepared && playback->_publish_image(image, 2.0);
+	playback->play();
+	Ref<Texture2D> previous_texture = playback->get_texture();
+	Ref<Image> invalid;
+	if (p_empty) {
+		invalid.instantiate();
+	}
+	const bool second = playback->_publish_image(invalid, 8.0);
+	Ref<Image> retained = playback->get(SNAME("_ffmpeg_cpu_frame"));
+	Dictionary result;
+	result["first"] = first;
+	result["second"] = second;
+	result["position"] = playback->get_playback_position();
+	result["frames"] = playback->get(SNAME("_ffmpeg_presented_frames"));
+	result["error"] = playback->get(SNAME("stream_error"));
+	result["message"] = playback->get(SNAME("_ffmpeg_error_message"));
+	result["playing"] = playback->is_playing();
+	result["retained"] = p_async ? retained == image : playback->get_texture() == previous_texture;
+	return result;
+}
+
+void ffmpeg_test_set_conversion_gate(const Ref<VideoStreamPlayback> &p_playback, void (*p_callback)(void *), void *p_userdata) {
+	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
+	if (playback.is_valid()) {
+		playback->set_test_conversion_gate(p_callback, p_userdata);
+	}
+}
+
 Ref<AudioStreamPlayback> ffmpeg_test_paired_audio(const Ref<VideoStreamPlayback> &p_playback) {
 	Ref<VideoStreamPlaybackFFmpeg> playback = p_playback;
 	return playback.is_valid() ? playback->get_test_audio_playback() : Ref<AudioStreamPlayback>();

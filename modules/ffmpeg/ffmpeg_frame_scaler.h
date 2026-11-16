@@ -39,16 +39,18 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
-// Owned by the decode worker. Two slice workers bound conversion concurrency
+// Owned by the decode worker. At most four slice workers bound concurrency
 // without changing the existing bilinear chroma interpolation or sample clock.
 class FFmpegFrameScaler {
 	SwsContext *context = nullptr;
 	int width = 0;
 	int height = 0;
 	int format = -1;
+	int threads = 2;
 
 public:
-	FFmpegFrameScaler() = default;
+	explicit FFmpegFrameScaler(int p_threads = 2) :
+			threads(p_threads < 1 ? 1 : (p_threads > 4 ? 4 : p_threads)) {}
 	FFmpegFrameScaler(const FFmpegFrameScaler &) = delete;
 	FFmpegFrameScaler &operator=(const FFmpegFrameScaler &) = delete;
 
@@ -80,7 +82,7 @@ public:
 			candidate->src_format = AVPixelFormat(p_source->format);
 			candidate->dst_format = AV_PIX_FMT_RGBA;
 			candidate->flags = SWS_BILINEAR;
-			candidate->threads = 2;
+			candidate->threads = threads;
 			const int result = sws_init_context(candidate, nullptr, nullptr);
 			if (result < 0) {
 				sws_freeContext(candidate);
@@ -92,7 +94,8 @@ public:
 			format = p_source->format;
 		}
 		// The frame API receives the entire source before running independent
-		// output slices. Unlike sws_scale(), its success result is zero.
+		// output slices. Any nonnegative result is success; some paths return
+		// the output height rather than zero.
 		return sws_scale_frame(context, p_destination, p_source);
 	}
 
