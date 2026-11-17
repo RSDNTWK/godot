@@ -449,7 +449,14 @@ void MediaStreamPlayer::_native_ready(int64_t p_generation) {
 	}
 	const bool first = !ready_state;
 	ready_state = true;
+#ifdef WEB_ENABLED
+	// Browser readiness and buffering are independent; PCM still clears here.
+	if (!web_handle) {
+		_native_buffering(false, p_generation);
+	}
+#else
 	_native_buffering(false, p_generation);
+#endif
 	if (p_generation != generation) {
 		return;
 	}
