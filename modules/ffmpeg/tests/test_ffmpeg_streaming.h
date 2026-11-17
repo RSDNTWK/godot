@@ -1028,7 +1028,8 @@ TEST_CASE("[SceneTree][NativeStreaming][IndexedSeek][Local] MP4 I/P and reordere
 	const String directory = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR");
 	initialize_audio();
 	bool tested_resampling = false;
-	for (const int mode : { 0, 1, 2 }) {
+	for (const int mode : { -1, 0, 1, 2 }) {
+		const bool android_seek_optimizations = mode >= 0;
 		const bool warm = mode == 1;
 		const bool prefetch = mode == 2;
 		for (const bool parallel : { false, true }) {
@@ -1039,6 +1040,7 @@ TEST_CASE("[SceneTree][NativeStreaming][IndexedSeek][Local] MP4 I/P and reordere
 				String error;
 				Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
 				REQUIRE(playback.is_valid());
+				playback->set(SNAME("_ffmpeg_test_android_seek_optimizations"), android_seek_optimizations);
 				playback->set(SNAME("_ffmpeg_test_parallel_seek"), parallel);
 				playback->set(SNAME("_ffmpeg_test_warm_seek"), warm);
 				playback->set(SNAME("_ffmpeg_test_seek_read_ahead"), prefetch);
@@ -1085,9 +1087,9 @@ TEST_CASE("[SceneTree][NativeStreaming][IndexedSeek][Local] MP4 I/P and reordere
 					REQUIRE(ffmpeg_seek_video_on_worker(playback, target));
 					CHECK(int64_t(playback->get(SNAME("_ffmpeg_seek_read_ahead_count"))) == prefetch_before + (prefetch ? 1 : 0));
 					CHECK(int64_t(playback->get(SNAME("_ffmpeg_parallel_seek_count"))) == parallel_before + (parallel ? 1 : 0));
-					CHECK(int64_t(playback->get(SNAME("_ffmpeg_indexed_seek_count"))) == before + (warm ? 0 : 1));
-					CHECK(int64_t(playback->get(SNAME("_ffmpeg_forward_seek_count"))) == forward_before + (warm ? 1 : 0));
-					CHECK(int64_t(audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == audio_before + 1);
+					CHECK(int64_t(playback->get(SNAME("_ffmpeg_indexed_seek_count"))) == before + (android_seek_optimizations && !warm ? 1 : 0));
+					CHECK(int64_t(playback->get(SNAME("_ffmpeg_forward_seek_count"))) == forward_before + (!android_seek_optimizations || warm ? 1 : 0));
+					CHECK(int64_t(audio->get_parameter(SNAME("_ffmpeg_test_buffered_forward_seek_count"))) == audio_before + (android_seek_optimizations ? 1 : 0));
 					CHECK(Math::abs(playback->get_playback_position() - Math::ceil(target * 30.0) / 30.0) < 0.000001);
 					CHECK(playback->is_paused() == pause);
 					Ref<Image> poster = playback->get(SNAME("_ffmpeg_cpu_frame"));
@@ -1106,25 +1108,40 @@ TEST_CASE("[SceneTree][NativeStreaming][IndexedSeek][Local] MP4 I/P and reordere
 					REQUIRE(linear_poster.is_valid());
 					CHECK(poster->get_data() == linear_poster->get_data());
 					CHECK(int(playback->get(SNAME("stream_error"))) == OK);
-					SafeFlag reference_cancel;
-					Ref<AudioStreamPlayback> reference = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, path, Ref<AudioStream>(), Dictionary(), &reference_cancel);
-					REQUIRE(reference.is_valid());
-					reference->start();
-					AudioFrame expected[512];
-					int64_t remaining = int64_t(target * sink.rate);
-					while (remaining > 0) {
-						const int count = int(MIN(remaining, int64_t(512)));
-						REQUIRE(reference->mix(expected, 1.0, count) == count);
-						remaining -= count;
-					}
-					REQUIRE(reference->mix(expected, 1.0, 512) == 512);
 					REQUIRE(sink.samples.size() >= 1024);
-					float maximum_audio_difference = 0.0f;
-					for (int i = 0; i < 512; i++) {
-						maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2] - expected[i].left));
-						maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2 + 1] - expected[i].right));
+					if (android_seek_optimizations) {
+						SafeFlag reference_cancel;
+						Ref<AudioStreamPlayback> reference = ffmpeg_audio_playback_from_buffer(Vector<uint8_t>(), nullptr, path, Ref<AudioStream>(), Dictionary(), &reference_cancel);
+						REQUIRE(reference.is_valid());
+						reference->start();
+						AudioFrame expected[512];
+						int64_t remaining = int64_t(target * sink.rate);
+						while (remaining > 0) {
+							const int count = int(MIN(remaining, int64_t(512)));
+							REQUIRE(reference->mix(expected, 1.0, count) == count);
+							remaining -= count;
+						}
+						REQUIRE(reference->mix(expected, 1.0, 512) == 512);
+						float maximum_audio_difference = 0.0f;
+						for (int i = 0; i < 512; i++) {
+							maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2] - expected[i].left));
+							maximum_audio_difference = MAX(maximum_audio_difference, Math::abs(sink.samples[i * 2 + 1] - expected[i].right));
+						}
+						CHECK(maximum_audio_difference < 0.000001f);
+					} else {
+						// A container seek resets AAC history; bit identity with an
+						// uninterrupted decode is not the desktop contract. Verify real
+						// finite PCM and its consumed-frame clock, alongside the exact
+						// independent poster, target, pause and route checks above.
+						double energy = 0.0;
+						for (const float sample : sink.samples) {
+							CHECK(Math::is_finite(sample));
+							energy += double(sample) * sample;
+						}
+						CHECK(energy > 0.0);
+						const double consumed = double(sink.samples.size() / 2) / sink.rate;
+						CHECK(Math::abs(audio->get_playback_position() - target - consumed) <= 1.0 / sink.rate);
 					}
-					CHECK(maximum_audio_difference < 0.000001f);
 					REQUIRE(ffmpeg_start_video_read_ahead(playback, &error, true));
 				}
 				cancel.set();
@@ -1143,6 +1160,7 @@ TEST_CASE("[SceneTree][NativeStreaming][WarmSeekFallback][Local] Warm preference
 	String error;
 	Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
 	REQUIRE(playback.is_valid());
+	playback->set(SNAME("_ffmpeg_test_android_seek_optimizations"), true);
 	playback->set(SNAME("_ffmpeg_test_warm_seek"), true);
 	playback->play();
 	playback->update(0.0);
@@ -1176,6 +1194,7 @@ TEST_CASE("[SceneTree][NativeStreaming][SeekReadAhead][Local] Early packet produ
 	String error;
 	Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
 	REQUIRE(playback.is_valid());
+	playback->set(SNAME("_ffmpeg_test_android_seek_optimizations"), true);
 	playback->set(SNAME("_ffmpeg_test_seek_read_ahead"), true);
 	playback->play();
 	playback->update(0.0);
@@ -2255,43 +2274,53 @@ public:
 };
 
 TEST_CASE("[SceneTree][NativeStreaming][AudioBeforeUpload] Queued PCM reaches the device during a blocked video texture notification") {
-	for (bool paused : { false, true }) {
-		CAPTURE(paused);
-		REQUIRE(AudioServer::get_singleton() == nullptr);
-		ManualAudioDriver audio;
-		FiniteVideoFixture fixture;
-		fixture.live = false;
-		fixture.cpu_frames = true;
-		fixture.prepared_cpu_frame = true;
-		fixture.hold_video = true;
-		fixture.mix_rate = AudioServer::get_singleton()->get_mix_rate();
-		fixture.image = Image::create_empty(16, 16, false, Image::FORMAT_RGBA8);
-		Ref<FiniteVideoStream> stream;
-		stream.instantiate();
-		stream->fixture = &fixture;
-		VideoPlayerOwner owner;
-		VideoStreamPlayer *player = owner.player;
-		SceneTree::get_singleton()->get_root()->add_child(player);
-		player->set_stream(stream);
-		Ref<Texture2D> texture = player->get_video_texture();
-		REQUIRE(texture.is_valid());
-		Ref<MixDuringVideoTexture> recorder;
-		recorder.instantiate();
-		recorder->driver = audio.driver;
-		texture->connect(SNAME("changed"), callable_mp(recorder.ptr(), &MixDuringVideoTexture::changed));
-		player->play();
-		// Hold main-thread delivery until the worker has real PCM queued. This
-		// isolates forwarding order from decoder/network availability.
-		REQUIRE(wait_quality_flag(fixture.filled));
-		player->set_paused(paused);
-		MessageQueue::get_singleton()->flush();
-		CHECK(recorder->called);
-		CHECK((paused ? recorder->energy == 0 : recorder->energy > 0));
-		CHECK(texture->get_width() == 16);
-		CHECK(texture->get_height() == 16);
-		CHECK(int(player->get_stream_playback()->get(SNAME("stream_error"))) == OK);
-		texture->disconnect(SNAME("changed"), callable_mp(recorder.ptr(), &MixDuringVideoTexture::changed));
-		player->stop();
+	for (bool before_upload : { false, true }) {
+		for (bool paused : { false, true }) {
+			CAPTURE(before_upload);
+			CAPTURE(paused);
+			REQUIRE(AudioServer::get_singleton() == nullptr);
+			ManualAudioDriver audio;
+			FiniteVideoFixture fixture;
+			fixture.live = false;
+			fixture.cpu_frames = true;
+			fixture.prepared_cpu_frame = true;
+			fixture.hold_video = true;
+			fixture.mix_rate = AudioServer::get_singleton()->get_mix_rate();
+			fixture.image = Image::create_empty(16, 16, false, Image::FORMAT_RGBA8);
+			Ref<FiniteVideoStream> stream;
+			stream.instantiate();
+			stream->fixture = &fixture;
+			VideoPlayerOwner owner;
+			VideoStreamPlayer *player = owner.player;
+			SceneTree::get_singleton()->get_root()->add_child(player);
+			player->set_stream(stream);
+			if (before_upload) {
+				player->get_stream_playback()->set(SNAME("_ffmpeg_test_audio_before_texture_upload"), true);
+			}
+			Ref<Texture2D> texture = player->get_video_texture();
+			REQUIRE(texture.is_valid());
+			Ref<MixDuringVideoTexture> recorder;
+			recorder.instantiate();
+			recorder->driver = audio.driver;
+			texture->connect(SNAME("changed"), callable_mp(recorder.ptr(), &MixDuringVideoTexture::changed));
+			player->play();
+			// Hold main-thread delivery until the worker has real PCM queued. This
+			// isolates forwarding order from decoder/network availability.
+			REQUIRE(wait_quality_flag(fixture.filled));
+			player->set_paused(paused);
+			MessageQueue::get_singleton()->flush();
+			CHECK(recorder->called);
+			bool expect_audio_before_upload = before_upload;
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+			expect_audio_before_upload = true;
+#endif
+			CHECK((paused || !expect_audio_before_upload ? recorder->energy == 0 : recorder->energy > 0));
+			CHECK(texture->get_width() == 16);
+			CHECK(texture->get_height() == 16);
+			CHECK(int(player->get_stream_playback()->get(SNAME("stream_error"))) == OK);
+			texture->disconnect(SNAME("changed"), callable_mp(recorder.ptr(), &MixDuringVideoTexture::changed));
+			player->stop();
+		}
 	}
 }
 
@@ -2319,6 +2348,7 @@ TEST_CASE("[SceneTree][NativeStreaming][AudioBeforeUpload] A seek from the audio
 	fixture.image = Image::create_empty(16, 16, false, Image::FORMAT_RGBA8);
 	Ref<VideoStreamPlayback> playback = ffmpeg_test_async_video(FiniteVideoPlayback::create, &fixture);
 	REQUIRE(playback.is_valid());
+	playback->set(SNAME("_ffmpeg_test_audio_before_texture_upload"), true);
 	SeekDuringAudioForward sink;
 	sink.playback = playback;
 	playback->set_mix_callback(SeekDuringAudioForward::mix, &sink);

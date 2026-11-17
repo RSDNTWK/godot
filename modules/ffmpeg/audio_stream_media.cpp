@@ -133,6 +133,7 @@ class AudioStreamPlaybackFFmpeg : public AudioStreamPlayback {
 	double read_ahead_prefill_seconds = 6.0;
 	bool buffered_forward_seek_requested = false;
 #ifdef FFMPEG_TESTS_ENABLED
+	bool test_android_forward_seek = false;
 	uint64_t buffered_forward_seek_count = 0;
 	void (*test_seek_gate)(void *) = nullptr;
 	void *test_seek_gate_userdata = nullptr;
@@ -650,7 +651,7 @@ public:
 			test_seek_gate(test_seek_gate_userdata);
 		}
 #endif
-#ifdef MODULE_MEDIA_STREAM_ENABLED
+#if defined(MODULE_MEDIA_STREAM_ENABLED) && (defined(ANDROID_ENABLED) || defined(FFMPEG_TESTS_ENABLED))
 		const bool buffered_forward = buffered_forward_seek_requested;
 		buffered_forward_seek_requested = false;
 #endif
@@ -666,6 +667,7 @@ public:
 		test_frame_timing.clear();
 #endif
 #ifdef MODULE_MEDIA_STREAM_ENABLED
+#if defined(ANDROID_ENABLED) || defined(FFMPEG_TESTS_ENABLED)
 		if (buffered_forward && remote_cancel && format && stream_index >= 0) {
 			const uint64_t buffered_pcm = uint64_t(MAX(0, pcm_frames - pcm_position));
 			const bool forward = target >= frame_position && target - frame_position <= uint64_t(output_sample_rate) * 2;
@@ -717,6 +719,7 @@ public:
 			packet_reader.reset();
 			read_ahead_used = false;
 		}
+#endif
 		if (remote_cancel && format && stream_index >= 0) {
 			if (read_ahead_used) {
 				// A live format may have an interrupted/queued read in flight.
@@ -771,7 +774,12 @@ public:
 	void set_parameter(const StringName &p_name, const Variant &p_value) override {
 #ifdef MODULE_MEDIA_STREAM_ENABLED
 		if (p_name == SNAME("_ffmpeg_prepare_buffered_forward_seek")) {
+#if defined(ANDROID_ENABLED) || defined(FFMPEG_TESTS_ENABLED)
 			buffered_forward_seek_requested = true;
+#ifdef FFMPEG_TESTS_ENABLED
+			test_android_forward_seek = true;
+#endif
+#endif
 			return;
 		}
 		if (p_name == SNAME("_ffmpeg_prepare_reuse_seek")) {
@@ -790,7 +798,15 @@ public:
 			}
 			// A retained forward seek keeps this producer alive, but still uses
 			// the caller's existing shorter finite-seek prefill policy.
-			read_ahead_prefill_seconds = p_value.get_type() == Variant::FLOAT ? CLAMP(double(p_value), 0.5, 6.0) : 6.0;
+			bool android_forward_seek = false;
+#ifdef ANDROID_ENABLED
+			android_forward_seek = true;
+#elif defined(FFMPEG_TESTS_ENABLED)
+			android_forward_seek = test_android_forward_seek;
+#endif
+			if (android_forward_seek || !packet_reader.is_started()) {
+				read_ahead_prefill_seconds = p_value.get_type() == Variant::FLOAT ? CLAMP(double(p_value), 0.5, 6.0) : 6.0;
+			}
 			if (!packet_reader.is_started()) {
 				if (read_ahead_used || packet_reader.start(format, stream_index, remote_cancel) != OK) {
 					failed = true;

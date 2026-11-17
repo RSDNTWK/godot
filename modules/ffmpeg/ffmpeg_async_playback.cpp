@@ -553,6 +553,7 @@ class FFmpegAsyncVideo : public VideoStreamPlayback {
 	void *test_userdata = nullptr;
 	String test_local_path;
 	bool test_paired_audio = true;
+	bool test_audio_before_texture_upload = false;
 	static Ref<VideoStreamPlayback> open_test_local(void *p_self) {
 		FFmpegAsyncVideo *self = static_cast<FFmpegAsyncVideo *>(p_self);
 		return ffmpeg_open_video_on_worker(self->test_local_path, Dictionary(), &self->interrupt, self->test_paired_audio ? self->test_local_path : String(), Dictionary());
@@ -1350,14 +1351,22 @@ public:
 		return initialize(p_path, Dictionary(), String(), Dictionary(), false, false);
 	}
 #endif
-#ifdef DEV_ENABLED
+#if defined(DEV_ENABLED) || defined(FFMPEG_TESTS_ENABLED)
 	bool _set(const StringName &p_name, const Variant &p_value) {
+#ifdef FFMPEG_TESTS_ENABLED
+		if (p_name == SNAME("_ffmpeg_test_audio_before_texture_upload")) {
+			test_audio_before_texture_upload = p_value;
+			return true;
+		}
+#endif
+#ifdef DEV_ENABLED
 		if (p_name == SNAME("_ffmpeg_debug_state_requested")) {
 			MutexLock lock(mutex);
 			debug_state_requested = bool(p_value);
 			debug_state.clear();
 			return true;
 		}
+#endif
 		return false;
 	}
 #endif
@@ -1475,12 +1484,18 @@ public:
 				}
 			}
 		}
-#if !defined(ANDROID_ENABLED) || !defined(__aarch64__)
-		// Keep device audio supplied before a texture upload or its callbacks
-		// can block the main thread. The same real-PCM and video-horizon
-		// limits apply; no decoding or extra buffering occurs here.
-		_forward_audio(mix_rate, output_latency, limit_video_audio);
+#if defined(ANDROID_ENABLED) && defined(__arm__)
+		const bool audio_before_texture_upload = true;
+#elif defined(FFMPEG_TESTS_ENABLED)
+		const bool audio_before_texture_upload = test_audio_before_texture_upload;
+#else
+		const bool audio_before_texture_upload = false;
 #endif
+		// ARM32 supplies PCM before potentially blocking texture callbacks.
+		// Other platforms retain their previously qualified delivery order.
+		if (audio_before_texture_upload) {
+			_forward_audio(mix_rate, output_latency, limit_video_audio);
+		}
 		if (next_image.is_valid()) {
 			{
 				MutexLock lock(mutex);
@@ -1506,11 +1521,9 @@ public:
 				frontend_texture_usec += OS::get_singleton()->get_ticks_usec() - upload_started;
 			}
 		}
-#if defined(ANDROID_ENABLED) && defined(__aarch64__)
-		// Restore the last qualified ARM64 order: publish the video frame
-		// before forwarding PCM, with all original acceptance checks intact.
-		_forward_audio(mix_rate, output_latency, limit_video_audio);
-#endif
+		if (!audio_before_texture_upload) {
+			_forward_audio(mix_rate, output_latency, limit_video_audio);
+		}
 	}
 
 	void play() override {

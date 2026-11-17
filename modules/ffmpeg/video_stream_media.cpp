@@ -137,6 +137,7 @@ class VideoStreamPlaybackFFmpeg : public VideoStreamPlayback {
 		}
 	};
 #ifdef FFMPEG_TESTS_ENABLED
+	bool test_android_seek_optimizations = false;
 	bool test_prefer_warm_seek = false;
 	bool test_seek_read_ahead = false;
 	bool test_seek_read_ahead_start_failure = false;
@@ -632,6 +633,10 @@ public:
 	void use_async_frames() { async_frames = true; }
 	bool _set(const StringName &p_name, const Variant &p_value) {
 #ifdef FFMPEG_TESTS_ENABLED
+		if (p_name == SNAME("_ffmpeg_test_android_seek_optimizations")) {
+			test_android_seek_optimizations = p_value;
+			return true;
+		}
 		if (p_name == SNAME("_ffmpeg_test_seek_read_ahead")) {
 			test_seek_read_ahead = p_value;
 			return true;
@@ -993,12 +998,14 @@ public:
 		}
 #endif
 		length = format->duration > 0 ? double(format->duration) / AV_TIME_BASE : 0.0;
+#if defined(ANDROID_ENABLED) || defined(FFMPEG_TESTS_ENABLED)
 		if (length > 0.0 && can_seek_on_worker() && String(format->iformat->name).get_slice(",", 0) == "mov") {
 			// MP4's index is discovered before the producer owns the demuxer.
 			// This immutable bounded snapshot is only a route hint; real decoded
 			// poster/audio preparation still establishes seek completion.
 			keyframe_seek_hint.capture(format->streams[video_stream]);
 		}
+#endif
 		stream_metadata = FFmpegMediaMetadata::container(format, video_stream, p_path, length, live_hls);
 		if (!packet || !frame || !queued_frame || !presentation_frame || !software_frame || !rgba_frame) {
 			return _open_failed(r_error, "The video playback frames became unavailable during opening.");
@@ -1605,7 +1612,10 @@ public:
 		}
 		position = p_position;
 		presented_frames++;
-		if (late_frame_position <= p_position) {
+#ifdef FFMPEG_FRAME_CONVERTER_AVAILABLE
+		if (!use_conversion_worker || late_frame_position <= p_position)
+#endif
+		{
 			av_frame_unref(late_frame);
 		}
 		late_frame_skips = 0;
@@ -1647,6 +1657,12 @@ public:
 			return false;
 		}
 		const uint64_t began = OS::get_singleton()->get_ticks_usec();
+		bool android_seek_optimizations = false;
+#ifdef ANDROID_ENABLED
+		android_seek_optimizations = true;
+#elif defined(FFMPEG_TESTS_ENABLED)
+		android_seek_optimizations = test_android_seek_optimizations;
+#endif
 		const double forward = p_position - position;
 		const bool small_forward = forward >= 0.1 && forward <= 2.0 && decoded_position < p_position;
 		const bool buffered_forward = packet_reader.is_started() && !demux_eof && !decoder_draining && !waiting_for_keyframe &&
@@ -1665,7 +1681,7 @@ public:
 		prefer_warm_decoder = prefer_warm_decoder && Math::is_finite(length) && length > 0.0 && codec &&
 				codec->width > 0 && codec->width <= 1920 && codec->height > 0 && codec->height <= 1080;
 		double indexed_position = 0.0;
-		const bool indexed_hint = small_forward && keyframe_seek_hint.prefer_container_seek(p_position, timestamp_origin, decoded_position, indexed_position);
+		const bool indexed_hint = android_seek_optimizations && small_forward && keyframe_seek_hint.prefer_container_seek(p_position, timestamp_origin, decoded_position, indexed_position);
 		const bool indexed_seek = indexed_hint && !(buffered_forward && prefer_warm_decoder);
 		// A small forward correction can consume reference frames already in
 		// the bounded packet queue. Seeking the container backwards to its GOP
@@ -1676,7 +1692,7 @@ public:
 				print_verbose("FFmpeg: buffered forward video seek retained the warm decoder and prefetched packets.");
 			}
 			if (audio_playback.is_valid()) {
-				audio_playback->set_parameter(SNAME("_ffmpeg_prepare_buffered_forward_seek"), true);
+				audio_playback->set_parameter(android_seek_optimizations ? SNAME("_ffmpeg_prepare_buffered_forward_seek") : SNAME("_ffmpeg_prepare_reuse_seek"), true);
 			}
 			av_frame_unref(queued_frame);
 			av_frame_unref(presentation_frame);
@@ -1696,7 +1712,7 @@ public:
 		}
 		packet_reader.reset();
 		if (audio_playback.is_valid()) {
-			audio_playback->set_parameter(small_forward ? SNAME("_ffmpeg_prepare_buffered_forward_seek") : SNAME("_ffmpeg_prepare_reuse_seek"), true);
+			audio_playback->set_parameter(android_seek_optimizations && small_forward ? SNAME("_ffmpeg_prepare_buffered_forward_seek") : SNAME("_ffmpeg_prepare_reuse_seek"), true);
 		}
 		format->pb->error = 0;
 		format->pb->eof_reached = 0;
@@ -1829,6 +1845,12 @@ public:
 	}
 	void _prepare_seek_output(double p_time) {
 		const uint64_t preparation_begin = OS::get_singleton()->get_ticks_usec();
+		bool android_seek_preroll = false;
+#ifdef ANDROID_ENABLED
+		android_seek_preroll = true;
+#elif defined(FFMPEG_TESTS_ENABLED)
+		android_seek_preroll = test_android_seek_optimizations || test_seek_read_ahead || use_parallel_seek;
+#endif
 		Thread audio_thread;
 		AudioSeekTask audio_task;
 		bool audio_thread_started = false;
@@ -1897,7 +1919,7 @@ public:
 			while (seek_preroll && playing && stream_error == OK && !network_cancel->is_set() && OS::get_singleton()->get_ticks_usec() < deadline) {
 				update(0.0);
 #ifdef MODULE_MEDIA_STREAM_ENABLED
-				if (seek_preroll && packet_waiting && packet_reader.is_started()) {
+				if (android_seek_preroll && seek_preroll && packet_waiting && packet_reader.is_started()) {
 					// A nonblocking empty queue must leave CPU time for its producer.
 					OS::get_singleton()->delay_usec(1000);
 				}
