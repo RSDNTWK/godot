@@ -56,12 +56,15 @@ private:
 	bool head_request = false;
 	Ref<TLSOptions> tls_options;
 
+	static constexpr int MAX_RESPONSE_HEADER_BYTES = 64 * 1024;
+	static constexpr int RESPONSE_HEADER_POLL_BYTES = 4 * 1024;
 	Vector<uint8_t> response_str;
 
 	bool chunked = false;
 	Vector<uint8_t> chunk;
 	int chunk_left = 0;
 	bool chunk_trailer_part = false;
+	int chunk_trailer_bytes = 0;
 	int64_t body_size = -1;
 	int64_t body_left = 0;
 	bool read_until_eof = false;

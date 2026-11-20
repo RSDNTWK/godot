@@ -293,13 +293,17 @@ void WebSocketMultiplayerPeer::_poll_server() {
 	ERR_FAIL_COND(connection_status != CONNECTION_CONNECTED); // Bug.
 	ERR_FAIL_COND(tcp_server.is_null() || !tcp_server->is_listening()); // Bug.
 
-	// Accept new connections.
-	if (!is_refusing_new_connections() && tcp_server->is_connection_available()) {
+	const uint64_t now = OS::get_singleton()->get_ticks_msec();
+	// Accept at most one per poll. At capacity the bounded socket backlog
+	// handles arrivals while existing handshakes progress or time out.
+	if (!is_refusing_new_connections() && pending_peers.size() < MAX_PENDING_HANDSHAKES && tcp_server->is_connection_available()) {
 		PendingPeer peer;
-		peer.time = OS::get_singleton()->get_ticks_msec();
+		peer.time = now;
 		peer.tcp = tcp_server->take_connection();
-		peer.connection = peer.tcp;
-		pending_peers[generate_unique_id()] = peer;
+		if (peer.tcp.is_valid()) {
+			peer.connection = peer.tcp;
+			pending_peers[generate_unique_id()] = peer;
+		}
 	}
 
 	// Process pending peers.
@@ -308,7 +312,7 @@ void WebSocketMultiplayerPeer::_poll_server() {
 		PendingPeer &peer = E.value;
 		int id = E.key;
 
-		if (OS::get_singleton()->get_ticks_msec() - peer.time > handshake_timeout) {
+		if (now - peer.time > handshake_timeout) {
 			print_verbose(vformat("WebSocket handshake timed out after %.3f seconds.", handshake_timeout * 0.001));
 			to_remove.insert(id);
 			continue;
@@ -348,17 +352,18 @@ void WebSocketMultiplayerPeer::_poll_server() {
 			peer.ws->accept_stream(peer.tcp);
 			continue;
 		} else {
+			Ref<StreamPeerTLS> tls;
 			if (peer.connection == peer.tcp) {
-				Ref<StreamPeerTLS> tls = Ref<StreamPeerTLS>(StreamPeerTLS::create());
-				Error err = tls->accept_stream(peer.tcp, tls_server_options);
-				if (err != OK) {
+				tls = Ref<StreamPeerTLS>(StreamPeerTLS::create());
+				if (tls.is_null() || tls->accept_stream(peer.tcp, tls_server_options) != OK) {
 					to_remove.insert(id);
 					continue;
 				}
 				peer.connection = tls;
+			} else {
+				tls = static_cast<Ref<StreamPeerTLS>>(peer.connection);
+				tls->poll();
 			}
-			Ref<StreamPeerTLS> tls = static_cast<Ref<StreamPeerTLS>>(peer.connection);
-			tls->poll();
 			if (tls->get_status() == StreamPeerTLS::STATUS_CONNECTED) {
 				peer.ws = _create_peer();
 				peer.ws->accept_stream(peer.connection);

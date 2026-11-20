@@ -32,6 +32,7 @@
 
 #include "../websocket_multiplayer_peer.h"
 
+#include "core/os/os.h"
 #include "tests/test_macros.h"
 
 #ifndef WEB_ENABLED
@@ -58,6 +59,19 @@ public:
 		packet.data[1] = static_cast<uint8_t>(p_value + 1);
 		incoming_packets.push_back(packet);
 	}
+
+	void fill_pending_slots() {
+		PendingPeer closed;
+		closed.time = OS::get_singleton()->get_ticks_msec();
+		closed.ws = Ref<WebSocketPeer>(WebSocketPeer::create());
+		for (int i = 0; i < MAX_PENDING_HANDSHAKES; i++) {
+			pending_peers.insert(i + 2, closed);
+		}
+	}
+
+	int get_listen_port() const { return tcp_server->get_local_port(); }
+	bool has_waiting_connection() const { return tcp_server->is_connection_available(); }
+	int get_pending_count() const { return pending_peers.size(); }
 };
 
 TEST_CASE("[WebSocketMultiplayerPeer] Disconnect retires queued packets without invalidating the borrowed packet or other peers") {
@@ -93,6 +107,29 @@ TEST_CASE("[WebSocketMultiplayerPeer] Disconnect retires queued packets without 
 		}
 		CHECK(peer->get_available_packet_count() == 0);
 	}
+}
+
+TEST_CASE("[WebSocketMultiplayerPeer] Pre-upgrade admission waits for a free pending slot") {
+	Ref<QueuedPeerFixture> server;
+	server.instantiate();
+	REQUIRE(server->create_server(0, IPAddress("127.0.0.1"), Ref<TLSOptions>()) == OK);
+	server->fill_pending_slots();
+
+	Ref<StreamPeerTCP> client;
+	client.instantiate();
+	REQUIRE(client->connect_to_host(IPAddress("127.0.0.1"), server->get_listen_port()) == OK);
+	const uint64_t start = OS::get_singleton()->get_ticks_msec();
+	while (!server->has_waiting_connection() && OS::get_singleton()->get_ticks_msec() - start < 1000) {
+		client->poll();
+		OS::get_singleton()->delay_usec(1000);
+	}
+	REQUIRE(server->has_waiting_connection());
+	server->poll();
+	CHECK(server->get_pending_count() == 0);
+	CHECK(server->has_waiting_connection());
+	server->poll();
+	CHECK(server->get_pending_count() == 1);
+	CHECK_FALSE(server->has_waiting_connection());
 }
 } // namespace TestWebSocketMultiplayerPeer
 #endif // WEB_ENABLED

@@ -43,6 +43,9 @@ private:
 	Ref<WebSocketPeer> _create_peer();
 
 protected:
+	// Separate from application admission, which starts after the upgrade.
+	static constexpr int MAX_PENDING_HANDSHAKES = 64;
+
 	enum {
 		SYS_NONE = 0,
 		SYS_ADD = 1,

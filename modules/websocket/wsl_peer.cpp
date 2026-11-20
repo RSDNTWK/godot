@@ -220,6 +220,8 @@ bool WSLPeer::_parse_client_request() {
 }
 
 Error WSLPeer::_do_server_handshake() {
+	static constexpr int HANDSHAKE_POLL_BYTES = 512;
+
 	if (use_tls) {
 		Ref<StreamPeerTLS> tls = static_cast<Ref<StreamPeerTLS>>(connection);
 		if (tls.is_null()) {
@@ -239,8 +241,7 @@ Error WSLPeer::_do_server_handshake() {
 
 	if (pending_request) {
 		int read = 0;
-		while (true) {
-			ERR_FAIL_COND_V_MSG(handshake_buffer->get_available_bytes() < 1, ERR_OUT_OF_MEMORY, "WebSocket response headers are too big.");
+		for (int remaining = HANDSHAKE_POLL_BYTES; remaining > 0 && handshake_buffer->get_available_bytes() > 0; remaining--) {
 			int pos = handshake_buffer->get_position();
 			uint8_t byte;
 			Error err = connection->get_partial_data(&byte, 1, read);
@@ -281,6 +282,10 @@ Error WSLPeer::_do_server_handshake() {
 	}
 
 	if (pending_request) { // Still pending.
+		if (handshake_buffer->get_available_bytes() == 0) {
+			close(-1);
+			return ERR_INVALID_DATA;
+		}
 		return OK;
 	}
 
@@ -289,7 +294,7 @@ Error WSLPeer::_do_server_handshake() {
 		Vector<uint8_t> data = handshake_buffer->get_data_array();
 		int pos = handshake_buffer->get_position();
 		int sent = 0;
-		Error err = connection->put_partial_data(data.ptr() + pos, left, sent);
+		Error err = connection->put_partial_data(data.ptr() + pos, MIN(left, HANDSHAKE_POLL_BYTES), sent);
 		if (err != OK) {
 			print_verbose(vformat("WebSocket error while putting partial data (StreamPeer error code %d).", err));
 			close(-1);
@@ -709,6 +714,7 @@ void WSLPeer::poll() {
 	if (ready_state == STATE_CONNECTING) {
 		if (is_server) {
 			_do_server_handshake();
+			return;
 		} else {
 			_do_client_handshake();
 		}

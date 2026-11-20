@@ -128,13 +128,7 @@ Error StreamPeerMbedTLS::accept_stream(Ref<StreamPeer> p_base, Ref<TLSOptions> p
 	mbedtls_ssl_set_bio(tls_ctx->get_context(), this, bio_send, bio_recv, nullptr);
 
 	status = STATUS_HANDSHAKING;
-
-	if (_do_handshake() != OK) {
-		return FAILED;
-	}
-
-	status = STATUS_CONNECTED;
-	return OK;
+	return _do_handshake();
 }
 
 Error StreamPeerMbedTLS::put_data(const uint8_t *p_data, int p_bytes) {

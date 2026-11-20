@@ -33,6 +33,7 @@
 TEST_FORCE_LINK(test_http_client)
 
 #include "core/io/http_client.h"
+#include "core/io/stream_peer.h"
 
 #include "modules/modules_enabled.gen.h" // For mbedtls.
 
@@ -100,5 +101,80 @@ TEST_CASE("[HTTPClient] connect_to_host") {
 	CHECK_MESSAGE(err == OK, "Expected OK for successful connection");
 }
 #endif // defined(MODULE_MBEDTLS_ENABLED) || defined(WEB_ENABLED)
+
+#ifndef WEB_ENABLED
+// Writes and reads are independent, like a connected TCP stream.
+class HTTPResponseFixture : public StreamPeerBuffer {
+public:
+	Error put_data(const uint8_t *p_data, int p_bytes) override { return OK; }
+	Error put_partial_data(const uint8_t *p_data, int p_bytes, int &r_sent) override {
+		r_sent = p_bytes;
+		return OK;
+	}
+};
+
+TEST_CASE("[HTTPClient] Native request target forms") {
+	Ref<HTTPClient> client = HTTPClient::create();
+	Ref<HTTPResponseFixture> stream;
+	stream.instantiate();
+	const Vector<String> headers = { "Host: example.com" };
+	for (const String &target : { String("/media/file%20one.mp4?start=2&sig=a+b%2F"), String("https://example.com:8443/media/file?q=a/b?c"), String("http://[::1]/media") }) {
+		client->close();
+		client->set_connection(stream);
+		CHECK(client->request(HTTPClient::METHOD_GET, target, headers, nullptr, 0) == OK);
+	}
+	client->close();
+	client->set_connection(stream);
+	CHECK(client->request(HTTPClient::METHOD_OPTIONS, "*", headers, nullptr, 0) == OK);
+	client->close();
+	client->set_connection(stream);
+	CHECK(client->request(HTTPClient::METHOD_CONNECT, "[::1]:443", headers, nullptr, 0) == OK);
+
+	client->close();
+	client->set_connection(stream);
+	ERR_PRINT_OFF;
+	for (const String &target : { String("/media/a b"), String("/media/a\tb"), String("/media/%2"), String("/media#page"), String("relative"), String("https:///media") }) {
+		CHECK(client->request(HTTPClient::METHOD_GET, target, headers, nullptr, 0) == ERR_INVALID_PARAMETER);
+		CHECK(client->get_status() == HTTPClient::STATUS_CONNECTED);
+	}
+	CHECK(client->request(HTTPClient::METHOD_GET, "*", headers, nullptr, 0) == ERR_INVALID_PARAMETER);
+	CHECK(client->request(HTTPClient::METHOD_CONNECT, "example.com:65536", headers, nullptr, 0) == ERR_INVALID_PARAMETER);
+	ERR_PRINT_ON;
+}
+
+TEST_CASE("[HTTPClient] Native response headers are bounded and incremental") {
+	for (bool blocking : { false, true }) {
+		INFO(blocking);
+		Ref<HTTPClient> client = HTTPClient::create();
+		Ref<HTTPResponseFixture> stream;
+		stream.instantiate();
+		stream->set_data_array(("HTTP/1.1 200 OK\r\nX-Test: " + String("a").repeat(6 * 1024) + "\r\nContent-Length: 3\r\n\r\nabc").to_utf8_buffer());
+		client->set_connection(stream);
+		client->set_blocking_mode(blocking);
+		REQUIRE(client->request(HTTPClient::METHOD_GET, "/", { "Host: example.com" }, nullptr, 0) == OK);
+		REQUIRE(client->poll() == OK);
+		CHECK(client->get_status() == HTTPClient::STATUS_REQUESTING);
+		CHECK(stream->get_position() == 4 * 1024);
+		REQUIRE(client->poll() == OK);
+		CHECK(client->get_response_code() == 200);
+		REQUIRE(client->get_status() == HTTPClient::STATUS_BODY);
+		CHECK(client->read_response_body_chunk() == String("abc").to_utf8_buffer());
+	}
+
+	Ref<HTTPClient> client = HTTPClient::create();
+	Ref<HTTPResponseFixture> stream;
+	stream.instantiate();
+	stream->set_data_array(("HTTP/1.1 200 OK\r\nX-Test: " + String("a").repeat(64 * 1024) + "\r\n\r\n").to_utf8_buffer());
+	client->set_connection(stream);
+	REQUIRE(client->request(HTTPClient::METHOD_GET, "/", { "Host: example.com" }, nullptr, 0) == OK);
+	for (int poll = 0; poll < 15; poll++) {
+		REQUIRE(client->poll() == OK);
+	}
+	CHECK(client->poll() == ERR_INVALID_DATA);
+	CHECK(client->get_status() == HTTPClient::STATUS_CONNECTION_ERROR);
+	CHECK_FALSE(client->has_response());
+	CHECK(stream->get_position() == 64 * 1024);
+}
+#endif // WEB_ENABLED
 
 } // namespace TestHTTPClient

@@ -36,6 +36,7 @@
 #include "core/io/stream_peer_tls.h"
 #include "core/object/class_db.h"
 #include "core/os/os.h"
+#include "core/string/char_utils.h"
 #include "core/version.h"
 
 HTTPClient *HTTPClientTCP::_create_func(bool p_notify_postinitialize) {
@@ -131,23 +132,109 @@ Ref<StreamPeer> HTTPClientTCP::get_connection() const {
 	return connection;
 }
 
-static bool _check_request_url(HTTPClientTCP::Method p_method, const String &p_url) {
-	switch (p_method) {
-		case HTTPClientTCP::METHOD_CONNECT: {
-			// Authority in host:port format, as in RFC7231.
-			int pos = p_url.find_char(':');
-			return 0 < pos && pos < p_url.length() - 1;
+static bool _check_request_uri_chars(const String &p_value, int p_start, bool p_path_query) {
+	for (int i = p_start; i < p_value.length(); i++) {
+		const char32_t c = p_value[i];
+		if (is_ascii_alphanumeric_char(c) || (p_path_query && (c == '/' || c == '?' || c == ':' || c == '@'))) {
+			continue;
 		}
-		case HTTPClientTCP::METHOD_OPTIONS: {
-			if (p_url == "*") {
-				return true;
-			}
-			[[fallthrough]];
+		switch (c) {
+			case '-':
+			case '.':
+			case '_':
+			case '~':
+			case '!':
+			case '$':
+			case '&':
+			case '\'':
+			case '(':
+			case ')':
+			case '*':
+			case '+':
+			case ',':
+			case ';':
+			case '=':
+				break;
+			case '%':
+				if (p_value.length() - i < 3 || !is_hex_digit(p_value[i + 1]) || !is_hex_digit(p_value[i + 2])) {
+					return false;
+				}
+				i += 2;
+				break;
+			default:
+				return false;
 		}
-		default:
-			// Absolute path or absolute URL.
-			return p_url.begins_with("/") || p_url.begins_with("http://") || p_url.begins_with("https://");
 	}
+	return true;
+}
+
+static bool _check_request_authority(const String &p_authority, bool p_require_port) {
+	int port_separator = p_authority.find_char(':');
+	if (p_authority.begins_with("[")) {
+		const int end = p_authority.find_char(']');
+		const String address = end > 1 ? p_authority.substr(1, end - 1) : String();
+		if (!address.contains_char(':') || !address.is_valid_ip_address()) {
+			return false;
+		}
+		port_separator = end + 1;
+		if (port_separator == p_authority.length()) {
+			return !p_require_port;
+		}
+		if (p_authority[port_separator] != ':') {
+			return false;
+		}
+	} else {
+		const String host = port_separator < 0 ? p_authority : p_authority.substr(0, port_separator);
+		if (host.is_empty() || !_check_request_uri_chars(host, 0, false)) {
+			return false;
+		}
+		if (port_separator < 0) {
+			return !p_require_port;
+		}
+	}
+
+	int port = 0;
+	for (int i = port_separator + 1; i < p_authority.length(); i++) {
+		const char32_t c = p_authority[i];
+		if (!is_digit(c)) {
+			return false;
+		}
+		port = port * 10 + (c - '0');
+		if (port > UINT16_MAX) {
+			return false;
+		}
+	}
+	return port > 0;
+}
+
+static bool _check_request_url(HTTPClientTCP::Method p_method, const String &p_url) {
+	if (p_method == HTTPClientTCP::METHOD_CONNECT) {
+		return _check_request_authority(p_url, true);
+	}
+	if (p_url == "*") {
+		return p_method == HTTPClientTCP::METHOD_OPTIONS;
+	}
+	if (p_url.begins_with("/")) {
+		return _check_request_uri_chars(p_url, 0, true);
+	}
+
+	// Absolute-form requests are used by HTTP proxies.
+	const int start = p_url.findn("http://") == 0 ? 7 : (p_url.findn("https://") == 0 ? 8 : 0);
+	if (start == 0) {
+		return false;
+	}
+	int end = start;
+	while (end < p_url.length() && p_url[end] != '/' && p_url[end] != '?') {
+		end++;
+	}
+	return _check_request_authority(p_url.substr(start, end - start), false) && _check_request_uri_chars(p_url, end, true);
+}
+
+static String _format_request_host(const String &p_host) {
+	if (p_host.contains_char(':') && !p_host.begins_with("[")) {
+		return "[" + p_host + "]";
+	}
+	return p_host;
 }
 
 Error HTTPClientTCP::request(Method p_method, const String &p_url, const Vector<String> &p_headers, const uint8_t *p_body, int p_body_size) {
@@ -162,8 +249,11 @@ Error HTTPClientTCP::request(Method p_method, const String &p_url, const Vector<
 	}
 
 	String uri = p_url;
-	if (tls_options.is_null() && http_proxy_port != -1) {
-		uri = vformat("http://%s:%d%s", conn_host, conn_port, p_url);
+	const String host = _format_request_host(conn_host);
+	ERR_FAIL_COND_V(!host.is_empty() && !_check_request_authority(host, false), ERR_INVALID_PARAMETER);
+	if (tls_options.is_null() && http_proxy_port != -1 && p_url.begins_with("/")) {
+		uri = vformat("http://%s:%d%s", host, conn_port, p_url);
+		ERR_FAIL_COND_V(!_check_request_url(p_method, uri), ERR_INVALID_PARAMETER);
 	}
 
 	String request = String(_methods[p_method]) + " " + uri + " HTTP/1.1\r\n";
@@ -189,9 +279,9 @@ Error HTTPClientTCP::request(Method p_method, const String &p_url, const Vector<
 	if (add_host) {
 		if ((tls_options.is_valid() && conn_port == PORT_HTTPS) || (tls_options.is_null() && conn_port == PORT_HTTP)) {
 			// Don't append the standard ports.
-			request += "Host: " + conn_host + "\r\n";
+			request += "Host: " + host + "\r\n";
 		} else {
-			request += "Host: " + conn_host + ":" + itos(conn_port) + "\r\n";
+			request += "Host: " + host + ":" + itos(conn_port) + "\r\n";
 		}
 	}
 	if (add_clen) {
@@ -268,6 +358,8 @@ void HTTPClientTCP::close() {
 	body_left = 0;
 	chunk_left = 0;
 	chunk_trailer_part = false;
+	chunk_trailer_bytes = 0;
+	chunk.clear();
 	read_until_eof = false;
 	response_num = 0;
 	handshaking = false;
@@ -327,7 +419,7 @@ Error HTTPClientTCP::poll() {
 						if (err == ERR_UNCONFIGURED) {
 							proxy_client->set_connection(tcp_connection);
 							const Vector<String> headers;
-							err = proxy_client->request(METHOD_CONNECT, vformat("%s:%d", conn_host, conn_port), headers, nullptr, 0);
+								err = proxy_client->request(METHOD_CONNECT, vformat("%s:%d", _format_request_host(conn_host), conn_port), headers, nullptr, 0);
 							if (err != OK) {
 								status = STATUS_CANT_CONNECT;
 								return err;
@@ -465,10 +557,10 @@ Error HTTPClientTCP::poll() {
 				}
 				request_buffer->clear();
 			}
-			while (true) {
+			for (int remaining = RESPONSE_HEADER_POLL_BYTES; remaining > 0; remaining--) {
 				uint8_t byte;
 				int rec = 0;
-				Error err = _get_http_data(&byte, 1, rec);
+				Error err = connection->get_partial_data(&byte, 1, rec);
 				if (err != OK) {
 					close();
 					status = STATUS_CONNECTION_ERROR;
@@ -493,6 +585,8 @@ Error HTTPClientTCP::poll() {
 					body_left = 0;
 					chunk_left = 0;
 					chunk_trailer_part = false;
+					chunk_trailer_bytes = 0;
+					chunk.clear();
 					read_until_eof = false;
 					response_str.clear();
 					response_headers.clear();
@@ -546,6 +640,11 @@ Error HTTPClientTCP::poll() {
 					}
 					return OK;
 				}
+				if (rs >= MAX_RESPONSE_HEADER_BYTES) {
+					close();
+					status = STATUS_CONNECTION_ERROR;
+					return ERR_INVALID_DATA;
+				}
 			}
 		} break;
 		case STATUS_DISCONNECTED: {
@@ -577,14 +676,14 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 	Error err = OK;
 
 	if (chunked) {
-		while (true) {
+		for (int remaining = RESPONSE_HEADER_POLL_BYTES; remaining > 0; remaining--) {
 			if (chunk_trailer_part) {
 				// We need to consume the trailer part too or keep-alive will break.
 				uint8_t b;
 				int rec = 0;
-				err = _get_http_data(&b, 1, rec);
+				err = connection->get_partial_data(&b, 1, rec);
 
-				if (rec == 0) {
+				if (err != OK || rec == 0) {
 					break;
 				}
 
@@ -602,13 +701,17 @@ PackedByteArray HTTPClientTCP::read_response_body_chunk() {
 						chunk.clear();
 					}
 				}
+				if (++chunk_trailer_bytes >= MAX_RESPONSE_HEADER_BYTES) {
+					err = ERR_INVALID_DATA;
+					break;
+				}
 			} else if (chunk_left == 0) {
 				// Reading length.
 				uint8_t b;
 				int rec = 0;
-				err = _get_http_data(&b, 1, rec);
+				err = connection->get_partial_data(&b, 1, rec);
 
-				if (rec == 0) {
+				if (err != OK || rec == 0) {
 					break;
 				}
 
