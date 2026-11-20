@@ -93,17 +93,17 @@ const Engine = (function () {
 					return new Promise(function (resolve, reject) {
 						promise.then(function (response) {
 							const cloned = new Response(response.clone().body, { 'headers': [['content-type', 'application/wasm']] });
-							Godot(me.config.getModuleConfig(loadPath, cloned)).then(function (module) {
+							Promise.resolve(Godot(me.config.getModuleConfig(loadPath, cloned, reject))).then(function (module) {
 								const paths = me.config.persistentPaths;
-								module['initFS'](paths).then(function (err) {
+								return module['initFS'](paths).then(function (err) {
 									me.rtenv = module;
 									if (me.config.unloadAfterInit) {
 										Engine.unload();
 									}
 									resolve();
 								});
-							});
-						});
+							}).catch(reject);
+						}).catch(reject);
 					});
 				}
 				preloader.setProgressFunc(this.config.onProgress);
@@ -222,6 +222,13 @@ const Engine = (function () {
 				this.rtenv['copyToFS'](path, buffer);
 			},
 
+			writePersistentProfile: function (paths, stage) {
+				if (!this.rtenv || !this.rtenv['writePersistentProfile']) {
+					throw new Error('Persistent file synchronization is unavailable.');
+				}
+				return this.rtenv['writePersistentProfile'](paths, stage);
+			},
+
 			/**
 			 * Request that the current instance quit.
 			 *
@@ -258,6 +265,7 @@ const Engine = (function () {
 		Engine.prototype['start'] = Engine.prototype.start;
 		Engine.prototype['startGame'] = Engine.prototype.startGame;
 		Engine.prototype['copyToFS'] = Engine.prototype.copyToFS;
+		Engine.prototype['writePersistentProfile'] = Engine.prototype.writePersistentProfile;
 		Engine.prototype['requestQuit'] = Engine.prototype.requestQuit;
 		Engine.prototype['installServiceWorker'] = Engine.prototype.installServiceWorker;
 		// Also expose static methods as instance methods

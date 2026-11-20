@@ -280,8 +280,9 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 	 * @ignore
 	 * @param {string} loadPath
 	 * @param {Response} response
+	 * @param {function(*): void} onWasmError Called when the WebAssembly stream or instantiation fails.
 	 */
-	Config.prototype.getModuleConfig = function (loadPath, response) {
+	Config.prototype.getModuleConfig = function (loadPath, response, onWasmError) {
 		let r = response;
 		const gdext = this.gdextensionLibs;
 		return {
@@ -295,13 +296,12 @@ const InternalConfig = function (initConfig) { // eslint-disable-line no-unused-
 				function done(result) {
 					onSuccess(result['instance'], result['module']);
 				}
-				if (typeof (WebAssembly.instantiateStreaming) !== 'undefined') {
-					WebAssembly.instantiateStreaming(Promise.resolve(r), imports).then(done);
-				} else {
-					r.arrayBuffer().then(function (buffer) {
-						WebAssembly.instantiate(buffer, imports).then(done);
+				const instance = typeof (WebAssembly.instantiateStreaming) !== 'undefined'
+					? WebAssembly.instantiateStreaming(Promise.resolve(r), imports)
+					: r.arrayBuffer().then(function (buffer) {
+						return WebAssembly.instantiate(buffer, imports);
 					});
-				}
+				instance.then(done).catch(onWasmError);
 				r = null;
 				return {};
 			},

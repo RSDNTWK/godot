@@ -114,12 +114,17 @@ const GodotFS = {
 	$GodotFS__postset: [
 		'Module["initFS"] = GodotFS.init;',
 		'Module["copyToFS"] = GodotFS.copy_to_fs;',
+		'Module["writePersistentProfile"] = GodotFS.write_profile;',
 	].join(''),
 	$GodotFS: {
 		// ERRNO_CODES works every odd version of emscripten, but this will break too eventually.
 		ENOENT: 44,
 		_idbfs: false,
-		_syncing: false,
+		_syncing: null,
+		_pending_sync: null,
+		_profile_barrier: null,
+		_profile_recovery_error: null,
+		_last_file_timestamp: 0,
 		_mount_points: [],
 
 		is_persistent: function () {
@@ -132,6 +137,8 @@ const GodotFS = {
 		// since emscripten is not doing it by itself. (emscripten GH#12516).
 		init: function (persistentPaths) {
 			GodotFS._idbfs = false;
+			// Emscripten serializes library fields at compile time, so create the Promise at runtime.
+			GodotFS._syncing = Promise.resolve();
 			if (!Array.isArray(persistentPaths)) {
 				return Promise.reject(new Error('Persistent paths must be an array'));
 			}
@@ -185,24 +192,163 @@ const GodotFS = {
 			});
 			GodotFS._mount_points = [];
 			GodotFS._idbfs = false;
-			GodotFS._syncing = false;
+			GodotFS._syncing = Promise.resolve();
+			GodotFS._pending_sync = null;
+			GodotFS._profile_barrier = null;
+			GodotFS._profile_recovery_error = null;
+			GodotFS._last_file_timestamp = 0;
+		},
+
+		write_profile: function (paths, stage) {
+			if (!GodotFS._idbfs || GodotFS._profile_recovery_error) {
+				return Promise.reject(GodotFS._profile_recovery_error || new Error('IndexedDB storage is unavailable.'));
+			}
+			if (GodotFS._profile_barrier) {
+				return GodotFS._profile_barrier.then(() => GodotFS.write_profile(paths, stage));
+			}
+
+			// Hold automatic sync until the staged profile is committed or restored.
+			const write = GodotFS._syncing.then(async function () {
+				let previous = 0;
+				const snapshot = new Map();
+				for (const path of paths) {
+					if (!FS.analyzePath(path).exists) {
+						snapshot.set(path, null);
+						continue;
+					}
+					const stat = FS.stat(path);
+					if (!FS.isFile(stat.mode)) {
+						throw new Error('A profile file path is unavailable.');
+					}
+					previous = Math.max(previous, stat.mtime.getTime());
+					snapshot.set(path, { data: FS.readFile(path), stat });
+				}
+
+				try {
+					let staged = false;
+					stage({ 'complete': (success) => { staged = success === true; } });
+					if (!staged) {
+						throw new Error('Could not stage the profile save.');
+					}
+
+					// IDBFS compares mtimes, including in browsers with a coarse clock.
+					const timestamp = Math.max(Date.now(), previous + 1, GodotFS._last_file_timestamp + 1);
+					GodotFS._last_file_timestamp = timestamp;
+					for (const path of paths) {
+						if (FS.analyzePath(path).exists) {
+							FS.utime(path, timestamp, timestamp);
+						}
+					}
+					await GodotFS.commit_profile(paths);
+				} catch (error) {
+					try {
+						for (const [path, original] of snapshot) {
+							if (original) {
+								FS.writeFile(path, original.data);
+								FS.chmod(path, original.stat.mode);
+								FS.utime(path, original.stat.atime.getTime(), original.stat.mtime.getTime());
+							} else if (FS.analyzePath(path).exists) {
+								FS.unlink(path);
+							}
+						}
+					} catch (recoveryError) {
+						// A later automatic sync must not publish a profile we failed to restore.
+						GodotFS._profile_recovery_error = recoveryError;
+					}
+					throw error;
+				}
+			});
+			GodotFS._profile_barrier = write.then(() => {}, () => {}).then(() => {
+				GodotFS._profile_barrier = null;
+			});
+			return write;
+		},
+
+		commit_profile: function (paths) {
+			const mount = GodotFS._mount_points.find((root) => paths.every((path) => path.startsWith(root + '/')));
+			if (!mount) {
+				return Promise.reject(new Error('Profile files do not share a persistent mount.'));
+			}
+
+			// IDBFS also expects directory entries when it repopulates a fresh virtual filesystem.
+			const entries = new Map();
+			for (const path of paths) {
+				let parent = path.slice(0, path.lastIndexOf('/'));
+				while (parent !== mount && !entries.has(parent)) {
+					const stat = FS.stat(parent);
+					entries.set(parent, { 'timestamp': stat.mtime, 'mode': stat.mode });
+					parent = parent.slice(0, parent.lastIndexOf('/'));
+				}
+				if (FS.analyzePath(path).exists) {
+					const stat = FS.stat(path);
+					entries.set(path, { 'timestamp': stat.mtime, 'mode': stat.mode, 'contents': FS.readFile(path) });
+				} else {
+					entries.set(path, null);
+				}
+			}
+
+			return new Promise((resolve, reject) => {
+				IDBFS.getDB(mount, (error, db) => {
+					if (error) {
+						reject(error);
+						return;
+					}
+					let transaction;
+					try {
+						transaction = db.transaction([IDBFS.DB_STORE_NAME], 'readwrite');
+					} catch (err) {
+						reject(err);
+						return;
+					}
+					let writeError;
+					transaction.oncomplete = () => resolve();
+					transaction.onabort = () => reject(writeError || transaction.error || new Error('Profile save was aborted.'));
+					try {
+						const store = transaction.objectStore(IDBFS.DB_STORE_NAME);
+						for (const [path, entry] of entries) {
+							if (entry) {
+								store.put(entry, path);
+							} else {
+								store.delete(path);
+							}
+						}
+					} catch (err) {
+						writeError = err;
+						transaction.abort();
+					}
+				});
+			});
 		},
 
 		sync: function () {
-			if (GodotFS._syncing) {
-				GodotRuntime.error('Already syncing!');
-				return Promise.resolve();
+			if (GodotFS._profile_recovery_error) {
+				return Promise.resolve(GodotFS._profile_recovery_error);
 			}
-			GodotFS._syncing = true;
-			return new Promise(function (resolve, reject) {
-				FS.syncfs(false, function (error) {
-					if (error) {
-						GodotRuntime.error(`Failed to save IDB file system: ${error.message}`);
-					}
-					GodotFS._syncing = false;
-					resolve(error);
+			if (!GodotFS._idbfs) {
+				return Promise.resolve(new Error('IndexedDB storage is unavailable.'));
+			}
+			if (GodotFS._profile_barrier) {
+				return GodotFS._profile_barrier.then(() => GodotFS.sync());
+			}
+			if (GodotFS._pending_sync) {
+				return GodotFS._pending_sync;
+			}
+			// Writes requested during a flush belong to the next flush.
+			GodotFS._pending_sync = GodotFS._syncing.then(function () {
+				GodotFS._pending_sync = null;
+				return new Promise(function (resolve) {
+					FS.syncfs(false, resolve);
 				});
+			}).catch(function (error) {
+				return error;
+			}).then(function (error) {
+				if (error) {
+					GodotRuntime.error(`Failed to save IDB file system: ${error.message}`);
+				}
+				return error;
 			});
+			GodotFS._syncing = GodotFS._pending_sync;
+			return GodotFS._pending_sync;
 		},
 
 		// Copies a buffer to the internal file system. Creating directories recursively.

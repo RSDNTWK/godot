@@ -1,27 +1,46 @@
 const Preloader = /** @constructor */ function () { // eslint-disable-line no-unused-vars
-	function getTrackedResponse(response, load_status) {
-		function onloadprogress(reader, controller) {
-			return reader.read().then(function (result) {
-				if (load_status.done) {
-					return Promise.resolve();
-				}
-				if (result.value) {
-					controller.enqueue(result.value);
-					load_status.loaded += result.value.length;
-				}
-				if (!result.done) {
-					return onloadprogress(reader, controller);
-				}
-				load_status.done = true;
-				return Promise.resolve();
-			});
+	const HEADER_TIMEOUT_MS = 30000;
+	const STALL_TIMEOUT_MS = 30000;
+
+	function withDeadline(operation, timeout, connection, message) {
+		let timer;
+		const expired = new Promise((resolve, reject) => {
+			timer = setTimeout(() => {
+				reject(new Error(message));
+				connection.abort();
+			}, timeout);
+		});
+		return Promise.race([operation, expired]).finally(() => clearTimeout(timer));
+	}
+
+	function getTrackedResponse(response, load_status, raw, connection, file) {
+		if (!response.body) {
+			throw new Error('Response body missing for ' + response.url);
 		}
 		const reader = response.body.getReader();
 		return new Response(new ReadableStream({
-			start: function (controller) {
-				onloadprogress(reader, controller).then(function () {
-					controller.close();
+			pull: function (controller) {
+				return withDeadline(reader.read(), STALL_TIMEOUT_MS, connection, `Download stalled for '${file}'.`).then(function (result) {
+					if (load_status.done) {
+						return;
+					}
+					if (result.done) {
+						load_status.done = true;
+						controller.close();
+					} else {
+						controller.enqueue(result.value);
+						load_status.loaded += result.value.length;
+					}
+				}, function (error) {
+					if (raw) {
+						load_status.done = true;
+					}
+					throw error;
 				});
+			},
+			cancel: function (reason) {
+				load_status.done = true;
+				return reader.cancel(reason);
 			},
 		}), { headers: response.headers });
 	}
@@ -32,11 +51,14 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 			loaded: 0,
 			done: false,
 		};
-		return fetch(file).then(function (response) {
+		const connection = new AbortController();
+		const request = fetch(file, { signal: connection.signal });
+		return withDeadline(request, HEADER_TIMEOUT_MS, connection, `Timed out waiting for '${file}'.`).then(function (response) {
 			if (!response.ok) {
+				connection.abort();
 				return Promise.reject(new Error(`Failed loading file '${file}'`));
 			}
-			const tr = getTrackedResponse(response, tracker[file]);
+			const tr = getTrackedResponse(response, tracker[file], raw, connection, file);
 			if (raw) {
 				return Promise.resolve(tr);
 			}
@@ -101,7 +123,10 @@ const Preloader = /** @constructor */ function () { // eslint-disable-line no-un
 	};
 
 	this.loadPromise = function (file, fileSize, raw = false) {
-		return retry(loadFetch.bind(null, file, loadingFiles, fileSize, raw), DOWNLOAD_ATTEMPTS_MAX);
+		return retry(loadFetch.bind(null, file, loadingFiles, fileSize, raw), DOWNLOAD_ATTEMPTS_MAX).catch(function (error) {
+			loadingFiles[file].done = true;
+			throw error;
+		});
 	};
 
 	this.preloadedFiles = [];

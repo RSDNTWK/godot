@@ -892,12 +892,17 @@ class Bus {
 	 */
 	static move(fromIndex, toIndex) {
 		const movedBus = GodotAudio.Bus.getBusOrNull(fromIndex);
-		if (movedBus == null) {
+		if (movedBus == null || fromIndex === toIndex) {
 			return;
 		}
 		const buses = GodotAudio.buses.filter((_, i) => i !== fromIndex);
-		// Inserts at index.
-		buses.splice(toIndex - 1, 0, movedBus);
+		// Match AudioServer: -1 appends, and other positions refer to the
+		// ordering before the bus is removed.
+		if (toIndex === -1) {
+			buses.push(movedBus);
+		} else {
+			buses.splice(toIndex > fromIndex ? toIndex - 1 : toIndex, 0, movedBus);
+		}
 		GodotAudio.buses = buses;
 	}
 
@@ -908,7 +913,7 @@ class Bus {
 	 */
 	static addAt(index) {
 		const newBus = GodotAudio.Bus.create();
-		if (index !== newBus.getId()) {
+		if (index >= 0 && index !== newBus.getId()) {
 			GodotAudio.Bus.move(newBus.getId(), index);
 		}
 	}
