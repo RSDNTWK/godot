@@ -1066,10 +1066,10 @@ TEST_CASE("[SceneTree][NativeStreaming][IndexedSeek][Local] MP4 I/P and reordere
 				// Explicitly attach the real producer to exercise compressed forward PCM.
 				audio->set_parameter(SNAME("_ffmpeg_start_read_ahead"), 0.5);
 				const uint64_t prefill_deadline = OS::get_singleton()->get_ticks_usec() + 2000000;
-				while (!bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))) && OS::get_singleton()->get_ticks_usec() < prefill_deadline) {
+				while (int(audio->get_parameter(SNAME("_ffmpeg_read_ahead_status"))) == AVERROR(EAGAIN) && OS::get_singleton()->get_ticks_usec() < prefill_deadline) {
 					OS::get_singleton()->delay_usec(1000);
 				}
-				REQUIRE(bool(audio->get_parameter(SNAME("_ffmpeg_read_ahead_ready"))));
+				REQUIRE(int(audio->get_parameter(SNAME("_ffmpeg_read_ahead_status"))) == 0);
 				REQUIRE(ffmpeg_start_video_read_ahead(playback, &error));
 				for (const double target : { 1.523, 2.223 }) {
 					CAPTURE(name);
@@ -1225,6 +1225,35 @@ TEST_CASE("[SceneTree][NativeStreaming][SeekReadAhead][Local] Early packet produ
 	cancel.set();
 	CHECK_FALSE(ffmpeg_seek_video_on_worker(playback, 0.1));
 	CHECK(int(playback->get(SNAME("stream_error"))) != OK);
+}
+
+TEST_CASE("[SceneTree][NativeStreaming][FiniteSeekEnd][Local] A seek past the final frame keeps the prepared image through packet EOF" * doctest::skip()) {
+	initialize_audio();
+	const String path = OS::get_singleton()->get_environment("GODOT_MEDIA_INDEXED_SEEK_DIR").path_join("bframes.mp4");
+	for (const bool early_read_ahead : { false, true }) {
+		SafeFlag cancel;
+		String error;
+		Ref<VideoStreamPlayback> playback = ffmpeg_open_video_on_worker(path, Dictionary(), &cancel, String(), Dictionary(), &error);
+		REQUIRE(playback.is_valid());
+		playback->set(SNAME("_ffmpeg_test_seek_read_ahead"), early_read_ahead);
+		playback->play();
+		playback->set_paused(true);
+
+		const double last_frame = 95.0 / 30.0;
+		const double target = playback->get_length() - 0.01;
+		REQUIRE(target > last_frame);
+		playback->seek(target);
+		REQUIRE(int(playback->get(SNAME("stream_error"))) == OK);
+		CHECK(playback->is_paused());
+		CHECK(playback->get_playback_position() == doctest::Approx(last_frame));
+		const Ref<Image> prepared = playback->get(SNAME("_ffmpeg_cpu_frame"));
+		REQUIRE(prepared.is_valid());
+		CHECK_FALSE(prepared->is_empty());
+		const bool ready = ffmpeg_start_video_read_ahead(playback, &error);
+		const CharString error_text = error.utf8();
+		INFO(error_text.get_data());
+		CHECK(ready);
+	}
 }
 
 struct PrefetchSeekCancellation {
@@ -2668,6 +2697,30 @@ TEST_CASE("[NativeStreaming][PacketReadAhead] Selected packets retain FIFO order
 		}
 		CHECK(reader.read(packet.packet) == terminal);
 		CHECK(reader.get_terminal_error() == terminal);
+	}
+}
+
+TEST_CASE("[NativeStreaming][PacketReadAhead] Startup reports EOF only after any queued packets can be consumed") {
+	for (int selected_stream : { 0, 1 }) {
+		PacketReadFixture fixture;
+		fixture.total = 1;
+		fixture.allowed.set(0);
+		FFmpegPacketReader reader;
+		PacketOwner packet;
+		REQUIRE(packet.packet);
+		REQUIRE(reader.start_for_test(PacketReadFixture::read, &fixture, selected_stream, { 1, 1024 }) == OK);
+		REQUIRE(wait_packet_calls(fixture, 1));
+		CHECK(reader.get_prefill_status() == AVERROR(EAGAIN));
+
+		// Release a final packet and EOF together after the startup poll saw an
+		// empty queue. A selected packet is sufficient to start a short input.
+		fixture.allowed.set(1);
+		REQUIRE(wait_packet_condition(reader, true));
+		if (selected_stream == 0) {
+			CHECK(reader.get_prefill_status() == 0);
+			REQUIRE(reader.read(packet.packet) == 0);
+		}
+		CHECK(reader.get_prefill_status() == AVERROR_EOF);
 	}
 }
 

@@ -877,12 +877,14 @@ public:
 		if (p_name == SNAME("_ffmpeg_dvr_input_start")) {
 			return file_io.get_dvr_input_start();
 		}
-		if (p_name == SNAME("_ffmpeg_read_ahead_ready")) {
-			return packet_reader.is_started() && packet_reader.has_prefill(read_ahead_prefill_seconds);
+		if (p_name == SNAME("_ffmpeg_read_ahead_status")) {
+			return packet_reader.is_started() ? packet_reader.get_prefill_status(read_ahead_prefill_seconds) : AVERROR(EAGAIN);
 		}
+#ifdef FFMPEG_TESTS_ENABLED
 		if (p_name == SNAME("_ffmpeg_read_ahead_error")) {
 			return packet_reader.is_started() ? packet_reader.get_terminal_error() : (failed ? AVERROR(EIO) : 0);
 		}
+#endif
 		if (p_name == SNAME("_ffmpeg_packet_waiting")) {
 			return packet_waiting;
 		}

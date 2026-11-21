@@ -1029,18 +1029,24 @@ public:
 		if (audio_read_ahead) {
 			audio_playback->set_parameter(SNAME("_ffmpeg_start_read_ahead"), minimum_prefill);
 		}
+		// Finite seek preroll can consume all compressed packets while preparing
+		// the final image and audio tail. There is then nothing left to prefill.
+		const bool seek_image_prepared = !live_hls && length > 0.0 && seek_target > 0.0 && !seek_preroll && decoded_image.is_valid();
 		const uint64_t deadline = OS::get_singleton()->get_ticks_usec() + 30000000;
 		while (!network_cancel->is_set()) {
-			const bool video_ready = packet_reader.has_prefill(minimum_prefill);
-			const bool audio_ready = !audio_read_ahead || bool(audio_playback->get_parameter(SNAME("_ffmpeg_read_ahead_ready")));
-			if (video_ready && audio_ready) {
+			const int video_status = packet_reader.get_prefill_status(minimum_prefill);
+			const int audio_status = audio_read_ahead ? int(audio_playback->get_parameter(SNAME("_ffmpeg_read_ahead_status"))) : 0;
+			const bool video_ready = video_status == 0 || (seek_image_prepared && video_status == AVERROR_EOF);
+			const bool audio_ready = audio_status == 0 || (seek_image_prepared && audio_status == AVERROR_EOF);
+			const bool audio_failed = audio_read_ahead && int(audio_playback->get_parameter(SNAME("stream_error"))) != OK;
+			if (video_ready && audio_ready && !audio_failed) {
 				print_verbose(vformat("FFmpeg: video/audio packet prefill completed in %d ms.", (OS::get_singleton()->get_ticks_usec() + 30000000 - deadline) / 1000));
 				return true;
 			}
-			if (!video_ready && packet_reader.get_terminal_error() < 0) {
-				return _open_failed(r_error, vformat("Remote video packet read-ahead ended before buffering (FFmpeg error %d).", packet_reader.get_terminal_error()));
+			if (!video_ready && video_status != AVERROR(EAGAIN)) {
+				return _open_failed(r_error, vformat("Remote video packet read-ahead ended before buffering (FFmpeg error %d).", video_status));
 			}
-			if (audio_read_ahead && (int(audio_playback->get_parameter(SNAME("stream_error"))) != OK || (!audio_ready && int(audio_playback->get_parameter(SNAME("_ffmpeg_read_ahead_error"))) < 0))) {
+			if (audio_failed || (!audio_ready && audio_status != AVERROR(EAGAIN))) {
 				return _open_failed(r_error, "Remote audio packet read-ahead failed before buffering. " + String(audio_playback->get_parameter(SNAME("_ffmpeg_error_message"))));
 			}
 			if (OS::get_singleton()->get_ticks_usec() >= deadline) {
@@ -1329,7 +1335,15 @@ public:
 				continue;
 			}
 			if (seek_preroll && frame_position < seek_target) {
-				av_frame_unref(frame);
+				if (!preparing_live_start && !live_hls && length > 0.0 && seek_target <= length && seek_target - frame_position <= 0.1) {
+					// The container can end just after its last video timestamp.
+					// Keep one candidate within the existing seek tolerance.
+					av_frame_unref(late_frame);
+					av_frame_move_ref(late_frame, frame);
+					late_frame_position = frame_position;
+				} else {
+					av_frame_unref(frame);
+				}
 				continue;
 			}
 			const bool first_seek_frame = seek_preroll;
@@ -1372,6 +1386,9 @@ public:
 			av_frame_move_ref(frame, late_frame);
 			frame_position = late_frame_position;
 			frame_ready = true;
+			if (demux_eof) {
+				seek_preroll = false;
+			}
 		}
 		if (!frame_ready) {
 			return;

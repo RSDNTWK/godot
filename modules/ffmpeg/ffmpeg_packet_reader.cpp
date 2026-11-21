@@ -221,16 +221,16 @@ int FFmpegPacketReader::read(AVPacket *r_packet) {
 	return 0;
 }
 
-bool FFmpegPacketReader::has_prefill(double p_seconds) const {
+int FFmpegPacketReader::get_prefill_status(double p_seconds) const {
 	MutexLock lock(mutex);
 	if (count == 0) {
-		return false;
+		return terminal_error < 0 ? terminal_error : AVERROR(EAGAIN);
 	}
 	if (capacity_pressure || count == MAX_PACKETS || queued_bytes == MAX_BYTES || terminal_error < 0) {
-		return true;
+		return 0;
 	}
 	if (!std::isfinite(p_seconds) || p_seconds < 0.0) {
-		return false;
+		return AVERROR(EAGAIN);
 	}
 	bool found_time = false;
 	double first = 0.0;
@@ -248,7 +248,7 @@ bool FFmpegPacketReader::has_prefill(double p_seconds) const {
 		}
 		found_time = true;
 	}
-	return found_time && last - first >= p_seconds;
+	return found_time && last - first >= p_seconds ? 0 : AVERROR(EAGAIN);
 }
 
 int FFmpegPacketReader::get_terminal_error() const {

@@ -99,7 +99,9 @@ public:
 	bool is_started() const { return worker.is_started(); }
 	// Nonblocking: packet, EAGAIN while empty/running, then EOF/error after drain.
 	int read(AVPacket *r_packet);
-	bool has_prefill(double p_seconds = 6.0) const;
+	// Report readiness and a terminal result from the same queue snapshot.
+	int get_prefill_status(double p_seconds = 6.0) const;
+	bool has_prefill(double p_seconds = 6.0) const { return get_prefill_status(p_seconds) == 0; }
 	int get_terminal_error() const;
 	// A finite seek can finish the current bounded read instead of aborting a
 	// partially parsed container packet. Destruction/cancellation still abort IO.
