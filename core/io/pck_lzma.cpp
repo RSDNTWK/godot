@@ -33,9 +33,9 @@
 #include <cstring>
 
 extern "C" {
-#include <thirdparty/lzma2605/C/7zAlloc.h>
-#include <thirdparty/lzma2605/C/Lzma2Dec.h>
-#include <thirdparty/lzma2605/C/Lzma2Enc.h>
+#include <thirdparty/lzma2606/C/7zAlloc.h>
+#include <thirdparty/lzma2606/C/Lzma2Dec.h>
+#include <thirdparty/lzma2606/C/Lzma2Enc.h>
 }
 
 namespace {

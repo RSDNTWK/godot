@@ -432,7 +432,7 @@ Copyright: yt-dlp-ejs contributors
  2015, David Bonnet
 License: Unlicense and Expat and ISC
 
-Files: thirdparty/lzma2605/*
+Files: thirdparty/lzma2606/*
 Comment: LZMA SDK (7-Zip SDK)
 Copyright: Igor Pavlov
 License: Public-Domain

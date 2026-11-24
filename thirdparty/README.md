@@ -673,16 +673,19 @@ Patches:
 See `linuxbsd_headers/README.md`.
 
 
-## lzma2605
+## lzma2606
 
 - Upstream: https://www.7-zip.org/sdk.html
-- Version: 26.05 (2026-10-21)
+- Version: 26.06 (2026-11-06)
 - License: Public Domain
 
 Files extracted from upstream source:
 
-- `C/` to `thirdparty/lzma2605/C/`, including utility sources.
-- `DOC/` to `thirdparty/lzma2605/DOC/`.
+- `C/` to `thirdparty/lzma2606/C/`, including utility sources.
+- `DOC/` to `thirdparty/lzma2606/DOC/`.
+
+The local `LzmaEnc.c` change writes the dictionary size one byte at a time
+to avoid an unaligned typed store in the properties buffer.
 
 Only the LZMA2 source list in `core/SCsub` is compiled into Godot.
 
